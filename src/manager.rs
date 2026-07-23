@@ -1,0 +1,597 @@
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    fs,
+    os::unix::fs::{FileTypeExt, PermissionsExt, symlink},
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    sync::{mpsc, oneshot},
+};
+use tracing::{info, warn};
+
+use crate::{
+    config::{LoadedService, RestartPolicy, load_service, manager_environment},
+    paths::ServedPaths,
+    protocol::{
+        Request, Response, ServiceInfo, ServiceState, Target, framed, receive_json, send_json,
+    },
+    worker::{WorkerCommand, WorkerEvent, spawn_service},
+};
+
+const OUTPUT_LIMIT: usize = 64 * 1024;
+
+pub enum ManagerCommand {
+    Request {
+        request: Request,
+        reply: oneshot::Sender<std::result::Result<Response, String>>,
+    },
+    PrepareAttach {
+        name: String,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
+    Attach {
+        name: String,
+        stream: UnixStream,
+    },
+}
+
+struct ManagedService {
+    definition: LoadedService,
+    state: ServiceState,
+    pid: Option<u32>,
+    worker: Option<mpsc::Sender<WorkerCommand>>,
+    attach_active: bool,
+    output: RingBuffer,
+}
+
+struct RingBuffer {
+    bytes: VecDeque<u8>,
+    limit: usize,
+}
+
+impl RingBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: VecDeque::with_capacity(limit.min(8192)),
+            limit,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.bytes.push_back(*byte);
+        }
+        while self.bytes.len() > self.limit {
+            self.bytes.pop_front();
+        }
+    }
+
+    fn display(&self) -> String {
+        let raw: Vec<u8> = self.bytes.iter().copied().collect();
+        let text = String::from_utf8_lossy(&raw);
+        let mut cleaned = String::with_capacity(text.len());
+        for character in text.chars() {
+            if character == '\n'
+                || character == '\r'
+                || character == '\t'
+                || !character.is_control()
+            {
+                cleaned.push(character);
+            }
+        }
+        let max_chars = 2000;
+        if cleaned.chars().count() > max_chars {
+            cleaned
+                .chars()
+                .skip(cleaned.chars().count() - max_chars)
+                .collect()
+        } else {
+            cleaned
+        }
+    }
+}
+
+struct ManagerState {
+    paths: ServedPaths,
+    base_environment: BTreeMap<String, String>,
+    events: mpsc::UnboundedSender<WorkerEvent>,
+    services: HashMap<String, ManagedService>,
+}
+
+impl ManagerState {
+    fn new(
+        paths: ServedPaths,
+        base_environment: BTreeMap<String, String>,
+        events: mpsc::UnboundedSender<WorkerEvent>,
+    ) -> Self {
+        Self {
+            paths,
+            base_environment,
+            events,
+            services: HashMap::new(),
+        }
+    }
+
+    async fn restore_enabled(&mut self) {
+        let directory = self.paths.registry_dir();
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                warn!(path = %directory.display(), %error, "cannot scan enabled registry");
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let link = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let target = match fs::canonicalize(&link) {
+                Ok(target) => target,
+                Err(error) => {
+                    warn!(service = %name, %error, "ignoring broken enable link");
+                    continue;
+                }
+            };
+            match load_service(&target, &self.base_environment) {
+                Ok(service) if service.config.name == name => {
+                    if self.services.contains_key(&name) {
+                        warn!(service = %name, "ignoring duplicate enabled service");
+                    } else if let Err(error) = self.start_loaded(service) {
+                        warn!(service = %name, %error, "cannot start enabled service");
+                    }
+                }
+                Ok(service) => warn!(
+                    link = %name,
+                    config_name = %service.config.name,
+                    "enable link name does not match service config"
+                ),
+                Err(error) => warn!(service = %name, %error, "ignoring invalid enabled service"),
+            }
+        }
+    }
+
+    fn start_loaded(&mut self, service: LoadedService) -> Result<()> {
+        let name = service.config.name.clone();
+        if let Some(existing) = self.services.get(&name) {
+            if existing.worker.is_some() {
+                bail!("service {name:?} is already running under the manager")
+            }
+        }
+        let worker = spawn_service(
+            service.clone(),
+            self.base_environment.clone(),
+            self.events.clone(),
+        );
+        self.services.insert(
+            name,
+            ManagedService {
+                definition: service,
+                state: ServiceState::Starting,
+                pid: None,
+                worker: Some(worker),
+                attach_active: false,
+                output: RingBuffer::new(OUTPUT_LIMIT),
+            },
+        );
+        Ok(())
+    }
+
+    async fn handle_request(&mut self, request: Request) -> std::result::Result<Response, String> {
+        match request {
+            Request::Hello { .. } => Err("handshake must be the first protocol message".to_owned()),
+            Request::List => Ok(Response::Services {
+                services: self.list_services(),
+            }),
+            Request::Enable { directory } => self.enable(PathBuf::from(directory)).await,
+            Request::Disable { target } => self.disable(target).await,
+            Request::Restart { target } => self.restart(target).await,
+            Request::Attach { .. } => Err("attach requires a raw socket handoff".to_owned()),
+        }
+    }
+
+    async fn enable(&mut self, directory: PathBuf) -> std::result::Result<Response, String> {
+        let service =
+            load_service(&directory, &self.base_environment).map_err(|error| error.to_string())?;
+        let link = self.paths.registry_dir().join(&service.config.name);
+        if fs::symlink_metadata(&link).is_ok() {
+            return Err(format!(
+                "service name {:?} is already enabled",
+                service.config.name
+            ));
+        }
+        symlink(&service.directory, &link)
+            .map_err(|error| format!("create enable link {}: {error}", link.display()))?;
+        self.start_loaded(service)
+            .map_err(|error| error.to_string())?;
+        info!(path = %directory.display(), "service enabled");
+        Ok(Response::Ok)
+    }
+
+    async fn disable(&mut self, target: Target) -> std::result::Result<Response, String> {
+        let (name, _directory) = self.resolve_target(&target)?;
+        let link = self.paths.registry_dir().join(&name);
+        let worker = self
+            .services
+            .get(&name)
+            .and_then(|service| service.worker.clone());
+        if let Some(worker) = worker {
+            let (reply, result) = stop_worker(worker).await;
+            result?;
+            reply?;
+        }
+        fs::remove_file(&link).map_err(|error| format!("remove enable link: {error}"))?;
+        self.services.remove(&name);
+        info!(service = %name, "service disabled");
+        Ok(Response::Ok)
+    }
+
+    async fn restart(&mut self, target: Target) -> std::result::Result<Response, String> {
+        let (name, directory) = self.resolve_target(&target)?;
+        let service =
+            load_service(&directory, &self.base_environment).map_err(|error| error.to_string())?;
+        if service.config.name != name {
+            return Err(format!(
+                "restart cannot rename enabled service from {name:?} to {:?}; disable it first",
+                service.config.name
+            ));
+        }
+        let worker = self
+            .services
+            .get(&name)
+            .and_then(|managed| managed.worker.clone());
+        if let Some(worker) = worker {
+            let (reply, result) = restart_worker(worker, service.clone()).await;
+            result?;
+            reply?;
+            if let Some(managed) = self.services.get_mut(&name) {
+                managed.definition = service;
+                managed.state = ServiceState::Starting;
+                managed.pid = None;
+            }
+        } else {
+            self.start_loaded(service)
+                .map_err(|error| error.to_string())?;
+        }
+        info!(service = %name, "service restarted");
+        Ok(Response::Ok)
+    }
+
+    fn resolve_target(&self, target: &Target) -> std::result::Result<(String, PathBuf), String> {
+        match target {
+            Target::Name(name) => {
+                validate_target_name(name)?;
+                let link = self.paths.registry_dir().join(name);
+                if fs::symlink_metadata(&link).is_err() {
+                    return Err(format!("service {name:?} is not enabled"));
+                }
+                let directory = fs::canonicalize(link).map_err(|error| error.to_string())?;
+                Ok((name.clone(), directory))
+            }
+            Target::Directory(directory) => {
+                let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
+                let service = load_service(&directory, &self.base_environment)
+                    .map_err(|error| error.to_string())?;
+                let link = self.paths.registry_dir().join(&service.config.name);
+                let linked = fs::canonicalize(&link).map_err(|error| error.to_string())?;
+                if linked != directory {
+                    return Err(format!("service {:?} is not enabled", service.config.name));
+                }
+                Ok((service.config.name, directory))
+            }
+        }
+    }
+
+    fn prepare_attach(&mut self, name: &str) -> std::result::Result<(), String> {
+        let Some(service) = self.services.get_mut(name) else {
+            return Err(format!("service {name:?} is not enabled"));
+        };
+        if !service.definition.config.tty {
+            return Err(format!("service {name:?} does not use a PTY"));
+        }
+        if service.worker.is_none() {
+            return Err(format!("service {name:?} is not running"));
+        }
+        if service.attach_active {
+            return Err(format!("service {name:?} already has an attach client"));
+        }
+        service.attach_active = true;
+        Ok(())
+    }
+
+    async fn handle_attach(&mut self, name: String, stream: UnixStream) {
+        let Some(service) = self.services.get(&name) else {
+            return;
+        };
+        let Some(worker) = service.worker.clone() else {
+            return;
+        };
+        if worker.send(WorkerCommand::Attach { stream }).await.is_err() {
+            if let Some(service) = self.services.get_mut(&name) {
+                service.attach_active = false;
+            }
+        }
+    }
+
+    fn handle_event(&mut self, event: WorkerEvent) {
+        match event {
+            WorkerEvent::Starting { name } => {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.state = ServiceState::Starting;
+                    service.pid = None;
+                }
+            }
+            WorkerEvent::Started { name, pid, tty: _ } => {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.state = ServiceState::Running;
+                    service.pid = Some(pid);
+                }
+            }
+            WorkerEvent::Output { name, bytes } => {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.output.push(&bytes);
+                }
+            }
+            WorkerEvent::Exited {
+                name,
+                code: _,
+                success,
+            } => {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.pid = None;
+                    service.state = if service.definition.config.restart.should_restart(success) {
+                        ServiceState::Restarting
+                    } else {
+                        ServiceState::Stopped
+                    };
+                }
+            }
+            WorkerEvent::Restarting { name, delay: _ } => {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.state = ServiceState::Restarting;
+                    service.pid = None;
+                }
+            }
+            WorkerEvent::Stopped { name } => {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.state = ServiceState::Stopped;
+                    service.pid = None;
+                    service.worker = None;
+                    service.attach_active = false;
+                }
+            }
+            WorkerEvent::Failed { name, error } => {
+                warn!(service = %name, %error, "service worker failure");
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.state = ServiceState::Failed;
+                    service.pid = None;
+                }
+            }
+            WorkerEvent::AttachChanged { name, active } => {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.attach_active = active;
+                }
+            }
+        }
+    }
+
+    fn list_services(&self) -> Vec<ServiceInfo> {
+        let mut services: Vec<_> = self
+            .services
+            .values()
+            .map(|service| ServiceInfo {
+                name: service.definition.config.name.clone(),
+                directory: service.definition.directory.display().to_string(),
+                state: service.state.clone(),
+                pid: service.pid,
+                tty: service.definition.config.tty,
+                restart: restart_name(service.definition.config.restart).to_owned(),
+                attach_active: service.attach_active,
+                output_tail: service.output.display(),
+            })
+            .collect();
+        services.sort_by(|left, right| left.name.cmp(&right.name));
+        services
+    }
+}
+
+async fn stop_worker(
+    worker: mpsc::Sender<WorkerCommand>,
+) -> (
+    std::result::Result<(), String>,
+    std::result::Result<(), String>,
+) {
+    let (reply, receiver) = oneshot::channel();
+    if worker.send(WorkerCommand::Stop { reply }).await.is_err() {
+        return (
+            Ok(()),
+            Err("service worker is no longer available".to_owned()),
+        );
+    }
+    match receiver.await {
+        Ok(result) => (result, Ok(())),
+        Err(error) => (Ok(()), Err(error.to_string())),
+    }
+}
+
+async fn restart_worker(
+    worker: mpsc::Sender<WorkerCommand>,
+    service: LoadedService,
+) -> (
+    std::result::Result<(), String>,
+    std::result::Result<(), String>,
+) {
+    let (reply, receiver) = oneshot::channel();
+    if worker
+        .send(WorkerCommand::Restart { service, reply })
+        .await
+        .is_err()
+    {
+        return (
+            Ok(()),
+            Err("service worker is no longer available".to_owned()),
+        );
+    }
+    match receiver.await {
+        Ok(result) => (result, Ok(())),
+        Err(error) => (Ok(()), Err(error.to_string())),
+    }
+}
+
+fn validate_target_name(name: &str) -> std::result::Result<(), String> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name
+            .chars()
+            .any(|character| !character.is_ascii_alphanumeric() && !"._-".contains(character))
+    {
+        return Err(format!("invalid service name {name:?}"));
+    }
+    Ok(())
+}
+
+fn restart_name(policy: RestartPolicy) -> &'static str {
+    match policy {
+        RestartPolicy::Never => "never",
+        RestartPolicy::OnFailure => "on-failure",
+        RestartPolicy::Always => "always",
+    }
+}
+
+pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
+    fs::create_dir_all(paths.registry_dir()).context("create served enable registry")?;
+    fs::create_dir_all(&paths.runtime_dir).context("create served runtime directory")?;
+    let socket_path = paths.socket_path();
+    if let Ok(metadata) = fs::symlink_metadata(&socket_path) {
+        if metadata.file_type().is_socket() {
+            fs::remove_file(&socket_path).context("remove stale manager socket")?;
+        } else {
+            bail!(
+                "manager socket path is not a socket: {}",
+                socket_path.display()
+            );
+        }
+    }
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("bind manager socket {}", socket_path.display()))?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+        .context("set manager socket permissions")?;
+
+    let (events, mut event_receiver) = mpsc::unbounded_channel();
+    let (commands, mut command_receiver) = mpsc::channel(64);
+    let mut state = ManagerState::new(paths, manager_environment(), events);
+    state.restore_enabled().await;
+    info!("served manager is ready");
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.context("accept manager connection")?;
+                let commands = commands.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_connection(stream, commands).await {
+                        warn!(%error, "manager connection ended with error");
+                    }
+                });
+            }
+            Some(command) = command_receiver.recv() => match command {
+                ManagerCommand::Request { request, reply } => {
+                    let result = state.handle_request(request).await;
+                    let _ = reply.send(result);
+                }
+                ManagerCommand::PrepareAttach { name, reply } => {
+                    let _ = reply.send(state.prepare_attach(&name));
+                }
+                ManagerCommand::Attach { name, stream } => state.handle_attach(name, stream).await,
+            },
+            Some(event) = event_receiver.recv() => state.handle_event(event),
+            else => break,
+        }
+    }
+    let _ = fs::remove_file(socket_path);
+    Ok(())
+}
+
+async fn handle_connection(
+    stream: UnixStream,
+    commands: mpsc::Sender<ManagerCommand>,
+) -> Result<()> {
+    let mut frame = framed(stream);
+    let hello = receive_json::<Request>(&mut frame).await?;
+    match hello {
+        Request::Hello { version } if version == crate::protocol::PROTOCOL_VERSION => {
+            send_json(
+                &mut frame,
+                &Response::Hello {
+                    version: crate::protocol::PROTOCOL_VERSION,
+                },
+            )
+            .await?;
+        }
+        Request::Hello { version } => {
+            send_json(
+                &mut frame,
+                &Response::Error {
+                    message: format!("unsupported protocol version {version}"),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        _ => {
+            send_json(
+                &mut frame,
+                &Response::Error {
+                    message: "protocol handshake required".to_owned(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    loop {
+        let request = match receive_json::<Request>(&mut frame).await {
+            Ok(request) => request,
+            Err(_) => return Ok(()),
+        };
+        if let Request::Attach { name } = request {
+            let (reply, receiver) = oneshot::channel();
+            commands
+                .send(ManagerCommand::PrepareAttach {
+                    name: name.clone(),
+                    reply,
+                })
+                .await
+                .context("prepare attach request")?;
+            if let Err(message) = receiver.await.context("receive attach response")? {
+                send_json(&mut frame, &Response::Error { message }).await?;
+                return Ok(());
+            }
+            send_json(&mut frame, &Response::Ok).await?;
+            let stream = frame.into_inner();
+            commands
+                .send(ManagerCommand::Attach { name, stream })
+                .await
+                .context("send attach request to manager")?;
+            return Ok(());
+        }
+        let (reply, receiver) = oneshot::channel();
+        commands
+            .send(ManagerCommand::Request { request, reply })
+            .await
+            .context("send command to manager")?;
+        let response = receiver.await.context("receive manager response")?;
+        let response = match response {
+            Ok(response) => response,
+            Err(message) => Response::Error { message },
+        };
+        send_json(&mut frame, &response).await?;
+    }
+}
+
+pub async fn dispatch(socket_path: &Path, request: Request) -> Result<Response> {
+    crate::protocol::request(socket_path, request).await
+}

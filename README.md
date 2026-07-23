@@ -41,6 +41,25 @@ uninstall.sh
 安装二进制、user unit、`daemon-reload`、启用服务和设置 linger；Rust 程序不会
 调用 `systemctl`、`loginctl` 或 D-Bus。
 
+## Tag 发布
+
+推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并
+构建 Linux amd64/glibc 产物。例如版本 `0.1.0` 使用 tag `v0.1.0`，Release 会
+包含：
+
+```text
+served-linux-amd64-v0.1.0-binary
+served-linux-amd64-v0.1.0-binary.sha256
+served-linux-amd64-v0.1.0-full.tar.gz
+served-linux-amd64-v0.1.0-full.tar.gz.sha256
+```
+
+`binary` 是只包含可执行文件的产物；`full.tar.gz` 是包含 `served`、
+`served.service`、`install.sh`、`uninstall.sh` 和本 README 的完整安装包。每个
+产物都有自己的 SHA-256 sidecar 文件，文件名是在原文件名后追加 `.sha256`。
+
+当前 workflow 只构建 Linux amd64/glibc，不构建 ARM、musl 或其他操作系统。
+
 ## 服务目录
 
 在服务目录中运行 `served edit`，编辑器会创建 `.served.json` 和 `.env` 模板。
@@ -108,4 +127,3 @@ cargo build --release
 
 核心需求记录在 [REQUIREMENTS.md](REQUIREMENTS.md)，技术决策记录在
 [TECH-STACK.md](TECH-STACK.md)。
-

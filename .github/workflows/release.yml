@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Linux amd64 release
+    runs-on: ubuntu-24.04
+    env:
+      RUST_TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ env.RUST_TARGET }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ env.RUST_TARGET }}-
+
+      - name: Verify release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag must use v<semver>, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          tag_version="${RELEASE_TAG#v}"
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "served") | .version')"
+          if [[ -z "$package_version" || "$tag_version" != "$package_version" ]]; then
+            echo "tag version $tag_version does not match Cargo version $package_version" >&2
+            exit 1
+          fi
+
+          {
+            echo "RELEASE_TAG=$RELEASE_TAG"
+            echo "RELEASE_VERSION=$package_version"
+          } >> "$GITHUB_ENV"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: |
+          rustup target add "$RUST_TARGET"
+          cargo build --release --locked --target "$RUST_TARGET"
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dist="${GITHUB_WORKSPACE}/dist"
+          binary_asset="served-linux-amd64-${RELEASE_TAG}-binary"
+          full_asset="served-linux-amd64-${RELEASE_TAG}-full.tar.gz"
+          full_root="${dist}/served-linux-amd64-${RELEASE_TAG}-full"
+
+          rm -rf "$dist"
+          mkdir -p "$dist" "$full_root"
+
+          install -Dm755 \
+            "target/${RUST_TARGET}/release/served" \
+            "${dist}/${binary_asset}"
+
+          install -Dm755 \
+            "target/${RUST_TARGET}/release/served" \
+            "${full_root}/served"
+          install -Dm644 systemd/served.service "${full_root}/served.service"
+          install -Dm755 scripts/install.sh "${full_root}/install.sh"
+          install -Dm755 scripts/uninstall.sh "${full_root}/uninstall.sh"
+          install -Dm644 README.md "${full_root}/README.md"
+
+          tar -C "$dist" -czf "${dist}/${full_asset}" "$(basename "$full_root")"
+
+          (
+            cd "$dist"
+            sha256sum "$binary_asset" > "${binary_asset}.sha256"
+            sha256sum "$full_asset" > "${full_asset}.sha256"
+          )
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          binary_asset="dist/served-linux-amd64-${RELEASE_TAG}-binary"
+          binary_checksum="${binary_asset}.sha256"
+          full_asset="dist/served-linux-amd64-${RELEASE_TAG}-full.tar.gz"
+          full_checksum="${full_asset}.sha256"
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            "$binary_asset" \
+            "$binary_checksum" \
+            "$full_asset" \
+            "$full_checksum" \
+            --clobber

@@ -69,8 +69,13 @@ container runtime, namespace manager, or resource policy engine.
 
 ## Packaging
 
-- Release artifacts are offline packages containing the glibc-linked binary,
-  the user unit, `install.sh`, and `uninstall.sh`.
+- Pushing a matching `v<semver>` tag runs the GitHub release workflow.
+- The workflow targets Linux amd64 with glibc and publishes a binary-only asset
+  plus a full offline installation package.
+- Each asset has its own SHA-256 sidecar named by appending `.sha256` to the
+  original filename.
+- The full package contains the glibc-linked binary, the user unit,
+  `install.sh`, `uninstall.sh`, and `README.md`.
 - Shell scripts own user-unit installation, `daemon-reload`, enable/start, and
   linger setup. Rust does not shell out to `systemctl`, `loginctl`, or D-Bus.
 - V1 targets Linux with glibc first. Other platforms are not a compatibility
@@ -81,4 +86,3 @@ container runtime, namespace manager, or resource policy engine.
 The dependency set is intentionally conventional and mature. New crates need
 to remove meaningful complexity or satisfy a concrete boundary; they should
 not be added only to wrap a few lines of local code.
-

@@ -31,6 +31,8 @@ enum Command {
     Disable { name: Option<String> },
     /// Restart the current service, or an enabled service by name.
     Restart { name: Option<String> },
+    /// Attach directly to the current service, or an enabled service by name.
+    Attach { name: Option<String> },
     /// Print enabled services known to the manager.
     List,
 }
@@ -72,6 +74,7 @@ async fn main() -> Result<()> {
                     let target = client::target(name, std::env::current_dir()?);
                     client::expect_ok(&paths, Request::Restart { target }).await
                 }
+                Some(Command::Attach { name }) => tui::attach(paths, name).await,
                 Some(Command::List) => print_list(&paths).await,
                 Some(Command::Edit) => unreachable!("edit is handled above"),
             }
@@ -108,5 +111,26 @@ fn format_state(state: &served::protocol::ServiceState) -> &'static str {
         served::protocol::ServiceState::Restarting => "restarting",
         served::protocol::ServiceState::Stopped => "stopped",
         served::protocol::ServiceState::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_accepts_an_optional_name() {
+        let without_name = Cli::try_parse_from(["served", "attach"]).expect("parse attach");
+        assert!(matches!(
+            without_name.command,
+            Some(Command::Attach { name: None })
+        ));
+
+        let with_name =
+            Cli::try_parse_from(["served", "attach", "api"]).expect("parse named attach");
+        assert!(matches!(
+            with_name.command,
+            Some(Command::Attach { name: Some(name) }) if name == "api"
+        ));
     }
 }

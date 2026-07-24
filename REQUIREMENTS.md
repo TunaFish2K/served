@@ -127,6 +127,18 @@ stops and starts the service. There is no separate `reload` operation.
 Validation must complete before the old process is stopped. Invalid JSON or
 `.env` leaves the currently running service unchanged and reports the error.
 
+### `served attach [name]`
+
+Attaches directly to a running PTY service without opening the service-management
+TUI. With no name, the current directory is canonicalized and matched against an
+enabled service directory. With a name, the enabled service can be attached from
+any directory.
+
+The target must be running and have `tty: true`; pipe services are rejected. The
+command uses the current terminal in raw mode and restores terminal mode when the
+session ends. `Ctrl+C` detaches from the session and is not forwarded to the
+service. Detaching does not stop or disable the service.
+
 ### `served list`
 
 Lists services currently running under the manager.
@@ -150,12 +162,15 @@ Lists services currently running under the manager.
 
 - Services use a PTY by default.
 - A service may opt out with `tty: false`.
-- Attach enters a full-screen terminal session and forwards input to the PTY.
-- Detach returns to the service TUI without stopping the service.
+- TUI attach enters a full-screen terminal session; direct CLI attach uses the
+  current terminal. Both forward input to the PTY.
+- TUI attach returns to the service TUI without stopping the service; direct CLI
+  attach returns to the shell without opening the TUI.
 - Only one client may hold attach write access at a time.
 - A second attach attempt is rejected rather than sharing input.
-- `Ctrl+C` in the service-management TUI exits the TUI client; it does not stop
-  managed services.
+- `Ctrl+C` in an attach session detaches instead of being sent to the service.
+- `Ctrl+C` in the service-management TUI outside an attach session exits the TUI
+  client; it does not stop managed services.
 
 ## TUI
 
@@ -303,3 +318,7 @@ it does not silently start an alternate in-process manager.
     `Esc` outside a popup cancels the entire edit.
 16. The editor focus wraps through `name`, `command`, `TTY`, `restart`, and `.env`
     in both Tab directions.
+17. `served attach <name>` enters a running PTY service without opening the TUI;
+    `Ctrl-C` exits the session while leaving the service running.
+18. `served attach` resolves the current directory to its enabled service, and
+    rejects an unenabled directory or a `tty: false` service.

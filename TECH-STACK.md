@@ -61,6 +61,12 @@ container runtime, namespace manager, or resource policy engine.
   order is also the keyboard focus order. Enter opens an in-memory popup for a
   choice; Enter applies it and Esc discards it. Tab and Shift-Tab move through
   all five fields.
+- `served attach [name]` reuses the existing name-based raw socket handoff. An
+  omitted name is resolved client-side from the canonical current directory and
+  the manager's enabled-service list. Direct attach uses crossterm raw mode
+  without alternate-screen rendering and restores the terminal on exit.
+- The shared attach relay treats `Ctrl-C` as detach for both direct and TUI
+  attach; it is not forwarded to the service.
 
 ## Errors, Logging, and Tests
 

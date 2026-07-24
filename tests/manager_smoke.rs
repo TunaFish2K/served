@@ -1,10 +1,12 @@
 use std::{
     fs,
+    io::{Read, Write},
     path::Path,
     process::{Child, Command},
     time::Duration,
 };
 
+use portable_pty::{Child as PtyChild, CommandBuilder, PtySize, native_pty_system};
 use served::{
     client,
     paths::ServedPaths,
@@ -196,6 +198,130 @@ async fn pty_service_accepts_one_attach_session() {
     )
     .await
     .expect("disable");
+}
+
+#[tokio::test]
+async fn direct_attach_supports_name_and_current_directory() {
+    let root = tempdir().expect("tempdir");
+    let config_home = root.path().join("config");
+    let runtime_dir = root.path().join("runtime");
+    let service_dir = root.path().join("service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  "name": "direct-attach",
+  "command": "while true; do printf 'attach-ready\\n'; sleep 1; done",
+  "tty": true,
+  "restart": "never"
+}
+"#,
+    )
+    .expect("config");
+    fs::write(service_dir.join(".env"), "").expect("env");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("XDG_CONFIG_HOME", &paths.config_home)
+        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable");
+    wait_for_state(&paths, "direct-attach", ServiceState::Running).await;
+
+    run_direct_attach(&paths, &service_dir, Some("direct-attach"));
+    wait_for_state(&paths, "direct-attach", ServiceState::Running).await;
+    run_direct_attach(&paths, &service_dir, None);
+    wait_for_state(&paths, "direct-attach", ServiceState::Running).await;
+
+    client::expect_ok(
+        &paths,
+        Request::Disable {
+            target: Target::Name("direct-attach".to_owned()),
+        },
+    )
+    .await
+    .expect("disable");
+}
+
+fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open test pty");
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_served"));
+    command.arg("attach");
+    if let Some(name) = name {
+        command.arg(name);
+    }
+    command.env("XDG_CONFIG_HOME", &paths.config_home);
+    command.env("XDG_RUNTIME_DIR", &paths.runtime_dir);
+    command.cwd(directory);
+    let mut child = pair.slave.spawn_command(command).expect("spawn attach");
+    drop(pair.slave);
+
+    let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
+    let mut writer = pair.master.take_writer().expect("take pty writer");
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let reader_thread = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => return,
+                Ok(count) => {
+                    output.extend_from_slice(&buffer[..count]);
+                    if output
+                        .windows(b"attach-ready".len())
+                        .any(|window| window == b"attach-ready")
+                    {
+                        let _ = ready_sender.send(());
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    ready_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("wait for attach session");
+
+    writer.write_all(&[0x03]).expect("send Ctrl-C detach");
+    writer.flush().expect("flush detach");
+    let status = wait_for_pty_child(&mut child);
+    assert!(status.success(), "attach exited unsuccessfully: {status:?}");
+    reader_thread.join().expect("join pty reader");
+}
+
+fn wait_for_pty_child(child: &mut Box<dyn PtyChild + Send + Sync>) -> portable_pty::ExitStatus {
+    for _ in 0..250 {
+        if let Some(status) = child.try_wait().expect("poll attach child") {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    panic!("timed out waiting for attach child");
 }
 
 async fn wait_for_path(path: &Path) {

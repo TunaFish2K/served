@@ -14,6 +14,7 @@ Docker 替代的容器运行时，也不负责 root 服务、命名空间或资�
 - 默认使用 PTY，可用 `tty: false` 改用 stdout/stderr 管道。
 - `never`、`on-failure`、`always` 重启策略和指数退避。
 - PTY 服务支持 attach、detach，并限制为单个写入客户端。
+- `served attach [name]` 可绕过 TUI 直接进入 PTY 会话。
 - 全局 TUI 展示状态、最近输出、restart、disable 和随机 `tips:`。
 - 输出只保存在内存 ring buffer 中，不写入持久化日志。
 - manager 与 CLI/TUI 通过 `$XDG_RUNTIME_DIR` 下的用户 Unix socket 通信。
@@ -129,8 +130,13 @@ served edit            编辑当前目录的 .served.json 和 .env
 served enable          启用当前目录并立即运行
 served disable [name]  禁用当前服务，或按名称禁用
 served restart [name]  重启当前服务，或按名称重启
+served attach [name]   直接 attach 当前服务，或按名称 attach
 served list            列出 manager 管理的服务
 ```
+
+`served attach` 不启动服务管理 TUI。省略名称时使用当前目录对应的已启用服务；
+提供名称时可以从任意目录 attach。目标服务必须使用 PTY 且正在运行。attach 会话中
+按 `Ctrl-C` 退出 attach，服务本身不会被停止；该按键不会转发给服务。
 
 V1 不提供独立的 `start`、`stop` 或 `reload` 命令。修改配置后使用 `restart`；
 manager 会先完整校验新配置，校验失败时保留旧进程不变。启用服务后，注册链接

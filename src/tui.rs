@@ -41,6 +41,23 @@ const TIPS: &[&str] = &[
     "service output is intentionally kept in memory only",
 ];
 
+pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
+    let stream = match name {
+        Some(name) => client::attach(&paths, name).await?,
+        None => {
+            client::attach_current(
+                &paths,
+                std::env::current_dir().context("read current directory")?,
+            )
+            .await?
+        }
+    };
+    enable_raw_mode().context("enable attach raw mode")?;
+    let result = attach_session(stream).await;
+    disable_raw_mode().ok();
+    result
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorField {
     Name,
@@ -378,7 +395,7 @@ async fn attach_session(stream: UnixStream) -> Result<()> {
         tokio::select! {
             count = stdin.read(&mut input) => {
                 let count = count?;
-                if count == 0 || input[..count].contains(&0x1d) {
+                if count == 0 || input_requests_detach(&input[..count]) {
                     return Ok(());
                 }
                 socket_write.write_all(&input[..count]).await?;
@@ -393,6 +410,10 @@ async fn attach_session(stream: UnixStream) -> Result<()> {
             }
         }
     }
+}
+
+fn input_requests_detach(input: &[u8]) -> bool {
+    input.contains(&0x03)
 }
 
 pub fn edit_current(directory: &Path) -> Result<()> {
@@ -827,6 +848,13 @@ mod tests {
 
         let pipe_services = vec![service_info(false)];
         assert!(main_footer(&pipe_services, 0).contains("a attach unavailable"));
+    }
+
+    #[test]
+    fn ctrl_c_is_the_attach_detach_byte() {
+        assert!(input_requests_detach(b"output\x03"));
+        assert!(!input_requests_detach(b"output\x1d"));
+        assert!(!input_requests_detach(b"output"));
     }
 
     #[test]

@@ -33,8 +33,9 @@ use tui_textarea::{Input, TextArea};
 use crate::{
     client,
     config::{CONFIG_FILE, ENV_FILE, RestartPolicy, ServiceConfig},
+    logs::DEFAULT_CHUNK_LIMIT,
     paths::ServedPaths,
-    protocol::{Request, Response, ServiceInfo, ServiceState, Target},
+    protocol::{HistoryRecord, Request, Response, ServiceInfo, ServiceState, Target},
 };
 
 const TIPS: &[&str] = &[
@@ -42,7 +43,8 @@ const TIPS: &[&str] = &[
     "the manager starts enabled services after a user-session restart",
     "tty:false services support read-only attach",
     "restart validates the new files before stopping the old process",
-    "service output is intentionally kept in memory only",
+    "history keeps live output separate from attach",
+    "persistent logs live below the XDG state directory",
 ];
 
 pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
@@ -66,6 +68,7 @@ enum EditorField {
     Command,
     Tty,
     Restart,
+    PersistLogs,
     Env,
 }
 
@@ -75,7 +78,8 @@ impl EditorField {
             Self::Name => Self::Command,
             Self::Command => Self::Tty,
             Self::Tty => Self::Restart,
-            Self::Restart => Self::Env,
+            Self::Restart => Self::PersistLogs,
+            Self::PersistLogs => Self::Env,
             Self::Env => Self::Name,
         }
     }
@@ -86,7 +90,8 @@ impl EditorField {
             Self::Command => Self::Name,
             Self::Tty => Self::Command,
             Self::Restart => Self::Tty,
-            Self::Env => Self::Restart,
+            Self::PersistLogs => Self::Restart,
+            Self::Env => Self::PersistLogs,
         }
     }
 
@@ -95,7 +100,7 @@ impl EditorField {
             Self::Name => Some(0),
             Self::Command => Some(1),
             Self::Env => Some(2),
-            Self::Tty | Self::Restart => None,
+            Self::Tty | Self::Restart | Self::PersistLogs => None,
         }
     }
 
@@ -105,6 +110,7 @@ impl EditorField {
             Self::Command => "command",
             Self::Tty => "TTY",
             Self::Restart => "restart",
+            Self::PersistLogs => "persist logs",
             Self::Env => ENV_FILE,
         }
     }
@@ -114,13 +120,22 @@ impl EditorField {
 enum EditorPopup {
     Tty { selected: bool },
     Restart { selected: RestartPolicy },
+    PersistLogs { selected: bool },
 }
 
 impl EditorPopup {
-    fn open(field: EditorField, tty: bool, restart: RestartPolicy) -> Option<Self> {
+    fn open(
+        field: EditorField,
+        tty: bool,
+        restart: RestartPolicy,
+        persist_logs: bool,
+    ) -> Option<Self> {
         match field {
             EditorField::Tty => Some(Self::Tty { selected: tty }),
             EditorField::Restart => Some(Self::Restart { selected: restart }),
+            EditorField::PersistLogs => Some(Self::PersistLogs {
+                selected: persist_logs,
+            }),
             EditorField::Name | EditorField::Command | EditorField::Env => None,
         }
     }
@@ -129,6 +144,7 @@ impl EditorPopup {
         match self {
             Self::Tty { .. } => "select TTY",
             Self::Restart { .. } => "select restart policy",
+            Self::PersistLogs { .. } => "persist logs",
         }
     }
 
@@ -136,6 +152,7 @@ impl EditorPopup {
         match self {
             Self::Tty { .. } => 2,
             Self::Restart { .. } => 3,
+            Self::PersistLogs { .. } => 2,
         }
     }
 
@@ -146,6 +163,10 @@ impl EditorPopup {
                 _ => "Disabled",
             },
             Self::Restart { .. } => restart_name(restart_from_index(index)),
+            Self::PersistLogs { .. } => match index {
+                0 => "Enabled",
+                _ => "Disabled",
+            },
         }
     }
 
@@ -153,6 +174,7 @@ impl EditorPopup {
         match self {
             Self::Tty { selected } => usize::from(!selected),
             Self::Restart { selected } => restart_index(selected),
+            Self::PersistLogs { selected } => usize::from(!selected),
         }
     }
 
@@ -160,6 +182,7 @@ impl EditorPopup {
         match self {
             Self::Tty { selected } => *selected = !*selected,
             Self::Restart { selected } => *selected = previous_restart(*selected),
+            Self::PersistLogs { selected } => *selected = !*selected,
         }
     }
 
@@ -167,19 +190,28 @@ impl EditorPopup {
         match self {
             Self::Tty { selected } => *selected = !*selected,
             Self::Restart { selected } => *selected = next_restart(*selected),
+            Self::PersistLogs { selected } => *selected = !*selected,
         }
     }
 
-    fn apply(self, tty: &mut bool, restart: &mut RestartPolicy) {
+    fn apply(self, tty: &mut bool, restart: &mut RestartPolicy, persist_logs: &mut bool) {
         match self {
             Self::Tty { selected } => *tty = selected,
             Self::Restart { selected } => *restart = selected,
+            Self::PersistLogs { selected } => *persist_logs = selected,
         }
     }
 }
 
 fn random_tip() -> &'static str {
     TIPS.choose(&mut thread_rng()).copied().unwrap_or(TIPS[0])
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EditorChoices {
+    tty: bool,
+    restart: RestartPolicy,
+    persist_logs: bool,
 }
 
 struct AttachScreen;
@@ -313,6 +345,14 @@ async fn run_loop(
                     }
                 }
             }
+            KeyCode::Char('h') => {
+                if let Some(service) = services.get(selected) {
+                    match history_in_tui(terminal, &paths, &service.name, tip).await {
+                        Ok(()) => notice.clear(),
+                        Err(error) => notice = format!("history: {error}"),
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -382,7 +422,7 @@ fn main_footer(services: &[ServiceInfo], selected: usize) -> String {
     if services.get(selected).is_none() {
         return format!("{navigation}   q/Esc quit");
     }
-    format!("{navigation}   r restart   d disable   a attach   q/Esc quit")
+    format!("{navigation}   r restart   d disable   a attach   h history   q/Esc quit")
 }
 
 fn state_name(state: &ServiceState) -> &'static str {
@@ -393,6 +433,233 @@ fn state_name(state: &ServiceState) -> &'static str {
         ServiceState::Stopped => "stopped",
         ServiceState::Failed => "failed",
     }
+}
+
+struct HistoryView {
+    id: String,
+    content: String,
+    offset: u64,
+    eof: bool,
+    scroll: u16,
+}
+
+impl HistoryView {
+    fn new(id: String) -> Self {
+        Self {
+            id,
+            content: String::new(),
+            offset: 0,
+            eof: false,
+            scroll: 0,
+        }
+    }
+}
+
+async fn history_in_tui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    paths: &ServedPaths,
+    name: &str,
+    tip: &str,
+) -> Result<()> {
+    let response = client::request(
+        paths,
+        Request::HistoryList {
+            target: Target::Name(name.to_owned()),
+        },
+    )
+    .await?;
+    let Response::HistoryList { records, .. } = response else {
+        bail!("unexpected manager response")
+    };
+    let mut selected = 0_usize;
+    let mut view = None;
+
+    loop {
+        if let Some(history_view) = view.as_ref() {
+            terminal.draw(|frame| draw_history_content(frame, name, history_view, tip))?;
+        } else {
+            terminal.draw(|frame| draw_history_list(frame, name, &records, selected, tip))?;
+        }
+        if !event::poll(Duration::from_millis(250)).context("poll history terminal event")? {
+            continue;
+        }
+        let Event::Key(key) = event::read().context("read history terminal event")? else {
+            continue;
+        };
+
+        if let Some(history_view) = view.as_mut() {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => view = None,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    history_view.scroll = history_view.scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    history_view.scroll = history_view.scroll.saturating_add(1);
+                    load_history_if_needed(paths, name, history_view).await?;
+                }
+                KeyCode::PageUp => {
+                    history_view.scroll = history_view.scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown => {
+                    history_view.scroll = history_view.scroll.saturating_add(10);
+                    load_history_if_needed(paths, name, history_view).await?;
+                }
+                KeyCode::Home | KeyCode::Char('g') => history_view.scroll = 0,
+                KeyCode::End | KeyCode::Char('G') => {
+                    while !history_view.eof {
+                        load_history_chunk(paths, name, history_view).await?;
+                    }
+                    history_view.scroll = history_view
+                        .content
+                        .lines()
+                        .count()
+                        .saturating_sub(1)
+                        .min(u16::MAX as usize) as u16;
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+            KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !records.is_empty() {
+                    selected = (selected + 1).min(records.len() - 1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(record) = records.get(selected) {
+                    let mut history_view = HistoryView::new(record.id.clone());
+                    load_history_chunk(paths, name, &mut history_view).await?;
+                    view = Some(history_view);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn load_history_if_needed(
+    paths: &ServedPaths,
+    name: &str,
+    view: &mut HistoryView,
+) -> Result<()> {
+    let loaded_lines = view.content.lines().count();
+    if !view.eof && usize::from(view.scroll).saturating_add(12) >= loaded_lines {
+        load_history_chunk(paths, name, view).await?;
+    }
+    Ok(())
+}
+
+async fn load_history_chunk(paths: &ServedPaths, name: &str, view: &mut HistoryView) -> Result<()> {
+    if view.eof {
+        return Ok(());
+    }
+    let response = client::request(
+        paths,
+        Request::HistoryChunk {
+            target: Target::Name(name.to_owned()),
+            id: view.id.clone(),
+            offset: view.offset,
+            limit: DEFAULT_CHUNK_LIMIT,
+        },
+    )
+    .await?;
+    let Response::HistoryChunk {
+        next_offset,
+        eof,
+        content,
+        ..
+    } = response
+    else {
+        bail!("unexpected manager response")
+    };
+    if next_offset <= view.offset && !eof {
+        bail!("history reader made no progress")
+    }
+    view.content.push_str(&content);
+    view.offset = next_offset;
+    view.eof = eof;
+    Ok(())
+}
+
+fn draw_history_list(
+    frame: &mut Frame<'_>,
+    name: &str,
+    records: &[HistoryRecord],
+    selected: usize,
+    tip: &str,
+) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+    let title = Paragraph::new(format!("history: {name}"))
+        .block(Block::default().borders(Borders::ALL).title("served"));
+    frame.render_widget(title, areas[0]);
+    let items = records.iter().map(|record| {
+        ListItem::new(format!(
+            "{:<28} {:>10} bytes  {}",
+            record.id,
+            record.bytes,
+            if record.persisted { "disk" } else { "memory" }
+        ))
+    });
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("runs"))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    if !records.is_empty() {
+        state.select(Some(selected.min(records.len() - 1)));
+    }
+    frame.render_stateful_widget(list, areas[1], &mut state);
+    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[2]);
+    frame.render_widget(
+        Paragraph::new("up/down/j/k move   Enter open   Esc/q back").wrap(Wrap { trim: false }),
+        areas[3],
+    );
+}
+
+fn draw_history_content(frame: &mut Frame<'_>, name: &str, view: &HistoryView, tip: &str) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+    frame.render_widget(
+        Paragraph::new(format!("history: {name} / {}", view.id))
+            .block(Block::default().borders(Borders::ALL).title("served")),
+        areas[0],
+    );
+    frame.render_widget(
+        Paragraph::new(view.content.as_str())
+            .block(Block::default().borders(Borders::ALL).title("output"))
+            .scroll((view.scroll, 0))
+            .wrap(Wrap { trim: false }),
+        areas[1],
+    );
+    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[2]);
+    frame.render_widget(
+        Paragraph::new("up/down/j/k scroll   PgUp/PgDn page   g/G top/end   Esc/q back")
+            .wrap(Wrap { trim: false }),
+        areas[3],
+    );
 }
 
 async fn attach_in_tui(
@@ -486,11 +753,12 @@ pub fn edit_current(directory: &Path) -> Result<()> {
         &mut fields,
         config.tty,
         config.restart,
+        config.persist_logs,
         random_tip(),
     );
     disable_raw_mode().ok();
     execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
-    let (tty, restart) = match result {
+    let (tty, restart, persist_logs) = match result {
         Ok(value) => value,
         Err(error) if error.to_string() == "editor cancelled" => return Ok(()),
         Err(error) => return Err(error),
@@ -501,6 +769,7 @@ pub fn edit_current(directory: &Path) -> Result<()> {
         command: fields[1].lines().join("\n"),
         tty,
         restart,
+        persist_logs,
     };
     config.validate().map_err(|error| anyhow::anyhow!(error))?;
     fs::create_dir_all(directory).context("create service directory")?;
@@ -517,12 +786,26 @@ fn editor_loop(
     fields: &mut [TextArea<'static>],
     mut tty: bool,
     mut restart: RestartPolicy,
+    mut persist_logs: bool,
     tip: &str,
-) -> Result<(bool, RestartPolicy)> {
+) -> Result<(bool, RestartPolicy, bool)> {
     let mut selected = EditorField::Name;
     let mut popup = None;
     loop {
-        terminal.draw(|frame| draw_editor(frame, fields, tty, restart, selected, popup, tip))?;
+        terminal.draw(|frame| {
+            draw_editor(
+                frame,
+                fields,
+                EditorChoices {
+                    tty,
+                    restart,
+                    persist_logs,
+                },
+                selected,
+                popup,
+                tip,
+            )
+        })?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
@@ -540,7 +823,7 @@ fn editor_loop(
                 KeyCode::Down | KeyCode::Char('j') => current_popup.move_down(),
                 KeyCode::Enter => {
                     if let Some(current_popup) = popup.take() {
-                        current_popup.apply(&mut tty, &mut restart);
+                        current_popup.apply(&mut tty, &mut restart, &mut persist_logs);
                     }
                 }
                 KeyCode::Esc => popup = None,
@@ -551,7 +834,7 @@ fn editor_loop(
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if key.code == KeyCode::Char('s') {
-                return Ok((tty, restart));
+                return Ok((tty, restart, persist_logs));
             }
             continue;
         }
@@ -564,7 +847,8 @@ fn editor_loop(
             }
             KeyCode::Tab => selected = selected.next(),
             KeyCode::Enter => {
-                if let Some(current_popup) = EditorPopup::open(selected, tty, restart) {
+                if let Some(current_popup) = EditorPopup::open(selected, tty, restart, persist_logs)
+                {
                     popup = Some(current_popup);
                 } else if let Some(index) = selected.text_index() {
                     fields[index].input(Input::from(key));
@@ -582,8 +866,7 @@ fn editor_loop(
 fn draw_editor(
     frame: &mut Frame<'_>,
     fields: &[TextArea<'static>],
-    tty: bool,
-    restart: RestartPolicy,
+    choices: EditorChoices,
     selected: EditorField,
     popup: Option<EditorPopup>,
     tip: &str,
@@ -591,6 +874,7 @@ fn draw_editor(
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -637,7 +921,7 @@ fn draw_editor(
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            tty_name(tty),
+            tty_name(choices.tty),
             option_style(selected == EditorField::Tty),
         )))
         .block(
@@ -650,7 +934,7 @@ fn draw_editor(
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            restart_name(restart),
+            restart_name(choices.restart),
             option_style(selected == EditorField::Restart),
         )))
         .block(
@@ -660,6 +944,19 @@ fn draw_editor(
                 .title(EditorField::Restart.title()),
         ),
         areas[4],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            tty_name(choices.persist_logs),
+            option_style(selected == EditorField::PersistLogs),
+        )))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(choice_border_style(selected == EditorField::PersistLogs))
+                .title(EditorField::PersistLogs.title()),
+        ),
+        areas[5],
     );
 
     if let Some(field) = fields.get(2) {
@@ -678,13 +975,13 @@ fn draw_editor(
         if selected == EditorField::Env {
             field.set_cursor_line_style(Style::default().bg(Color::DarkGray));
         }
-        frame.render_widget(&field, areas[5]);
+        frame.render_widget(&field, areas[6]);
     }
 
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[6]);
+    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[7]);
     frame.render_widget(
         Paragraph::new(editor_footer(selected, popup.is_some())).wrap(Wrap { trim: false }),
-        areas[7],
+        areas[8],
     );
 
     if let Some(popup) = popup {
@@ -746,7 +1043,10 @@ fn tty_name(tty: bool) -> &'static str {
 fn editor_footer(selected: EditorField, popup_open: bool) -> String {
     if popup_open {
         "up/down/j/k choose   Enter apply   Esc close".to_owned()
-    } else if matches!(selected, EditorField::Tty | EditorField::Restart) {
+    } else if matches!(
+        selected,
+        EditorField::Tty | EditorField::Restart | EditorField::PersistLogs
+    ) {
         "Tab next   Shift-Tab previous   Enter choose   Ctrl-S save   Esc/Ctrl-C cancel".to_owned()
     } else {
         "Tab next   Shift-Tab previous   Ctrl-S save   Esc/Ctrl-C cancel".to_owned()
@@ -806,6 +1106,7 @@ mod tests {
             pid: Some(42),
             tty,
             restart: restart_name(RestartPolicy::Never).to_owned(),
+            persist_logs: false,
             attach_active: false,
             output_tail: "ready".to_owned(),
         }
@@ -834,19 +1135,23 @@ mod tests {
         assert_eq!(EditorField::Name.next(), EditorField::Command);
         assert_eq!(EditorField::Command.next(), EditorField::Tty);
         assert_eq!(EditorField::Tty.next(), EditorField::Restart);
-        assert_eq!(EditorField::Restart.next(), EditorField::Env);
+        assert_eq!(EditorField::Restart.next(), EditorField::PersistLogs);
+        assert_eq!(EditorField::PersistLogs.next(), EditorField::Env);
         assert_eq!(EditorField::Env.next(), EditorField::Name);
 
         assert_eq!(EditorField::Name.previous(), EditorField::Env);
-        assert_eq!(EditorField::Env.previous(), EditorField::Restart);
+        assert_eq!(EditorField::Env.previous(), EditorField::PersistLogs);
         assert_eq!(EditorField::Restart.previous(), EditorField::Tty);
+        assert_eq!(EditorField::PersistLogs.previous(), EditorField::Restart);
     }
 
     #[test]
     fn popup_selection_is_staged_until_apply() {
         let mut tty = true;
         let mut restart = RestartPolicy::Never;
-        let mut tty_popup = EditorPopup::open(EditorField::Tty, tty, restart).expect("TTY popup");
+        let mut persist_logs = false;
+        let mut tty_popup =
+            EditorPopup::open(EditorField::Tty, tty, restart, persist_logs).expect("TTY popup");
         tty_popup.move_down();
         assert_eq!(
             tty_popup.option_label(tty_popup.selected_index()),
@@ -854,15 +1159,22 @@ mod tests {
         );
         assert!(tty);
 
-        let mut restart_popup =
-            EditorPopup::open(EditorField::Restart, tty, restart).expect("restart popup");
+        let mut restart_popup = EditorPopup::open(EditorField::Restart, tty, restart, persist_logs)
+            .expect("restart popup");
         restart_popup.move_down();
         restart_popup.move_down();
         assert_eq!(restart_popup.selected_index(), 2);
         restart_popup.move_up();
-        restart_popup.apply(&mut tty, &mut restart);
+        restart_popup.apply(&mut tty, &mut restart, &mut persist_logs);
         assert!(tty);
         assert_eq!(restart, RestartPolicy::OnFailure);
+
+        let mut persist_popup =
+            EditorPopup::open(EditorField::PersistLogs, tty, restart, persist_logs)
+                .expect("persist popup");
+        persist_popup.move_down();
+        persist_popup.apply(&mut tty, &mut restart, &mut persist_logs);
+        assert!(persist_logs);
     }
 
     #[test]
@@ -874,6 +1186,7 @@ mod tests {
         assert!(tty_footer.contains("r restart"));
         assert!(tty_footer.contains("d disable"));
         assert!(tty_footer.contains("a attach"));
+        assert!(tty_footer.contains("h history"));
         assert!(!tty_footer.contains("unavailable"));
 
         let pipe_services = vec![service_info(false)];
@@ -915,8 +1228,11 @@ mod tests {
                 draw_editor(
                     frame,
                     &fields,
-                    false,
-                    RestartPolicy::OnFailure,
+                    EditorChoices {
+                        tty: false,
+                        restart: RestartPolicy::OnFailure,
+                        persist_logs: false,
+                    },
                     EditorField::Restart,
                     Some(EditorPopup::Restart {
                         selected: RestartPolicy::OnFailure,

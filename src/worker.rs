@@ -42,6 +42,7 @@ pub enum WorkerCommand {
 pub enum WorkerEvent {
     Starting {
         name: String,
+        persist_logs: bool,
     },
     Started {
         name: String,
@@ -108,7 +109,10 @@ async fn run_service(
 
     loop {
         let name = service.config.name.clone();
-        let _ = events.send(WorkerEvent::Starting { name: name.clone() });
+        let _ = events.send(WorkerEvent::Starting {
+            name: name.clone(),
+            persist_logs: service.config.persist_logs,
+        });
         let process = if service.config.tty {
             run_pty(service.clone(), events.clone(), &mut commands).await
         } else {

@@ -17,12 +17,31 @@ pub enum Target {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+    },
     List,
-    Enable { directory: String },
-    Disable { target: Target },
-    Restart { target: Target },
-    Attach { name: String },
+    Enable {
+        directory: String,
+    },
+    Disable {
+        target: Target,
+    },
+    Restart {
+        target: Target,
+    },
+    Attach {
+        name: String,
+    },
+    HistoryList {
+        target: Target,
+    },
+    HistoryChunk {
+        target: Target,
+        id: String,
+        offset: u64,
+        limit: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,16 +61,45 @@ pub struct ServiceInfo {
     pub pid: Option<u32>,
     pub tty: bool,
     pub restart: String,
+    #[serde(default)]
+    pub persist_logs: bool,
     pub attach_active: bool,
     pub output_tail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryRecord {
+    pub id: String,
+    pub bytes: u64,
+    pub current: bool,
+    pub persisted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+    },
     Ok,
-    Services { services: Vec<ServiceInfo> },
-    Error { message: String },
+    Services {
+        services: Vec<ServiceInfo>,
+    },
+    HistoryList {
+        service: String,
+        records: Vec<HistoryRecord>,
+    },
+    HistoryChunk {
+        service: String,
+        id: String,
+        offset: u64,
+        next_offset: u64,
+        total: u64,
+        eof: bool,
+        content: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 pub type Frame = Framed<UnixStream, LengthDelimitedCodec>;
@@ -125,5 +173,18 @@ mod tests {
         let value = serde_json::to_value(&request).expect("serialize");
         let decoded: Request = serde_json::from_value(value).expect("decode");
         assert!(matches!(decoded, Request::Restart { .. }));
+    }
+
+    #[test]
+    fn history_chunk_round_trips_as_json() {
+        let request = Request::HistoryChunk {
+            target: Target::Name("api".to_owned()),
+            id: "latest".to_owned(),
+            offset: 48,
+            limit: 1024,
+        };
+        let value = serde_json::to_value(&request).expect("serialize");
+        let decoded: Request = serde_json::from_value(value).expect("decode");
+        assert!(matches!(decoded, Request::HistoryChunk { .. }));
     }
 }

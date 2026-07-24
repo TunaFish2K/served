@@ -17,6 +17,7 @@ surface and simple ownership boundaries, not the fewest possible crates.
 | Service command | `/bin/sh -c <command>` | Working directory is the service directory |
 | Process without PTY | `tokio::process` and async pipes | Used when `.served.json` has `tty: false` |
 | Process with PTY | `portable-pty` | Default path; master remains owned by the worker |
+| Local timestamps | `chrono` | Human-readable local run names for archived logs |
 
 The manager runs once per user as `systemd --user` service. Managed children
 remain in that user service's cgroup. `served` does not become a root daemon,
@@ -31,7 +32,11 @@ container runtime, namespace manager, or resource policy engine.
   each service.
 - The enable registry is symlinks in
   `$XDG_CONFIG_HOME/served/enabled/<name>` (or `~/.config/...`).
-- Service output is kept in a bounded in-memory ring buffer only.
+- Optional service history is stored under
+  `$XDG_STATE_HOME/served/logs/<name>` (or `~/.local/state/...`). Persistent runs
+  are complete raw files; memory-only runs retain a 64 KiB tail per run.
+- The active persistent file is `latest.log`; `.latest.started` carries its start
+  label and old latest files are renamed into timestamped archives.
 - No manager state JSON or persisted tip cursor is used in V1.
 
 ## IPC
@@ -39,6 +44,8 @@ container runtime, namespace manager, or resource policy engine.
 - Control commands use a Unix domain socket below `$XDG_RUNTIME_DIR`.
 - Frames are length-prefixed JSON messages through `tokio-util`.
 - Every connection starts with a protocol-version handshake.
+- History uses manager-owned list requests and paginated chunk reads, so clients do
+  not access the state directory directly and large files do not exceed one frame.
 - Attach switches the already-authenticated connection to a raw byte stream. PTY
   services use one bidirectional writer; pipe services broadcast raw stdout/stderr
   to multiple read-only observers and discard their input.
@@ -53,15 +60,17 @@ container runtime, namespace manager, or resource policy engine.
   `.env` buffer.
 - `rand` supplies a non-cryptographic random tip selection on each TUI start.
 - The first TUI screen is the global enabled-service list. It exposes status,
-  restart, disable, attach, and the single `tips:` line. Recent output remains in
-  the manager's in-memory ring buffer but is not rendered in the main TUI. A
+  restart, disable, attach, history, and the single `tips:` line. A
   contextual two-line operation bar stays visible below the tip and exposes attach
   for both PTY and pipe services.
 - `served edit` keeps the JSON and fixed `.env` buffers in `tui-textarea` fields
-  and renders `TTY` and `restart` as ordinary visible choice rows. The visual
-  order is also the keyboard focus order. Enter opens an in-memory popup for a
-  choice; Enter applies it and Esc discards it. Tab and Shift-Tab move through
-  all five fields.
+  and renders `TTY`, `restart`, and `persist logs` as ordinary visible choice rows.
+  The visual order is also the keyboard focus order. Enter opens an in-memory
+  popup for a choice; Enter applies it and Esc discards it. Tab and Shift-Tab move
+  through all six fields.
+- The `h` history page first lists records and then loads sanitized content in
+  paginated chunks. It reuses the manager TUI alternate screen and never replays
+  history through attach.
 - `served attach [name]` reuses the existing name-based raw socket handoff. An
   omitted name is resolved client-side from the canonical current directory and
   the manager's enabled-service list. Direct attach uses crossterm raw mode and
@@ -79,7 +88,7 @@ container runtime, namespace manager, or resource policy engine.
 - `tracing` plus `tracing-subscriber` logs manager lifecycle events to stderr
   and the systemd journal.
 - Unit tests cover configuration, dotenv overlay, registry behavior, protocol
-  framing, and restart backoff.
+  framing, log rotation, history pagination, and restart backoff.
 - Integration tests use `tempfile` and `assert_cmd`; Linux release smoke tests
   additionally exercise a real `systemd --user` installation when available.
 - TUI rendering tests use Ratatui's `TestBackend`; snapshots are optional and

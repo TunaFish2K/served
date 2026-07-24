@@ -7,7 +7,8 @@
 
 served has two attach entry points: the global TUI and the direct
 `served attach [name]` command. PTY services already expose a bidirectional raw
-socket relay. Pipe services only collected output into an in-memory ring buffer.
+socket relay. Pipe services expose read-only live output, while both service types
+may also produce output history.
 
 The product needs attach sessions to use a terminal second buffer while keeping
 the manager TUI recoverable. It also needs a useful read-only attach path for
@@ -23,12 +24,12 @@ services that intentionally do not allocate a PTY.
   to one attach writer.
 - `tty: false` gets a raw stdout/stderr broadcast with ignored input. Multiple
   read-only observers are allowed.
-- Attach starts at the live stream boundary. The ring buffer is retained but is not
-  interpreted as a terminal screen or replayed into attach.
+- Attach starts at the live stream boundary. Output history is retained separately
+  and is not interpreted as a terminal screen or replayed into attach.
 
 ## Consequences
 
 The terminal cleanup path is explicit for both direct and TUI attach. Pipe attach
 does not require a fake PTY or a new protocol message, but it is a live viewer and
-does not reconstruct an already-rendered screen. The existing `output_tail` remains
-available for a later history feature.
+does not reconstruct an already-rendered screen. History is accessed through a
+separate list/content view and does not alter attach terminal state.

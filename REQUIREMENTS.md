@@ -178,6 +178,27 @@ Lists services currently running under the manager.
 - `Ctrl+C` in the service-management TUI outside an attach session exits the TUI
   client; it does not stop managed services.
 
+## Output History
+
+- `.served.json` has an optional `persist_logs` boolean, defaulting to `false`.
+- Every process start creates a separate output record, including automatic and
+  manual restarts.
+- TTY and pipe services both produce history. TTY output is raw PTY bytes; pipe
+  stdout/stderr are merged in manager event order.
+- With `persist_logs: true`, complete records are stored under
+  `$XDG_STATE_HOME/served/logs/<name>/` or `~/.local/state/served/logs/<name>/`.
+- The current record is `latest.log`; old records use the previous run's start
+  time in `YYYYMMDD-HHMMSS.log` format, with numeric suffixes on collisions.
+- Persistent storage keeps 100 archives plus `latest.log`. Directories are `0700`
+  and files are `0600`.
+- With `persist_logs: false`, the current record and 100 archives remain in memory;
+  manager restart clears those records. Existing disk records remain viewable.
+- Persistent write failures warn and fall back to memory without stopping the service.
+- History is accessed through a separate TUI list/content page and
+  `served history [name]`; attach remains live-only and does not replay history.
+- History content is read through paginated manager IPC and displayed after ANSI and
+  unsafe control-sequence cleanup.
+
 ## TUI
 
 The global TUI provides:
@@ -186,6 +207,7 @@ The global TUI provides:
 - restart action;
 - disable action;
 - attach action for both PTY and pipe services;
+- history list and scrollable history content pages;
 - structured editing through `served edit`;
 - `.env` editing;
 - one rotating tips line:
@@ -199,15 +221,16 @@ may repeat; no tip position or other manager state is persisted.
 
 The TUI keeps the `tips:` line and the operation bar visible together. The global
 operation bar is contextual: it shows navigation and quit when no service is
-selected; for a selected service it shows restart, disable, and attach. The bar
+selected; for a selected service it shows restart, disable, attach, and history. The bar
 wraps to two lines in a narrow terminal instead of being truncated.
 
 The `served edit` screen uses the same rotating tips set and displays its own
 contextual operation bar. Its focus order is the same as the visual field order
 above.
 
-Service output is not persisted to disk in the first version. Manager restart
-clears the in-memory output history.
+The editor focus order is `name`, `command`, `TTY`, `restart`, `persist logs`, and
+`.env`. Choice rows use an Enter popup and show their available keys in the bottom
+operation bar.
 
 ## Manager and Security Boundary
 
@@ -292,7 +315,6 @@ it does not silently start an alternate in-process manager.
 - Root/system service management.
 - Multiple services in one directory or one JSON file.
 - Service dependencies or readiness checks.
-- Persistent service logs.
 - Independent `start`, `stop`, or `reload` commands.
 - Arbitrary `.env` file locations.
 - Automatic discovery of unrelated processes or ports.
@@ -315,13 +337,13 @@ it does not silently start an alternate in-process manager.
 11. The TUI tips line selects a built-in tip randomly on every TUI startup.
 12. Unenabled service directories are not controllable from the global manager.
 13. The global TUI operation bar reflects whether a service is selected and shows
-    attach for either `tty` mode.
+    attach and history for either `tty` mode.
 14. `served edit` presents `TTY` and `restart` as visible fields in visual order,
     and popup selection changes are applied only after `Enter`.
 15. `Esc` closes an open editor popup without changing the in-memory value, while
     `Esc` outside a popup cancels the entire edit.
-16. The editor focus wraps through `name`, `command`, `TTY`, `restart`, and `.env`
-    in both Tab directions.
+16. The editor focus wraps through `name`, `command`, `TTY`, `restart`, `persist logs`,
+    and `.env` in both Tab directions.
 17. `served attach <name>` enters a running PTY service without opening the TUI;
     `Ctrl-C` exits the session while leaving the service running.
 18. `served attach` resolves the current directory to its enabled service, and
@@ -330,3 +352,9 @@ it does not silently start an alternate in-process manager.
     TUI attach returns to a fully redrawn manager screen.
 20. Multiple pipe observers receive live raw output, while pipe input does not reach
     the managed service.
+21. Persistent history writes a `latest.log`, rotates it by the previous run's start
+    time, and exposes both latest and archived records through CLI/manager reads.
+22. Non-persistent history creates no log files, retains records across service
+    restarts while the manager remains alive, and clears them after manager restart.
+23. History content reads are paginated and strip ANSI/control sequences for display
+    without changing the raw persistent file.

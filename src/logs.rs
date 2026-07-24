@@ -1,0 +1,536 @@
+use std::{
+    collections::VecDeque,
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+
+use chrono::Local;
+
+use crate::protocol::HistoryRecord;
+
+pub const MEMORY_LOG_LIMIT: usize = 64 * 1024;
+pub const MAX_ARCHIVED_LOGS: usize = 100;
+pub const DEFAULT_CHUNK_LIMIT: u32 = 48 * 1024;
+
+const LATEST_FILE: &str = "latest.log";
+const STARTED_FILE: &str = ".latest.started";
+
+#[derive(Debug)]
+struct MemoryLog {
+    id: String,
+    bytes: VecDeque<u8>,
+}
+
+#[derive(Debug)]
+pub struct LogStore {
+    directory: PathBuf,
+    current: VecDeque<u8>,
+    current_started: Option<String>,
+    current_persisted: bool,
+    disk_file: Option<File>,
+    disk_bytes: u64,
+    memory_archives: VecDeque<MemoryLog>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogChunk {
+    pub next_offset: u64,
+    pub total: u64,
+    pub eof: bool,
+    pub content: String,
+}
+
+impl LogStore {
+    pub fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            current: VecDeque::with_capacity(MEMORY_LOG_LIMIT.min(8192)),
+            current_started: None,
+            current_persisted: false,
+            disk_file: None,
+            disk_bytes: 0,
+            memory_archives: VecDeque::new(),
+        }
+    }
+
+    pub fn begin_run(&mut self, persist: bool) -> Vec<String> {
+        let mut warnings = Vec::new();
+        self.archive_memory_current();
+        self.close_disk_file();
+        self.current.clear();
+        self.disk_bytes = 0;
+        self.current_persisted = false;
+        let started = timestamp_label();
+        self.current_started = Some(started.clone());
+
+        if let Err(error) = self.rotate_latest(&started) {
+            warnings.push(format!("rotate existing latest log: {error}"));
+        }
+
+        if persist {
+            match self.open_persistent_run(&started) {
+                Ok(file) => {
+                    self.disk_file = Some(file);
+                    self.current_persisted = true;
+                }
+                Err(error) => warnings.push(format!("open persistent log: {error}")),
+            }
+        }
+
+        if let Err(error) = self.prune_disk_archives() {
+            warnings.push(format!("prune archived logs: {error}"));
+        }
+        warnings
+    }
+
+    pub fn append(&mut self, bytes: &[u8]) -> Option<String> {
+        for byte in bytes {
+            self.current.push_back(*byte);
+        }
+        while self.current.len() > MEMORY_LOG_LIMIT {
+            self.current.pop_front();
+        }
+
+        let file = self.disk_file.as_mut()?;
+        if let Err(error) = file.write_all(bytes) {
+            self.close_disk_file();
+            self.current_persisted = false;
+            return Some(format!("persistent log write failed: {error}"));
+        }
+        self.disk_bytes = self.disk_bytes.saturating_add(bytes.len() as u64);
+        None
+    }
+
+    pub fn output_tail(&self) -> String {
+        let raw: Vec<u8> = self.current.iter().copied().collect();
+        let cleaned = sanitize_log(&raw);
+        let max_chars = 2000;
+        let length = cleaned.chars().count();
+        if length > max_chars {
+            cleaned.chars().skip(length - max_chars).collect()
+        } else {
+            cleaned
+        }
+    }
+
+    pub fn records(&self) -> Vec<HistoryRecord> {
+        let mut records = Vec::new();
+        if self.current_started.is_some() {
+            records.push(HistoryRecord {
+                id: "latest".to_owned(),
+                bytes: self.current_size(),
+                current: true,
+                persisted: self.current_persisted,
+            });
+        }
+
+        for archive in &self.memory_archives {
+            records.push(HistoryRecord {
+                id: archive.id.clone(),
+                bytes: archive.bytes.len() as u64,
+                current: false,
+                persisted: false,
+            });
+        }
+
+        if let Ok(entries) = fs::read_dir(&self.directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+                if !file_type.is_file()
+                    || path.extension().and_then(|value| value.to_str()) != Some("log")
+                {
+                    continue;
+                }
+                let Some(id) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if id == LATEST_FILE || !valid_archive_id(id) {
+                    continue;
+                }
+                let bytes = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                records.push(HistoryRecord {
+                    id: id.to_owned(),
+                    bytes,
+                    current: false,
+                    persisted: true,
+                });
+            }
+        }
+
+        records.sort_by(|left, right| match (left.current, right.current) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => right.id.cmp(&left.id),
+        });
+        records
+    }
+
+    pub fn read_chunk(&self, id: &str, offset: u64, requested_limit: u32) -> io::Result<LogChunk> {
+        let limit = requested_limit.clamp(1, DEFAULT_CHUNK_LIMIT) as usize;
+        if id == "latest" {
+            if self.current_started.is_some() && !self.current_persisted {
+                return memory_chunk(&self.current, offset, limit);
+            }
+            return self.read_disk_chunk(LATEST_FILE, offset, limit);
+        }
+
+        if let Some(archive) = self.memory_archives.iter().find(|archive| archive.id == id) {
+            return memory_chunk(&archive.bytes, offset, limit);
+        }
+        if !valid_archive_id(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid history record id",
+            ));
+        }
+        self.read_disk_chunk(id, offset, limit)
+    }
+
+    fn current_size(&self) -> u64 {
+        if self.current_persisted {
+            self.disk_bytes
+        } else {
+            self.current.len() as u64
+        }
+    }
+
+    fn archive_memory_current(&mut self) {
+        let Some(started) = self.current_started.take() else {
+            return;
+        };
+        if self.current_persisted {
+            return;
+        }
+        let id = self.unique_archive_id(&started);
+        self.memory_archives.push_front(MemoryLog {
+            id,
+            bytes: std::mem::take(&mut self.current),
+        });
+        self.memory_archives.truncate(MAX_ARCHIVED_LOGS);
+    }
+
+    fn rotate_latest(&self, fallback_started: &str) -> io::Result<()> {
+        let latest = self.directory.join(LATEST_FILE);
+        let sidecar = self.directory.join(STARTED_FILE);
+        let metadata = match fs::symlink_metadata(&latest) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                remove_if_exists(&sidecar)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not a regular file", latest.display()),
+            ));
+        }
+
+        let started = fs::read_to_string(&sidecar)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| valid_archive_stem(value))
+            .unwrap_or_else(|| fallback_started.to_owned());
+        let archive = self.directory.join(self.unique_archive_id(&started));
+        fs::rename(&latest, archive)?;
+        remove_if_exists(&sidecar)?;
+        Ok(())
+    }
+
+    fn open_persistent_run(&self, started: &str) -> io::Result<File> {
+        fs::create_dir_all(&self.directory)?;
+        fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
+        let latest = self.directory.join(LATEST_FILE);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let file = options.open(&latest)?;
+        let sidecar = self.directory.join(STARTED_FILE);
+        let mut sidecar_options = OpenOptions::new();
+        sidecar_options.write(true).create_new(true).mode(0o600);
+        let mut sidecar_file = sidecar_options.open(sidecar)?;
+        sidecar_file.write_all(started.as_bytes())?;
+        sidecar_file.write_all(b"\n")?;
+        Ok(file)
+    }
+
+    fn prune_disk_archives(&self) -> io::Result<()> {
+        let mut archives = fs::read_dir(&self.directory)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        let name = path.file_name()?.to_str()?.to_owned();
+                        let file_type = entry.file_type().ok()?;
+                        if file_type.is_file() && valid_archive_id(&name) {
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        archives.sort();
+        while archives.len() > MAX_ARCHIVED_LOGS {
+            let oldest = archives.remove(0);
+            fs::remove_file(self.directory.join(oldest))?;
+        }
+        Ok(())
+    }
+
+    fn read_disk_chunk(&self, id: &str, offset: u64, limit: usize) -> io::Result<LogChunk> {
+        if id != LATEST_FILE && !valid_archive_id(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid history record id",
+            ));
+        }
+        let path = self.directory.join(id);
+        let mut file = File::open(&path)?;
+        let total = file.metadata()?.len();
+        if offset >= total {
+            return Ok(LogChunk {
+                next_offset: total,
+                total,
+                eof: true,
+                content: String::new(),
+            });
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let read_length = (total - offset).min(limit as u64) as usize;
+        let mut raw = vec![0_u8; read_length];
+        let length = file.read(&mut raw)?;
+        raw.truncate(length);
+        let next_offset = offset.saturating_add(length as u64);
+        Ok(LogChunk {
+            next_offset,
+            total,
+            eof: next_offset >= total,
+            content: sanitize_log(&raw),
+        })
+    }
+
+    fn unique_archive_id(&self, started: &str) -> String {
+        let base = if valid_archive_stem(started) {
+            started.to_owned()
+        } else {
+            timestamp_label()
+        };
+        let candidate = format!("{base}.log");
+        if !self.archive_id_taken(&candidate) {
+            return candidate;
+        }
+        for index in 1.. {
+            let candidate = format!("{base}-{index}.log");
+            if !self.archive_id_taken(&candidate) {
+                return candidate;
+            }
+        }
+        unreachable!("archive id search must find a free name")
+    }
+
+    fn archive_id_taken(&self, id: &str) -> bool {
+        self.directory.join(id).exists()
+            || self.memory_archives.iter().any(|archive| archive.id == id)
+    }
+
+    fn close_disk_file(&mut self) {
+        self.disk_file = None;
+    }
+}
+
+fn memory_chunk(bytes: &VecDeque<u8>, offset: u64, limit: usize) -> io::Result<LogChunk> {
+    let total = bytes.len() as u64;
+    if offset >= total {
+        return Ok(LogChunk {
+            next_offset: total,
+            total,
+            eof: true,
+            content: String::new(),
+        });
+    }
+    let raw: Vec<u8> = bytes
+        .iter()
+        .skip(offset as usize)
+        .take(limit)
+        .copied()
+        .collect();
+    let next_offset = offset.saturating_add(raw.len() as u64);
+    Ok(LogChunk {
+        next_offset,
+        total,
+        eof: next_offset >= total,
+        content: sanitize_log(&raw),
+    })
+}
+
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn timestamp_label() -> String {
+    Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+fn valid_archive_stem(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '-')
+}
+
+fn valid_archive_id(value: &str) -> bool {
+    value.ends_with(".log") && valid_archive_stem(value.trim_end_matches(".log"))
+}
+
+pub fn sanitize_log(bytes: &[u8]) -> String {
+    let mut clean = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == 0x1b {
+            index += 1;
+            if index < bytes.len() && bytes[index] == b']' {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            } else if index < bytes.len() && bytes[index] == b'[' {
+                index += 1;
+                while index < bytes.len() {
+                    let final_byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&final_byte) {
+                        break;
+                    }
+                }
+            } else if index < bytes.len() {
+                index += 1;
+            }
+            continue;
+        }
+        if byte == 0x9b {
+            index += 1;
+            while index < bytes.len() {
+                let final_byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&final_byte) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if byte == b'\n' || byte == b'\r' || byte == b'\t' || (byte >= 0x20 && byte != 0x7f) {
+            clean.push(byte);
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&clean).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn sanitizer_removes_ansi_sequences_but_keeps_text() {
+        assert_eq!(sanitize_log(b"\x1b[31mred\x1b[0m\n"), "red\n");
+        assert_eq!(sanitize_log(b"a\0b\tc\n"), "ab\tc\n");
+    }
+
+    #[test]
+    fn persistent_runs_rotate_latest_and_keep_sidecar() {
+        let directory = tempdir().expect("tempdir");
+        let mut store = LogStore::new(directory.path().to_path_buf());
+        assert!(store.begin_run(true).is_empty());
+        store.append(b"first\n");
+        fs::write(directory.path().join(STARTED_FILE), "20240101-010203\n").expect("sidecar");
+        store.begin_run(true);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("20240101-010203.log")).expect("archive"),
+            "first\n"
+        );
+        assert!(directory.path().join(LATEST_FILE).exists());
+        assert!(directory.path().join(STARTED_FILE).exists());
+    }
+
+    #[test]
+    fn memory_runs_are_bounded_and_archived() {
+        let directory = tempdir().expect("tempdir");
+        let mut store = LogStore::new(directory.path().to_path_buf());
+        store.begin_run(false);
+        store.append(&vec![b'x'; MEMORY_LOG_LIMIT + 10]);
+        store.begin_run(false);
+        let records = store.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].bytes, MEMORY_LOG_LIMIT as u64);
+        assert!(!directory.path().join(LATEST_FILE).exists());
+    }
+
+    #[test]
+    fn a_new_non_persistent_manager_run_archives_stale_latest() {
+        let directory = tempdir().expect("tempdir");
+        let mut first = LogStore::new(directory.path().to_path_buf());
+        first.begin_run(true);
+        first.append(b"before-manager-restart\n");
+        drop(first);
+
+        let mut second = LogStore::new(directory.path().to_path_buf());
+        second.begin_run(false);
+        let archives: Vec<_> = fs::read_dir(directory.path())
+            .expect("log directory")
+            .flatten()
+            .filter(|entry| valid_archive_id(&entry.file_name().to_string_lossy()))
+            .collect();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(
+            fs::read_to_string(archives[0].path()).expect("stale archive"),
+            "before-manager-restart\n"
+        );
+        assert!(!directory.path().join(LATEST_FILE).exists());
+    }
+
+    #[test]
+    fn persistent_archive_retention_keeps_one_hundred_files() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path()).expect("log directory");
+        for index in 0..=MAX_ARCHIVED_LOGS {
+            fs::write(
+                directory
+                    .path()
+                    .join(format!("20240101-0000{index:02}.log")),
+                "archive\n",
+            )
+            .expect("archive");
+        }
+        let mut store = LogStore::new(directory.path().to_path_buf());
+        store.begin_run(false);
+        let count = fs::read_dir(directory.path())
+            .expect("log directory")
+            .flatten()
+            .filter(|entry| valid_archive_id(&entry.file_name().to_string_lossy()))
+            .count();
+        assert_eq!(count, MAX_ARCHIVED_LOGS);
+    }
+}

@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use served::{
     client, manager,
     paths::ServedPaths,
-    protocol::{Request, Response},
+    protocol::{Request, Response, Target},
     tui,
 };
 use tracing_subscriber::EnvFilter;
@@ -33,6 +33,12 @@ enum Command {
     Restart { name: Option<String> },
     /// Attach directly to the current service, or an enabled service by name.
     Attach { name: Option<String> },
+    /// List or print service output history.
+    History {
+        name: Option<String>,
+        #[arg(long)]
+        run: Option<String>,
+    },
     /// Print enabled services known to the manager.
     List,
 }
@@ -75,6 +81,10 @@ async fn main() -> Result<()> {
                     client::expect_ok(&paths, Request::Restart { target }).await
                 }
                 Some(Command::Attach { name }) => tui::attach(paths, name).await,
+                Some(Command::History { name, run }) => {
+                    let target = client::target(name, std::env::current_dir()?);
+                    print_history(&paths, target, run).await
+                }
                 Some(Command::List) => print_list(&paths).await,
                 Some(Command::Edit) => unreachable!("edit is handled above"),
             }
@@ -99,6 +109,53 @@ async fn print_list(paths: &ServedPaths) -> Result<()> {
             service.tty,
             service.restart,
             service.directory
+        );
+    }
+    Ok(())
+}
+
+async fn print_history(paths: &ServedPaths, target: Target, run: Option<String>) -> Result<()> {
+    if let Some(id) = run {
+        let mut offset = 0_u64;
+        loop {
+            let response = client::request(
+                paths,
+                Request::HistoryChunk {
+                    target: target.clone(),
+                    id: id.clone(),
+                    offset,
+                    limit: served::logs::DEFAULT_CHUNK_LIMIT,
+                },
+            )
+            .await?;
+            let Response::HistoryChunk {
+                next_offset,
+                eof,
+                content,
+                ..
+            } = response
+            else {
+                bail!("unexpected manager response")
+            };
+            print!("{content}");
+            if eof || next_offset <= offset {
+                break;
+            }
+            offset = next_offset;
+        }
+        return Ok(());
+    }
+
+    let response = client::request(paths, Request::HistoryList { target }).await?;
+    let Response::HistoryList { records, .. } = response else {
+        bail!("unexpected manager response")
+    };
+    for record in records {
+        println!(
+            "{:<28} {:>10} bytes  {}",
+            record.id,
+            record.bytes,
+            if record.persisted { "disk" } else { "memory" }
         );
     }
     Ok(())
@@ -131,6 +188,20 @@ mod tests {
         assert!(matches!(
             with_name.command,
             Some(Command::Attach { name: Some(name) }) if name == "api"
+        ));
+    }
+
+    #[test]
+    fn history_accepts_optional_name_and_run_selector() {
+        let command =
+            Cli::try_parse_from(["served", "history", "api", "--run", "20260724-233045.log"])
+                .expect("parse history");
+        assert!(matches!(
+            command.command,
+            Some(Command::History {
+                name: Some(name),
+                run: Some(run),
+            }) if name == "api" && run == "20260724-233045.log"
         ));
     }
 }

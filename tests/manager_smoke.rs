@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command},
     time::Duration,
@@ -32,6 +33,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
     let root = tempdir().expect("tempdir");
     let config_home = root.path().join("config");
     let runtime_dir = root.path().join("runtime");
+    let state_home = root.path().join("state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -52,11 +54,13 @@ async fn enable_restart_and_disable_a_pipe_service() {
     let paths = ServedPaths {
         config_home,
         runtime_dir,
+        state_home,
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
         .env("XDG_CONFIG_HOME", &paths.config_home)
         .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
+        .env("XDG_STATE_HOME", &paths.state_home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -121,10 +125,138 @@ async fn enable_restart_and_disable_a_pipe_service() {
 }
 
 #[tokio::test]
+async fn persistent_and_memory_history_survive_service_restarts() {
+    let root = tempdir().expect("tempdir");
+    let config_home = root.path().join("config");
+    let runtime_dir = root.path().join("runtime");
+    let state_home = root.path().join("state");
+    let persistent_dir = root.path().join("persistent");
+    let memory_dir = root.path().join("memory");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&persistent_dir).expect("persistent service");
+    fs::create_dir_all(&memory_dir).expect("memory service");
+    fs::write(
+        persistent_dir.join(".served.json"),
+        r#"{
+  "name": "persistent",
+  "command": "printf 'persistent-output\\n'; sleep 0.2",
+  "tty": false,
+  "restart": "never",
+  "persist_logs": true
+}
+"#,
+    )
+    .expect("persistent config");
+    fs::write(
+        memory_dir.join(".served.json"),
+        r#"{
+  "name": "memory",
+  "command": "printf 'memory-output\\n'; sleep 0.2",
+  "tty": false,
+  "restart": "never",
+  "persist_logs": false
+}
+"#,
+    )
+    .expect("memory config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("XDG_CONFIG_HOME", &paths.config_home)
+        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
+        .env("XDG_STATE_HOME", &paths.state_home)
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+
+    for directory in [&persistent_dir, &memory_dir] {
+        client::expect_ok(
+            &paths,
+            Request::Enable {
+                directory: directory.display().to_string(),
+            },
+        )
+        .await
+        .expect("enable history service");
+    }
+    wait_for_state(&paths, "persistent", ServiceState::Stopped).await;
+    wait_for_state(&paths, "memory", ServiceState::Stopped).await;
+
+    for name in ["persistent", "memory"] {
+        client::expect_ok(
+            &paths,
+            Request::Restart {
+                target: Target::Name(name.to_owned()),
+            },
+        )
+        .await
+        .expect("restart history service");
+        wait_for_state(&paths, name, ServiceState::Stopped).await;
+    }
+
+    let persistent_records = history_records(&paths, "persistent").await;
+    assert!(persistent_records.iter().any(|record| record.current));
+    let persistent_archive = persistent_records
+        .iter()
+        .find(|record| !record.current && record.persisted)
+        .expect("persistent archive");
+    assert!(
+        paths
+            .logs_dir()
+            .join("persistent")
+            .join(&persistent_archive.id)
+            .is_file()
+    );
+    assert_eq!(
+        fs::metadata(paths.logs_dir().join("persistent"))
+            .expect("persistent log directory")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(paths.logs_dir().join("persistent").join("latest.log"))
+            .expect("latest log")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let persistent_output = read_history(&paths, "persistent", &persistent_archive.id, 4).await;
+    assert!(persistent_output.contains("persistent-output"));
+    assert!(
+        paths
+            .logs_dir()
+            .join("persistent")
+            .join("latest.log")
+            .is_file()
+    );
+
+    let memory_records = history_records(&paths, "memory").await;
+    assert!(memory_records.iter().any(|record| record.current));
+    let memory_archive = memory_records
+        .iter()
+        .find(|record| !record.current && !record.persisted)
+        .expect("memory archive");
+    assert!(!paths.logs_dir().join("memory").exists());
+    let memory_output = read_history(&paths, "memory", &memory_archive.id, 4).await;
+    assert!(memory_output.contains("memory-output"));
+}
+
+#[tokio::test]
 async fn pty_service_accepts_one_attach_session() {
     let root = tempdir().expect("tempdir");
     let config_home = root.path().join("config");
     let runtime_dir = root.path().join("runtime");
+    let state_home = root.path().join("state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -145,11 +277,13 @@ async fn pty_service_accepts_one_attach_session() {
     let paths = ServedPaths {
         config_home,
         runtime_dir,
+        state_home,
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
         .env("XDG_CONFIG_HOME", &paths.config_home)
         .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
+        .env("XDG_STATE_HOME", &paths.state_home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -205,6 +339,7 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
     let root = tempdir().expect("tempdir");
     let config_home = root.path().join("config");
     let runtime_dir = root.path().join("runtime");
+    let state_home = root.path().join("state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -225,11 +360,13 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
     let paths = ServedPaths {
         config_home,
         runtime_dir,
+        state_home,
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
         .env("XDG_CONFIG_HOME", &paths.config_home)
         .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
+        .env("XDG_STATE_HOME", &paths.state_home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -290,6 +427,7 @@ async fn direct_attach_supports_name_and_current_directory() {
     let root = tempdir().expect("tempdir");
     let config_home = root.path().join("config");
     let runtime_dir = root.path().join("runtime");
+    let state_home = root.path().join("state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -310,11 +448,13 @@ async fn direct_attach_supports_name_and_current_directory() {
     let paths = ServedPaths {
         config_home,
         runtime_dir,
+        state_home,
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
         .env("XDG_CONFIG_HOME", &paths.config_home)
         .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
+        .env("XDG_STATE_HOME", &paths.state_home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -442,6 +582,54 @@ fn wait_for_pty_child(child: &mut Box<dyn PtyChild + Send + Sync>) -> portable_p
     }
     let _ = child.kill();
     panic!("timed out waiting for attach child");
+}
+
+async fn history_records(paths: &ServedPaths, name: &str) -> Vec<served::protocol::HistoryRecord> {
+    let response = client::request(
+        paths,
+        Request::HistoryList {
+            target: Target::Name(name.to_owned()),
+        },
+    )
+    .await
+    .expect("history list");
+    let Response::HistoryList { records, .. } = response else {
+        panic!("unexpected history list response");
+    };
+    records
+}
+
+async fn read_history(paths: &ServedPaths, name: &str, id: &str, limit: u32) -> String {
+    let mut offset = 0_u64;
+    let mut content = String::new();
+    loop {
+        let response = client::request(
+            paths,
+            Request::HistoryChunk {
+                target: Target::Name(name.to_owned()),
+                id: id.to_owned(),
+                offset,
+                limit,
+            },
+        )
+        .await
+        .expect("history chunk");
+        let Response::HistoryChunk {
+            next_offset,
+            eof,
+            content: chunk,
+            ..
+        } = response
+        else {
+            panic!("unexpected history chunk response");
+        };
+        content.push_str(&chunk);
+        if eof {
+            return content;
+        }
+        assert!(next_offset > offset, "history reader must make progress");
+        offset = next_offset;
+    }
 }
 
 async fn wait_for_path(path: &Path) {

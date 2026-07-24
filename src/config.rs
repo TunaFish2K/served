@@ -62,6 +62,8 @@ pub struct ServiceConfig {
     pub tty: bool,
     #[serde(default)]
     pub restart: RestartPolicy,
+    #[serde(default)]
+    pub persist_logs: bool,
 }
 
 fn default_tty() -> bool {
@@ -106,6 +108,7 @@ impl ServiceConfig {
             command: "./run.sh".to_owned(),
             tty: true,
             restart: RestartPolicy::Never,
+            persist_logs: false,
         }
     }
 }
@@ -197,6 +200,7 @@ mod tests {
 
         let service = load_service(directory.path(), &base).expect("load");
         assert!(service.config.tty);
+        assert!(!service.config.persist_logs);
         assert_eq!(service.environment.get("PORT"), Some(&"8080".to_owned()));
         assert_eq!(
             service.environment.get("QUOTED"),
@@ -222,5 +226,17 @@ mod tests {
         assert!(RestartPolicy::OnFailure.should_restart(false));
         assert!(!RestartPolicy::OnFailure.should_restart(true));
         assert!(RestartPolicy::Always.should_restart(true));
+    }
+
+    #[test]
+    fn persistent_logs_round_trip_from_json() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            r#"{"name":"api","command":"echo ok","persist_logs":true}"#,
+        )
+        .expect("config");
+        let service = load_service(directory.path(), &BTreeMap::new()).expect("load");
+        assert!(service.config.persist_logs);
     }
 }

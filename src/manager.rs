@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     fs,
     os::unix::fs::{FileTypeExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
@@ -14,14 +14,13 @@ use tracing::{info, warn};
 
 use crate::{
     config::{LoadedService, RestartPolicy, load_service, manager_environment},
+    logs::LogStore,
     paths::ServedPaths,
     protocol::{
         Request, Response, ServiceInfo, ServiceState, Target, framed, receive_json, send_json,
     },
     worker::{WorkerCommand, WorkerEvent, spawn_service},
 };
-
-const OUTPUT_LIMIT: usize = 64 * 1024;
 
 pub enum ManagerCommand {
     Request {
@@ -44,54 +43,7 @@ struct ManagedService {
     pid: Option<u32>,
     worker: Option<mpsc::Sender<WorkerCommand>>,
     attach_active: bool,
-    output: RingBuffer,
-}
-
-struct RingBuffer {
-    bytes: VecDeque<u8>,
-    limit: usize,
-}
-
-impl RingBuffer {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: VecDeque::with_capacity(limit.min(8192)),
-            limit,
-        }
-    }
-
-    fn push(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.bytes.push_back(*byte);
-        }
-        while self.bytes.len() > self.limit {
-            self.bytes.pop_front();
-        }
-    }
-
-    fn display(&self) -> String {
-        let raw: Vec<u8> = self.bytes.iter().copied().collect();
-        let text = String::from_utf8_lossy(&raw);
-        let mut cleaned = String::with_capacity(text.len());
-        for character in text.chars() {
-            if character == '\n'
-                || character == '\r'
-                || character == '\t'
-                || !character.is_control()
-            {
-                cleaned.push(character);
-            }
-        }
-        let max_chars = 2000;
-        if cleaned.chars().count() > max_chars {
-            cleaned
-                .chars()
-                .skip(cleaned.chars().count() - max_chars)
-                .collect()
-        } else {
-            cleaned
-        }
-    }
+    logs: LogStore,
 }
 
 struct ManagerState {
@@ -164,6 +116,15 @@ impl ManagerState {
             self.base_environment.clone(),
             self.events.clone(),
         );
+        if let Some(existing) = self.services.get_mut(&name) {
+            existing.definition = service;
+            existing.state = ServiceState::Starting;
+            existing.pid = None;
+            existing.worker = Some(worker);
+            existing.attach_active = false;
+            return Ok(());
+        }
+        let log_directory = self.paths.logs_dir().join(&name);
         self.services.insert(
             name,
             ManagedService {
@@ -172,7 +133,7 @@ impl ManagerState {
                 pid: None,
                 worker: Some(worker),
                 attach_active: false,
-                output: RingBuffer::new(OUTPUT_LIMIT),
+                logs: LogStore::new(log_directory),
             },
         );
         Ok(())
@@ -188,7 +149,53 @@ impl ManagerState {
             Request::Disable { target } => self.disable(target).await,
             Request::Restart { target } => self.restart(target).await,
             Request::Attach { .. } => Err("attach requires a raw socket handoff".to_owned()),
+            Request::HistoryList { target } => self.history_list(target),
+            Request::HistoryChunk {
+                target,
+                id,
+                offset,
+                limit,
+            } => self.history_chunk(target, id, offset, limit),
         }
+    }
+
+    fn history_list(&self, target: Target) -> std::result::Result<Response, String> {
+        let (name, _) = self.resolve_target(&target)?;
+        let service = self
+            .services
+            .get(&name)
+            .ok_or_else(|| format!("service {name:?} is not enabled"))?;
+        Ok(Response::HistoryList {
+            service: name,
+            records: service.logs.records(),
+        })
+    }
+
+    fn history_chunk(
+        &self,
+        target: Target,
+        id: String,
+        offset: u64,
+        limit: u32,
+    ) -> std::result::Result<Response, String> {
+        let (name, _) = self.resolve_target(&target)?;
+        let service = self
+            .services
+            .get(&name)
+            .ok_or_else(|| format!("service {name:?} is not enabled"))?;
+        let chunk = service
+            .logs
+            .read_chunk(&id, offset, limit)
+            .map_err(|error| format!("read history {id:?}: {error}"))?;
+        Ok(Response::HistoryChunk {
+            service: name,
+            id,
+            offset,
+            next_offset: chunk.next_offset,
+            total: chunk.total,
+            eof: chunk.eof,
+            content: chunk.content,
+        })
     }
 
     async fn enable(&mut self, directory: PathBuf) -> std::result::Result<Response, String> {
@@ -321,10 +328,13 @@ impl ManagerState {
 
     fn handle_event(&mut self, event: WorkerEvent) {
         match event {
-            WorkerEvent::Starting { name } => {
+            WorkerEvent::Starting { name, persist_logs } => {
                 if let Some(service) = self.services.get_mut(&name) {
                     service.state = ServiceState::Starting;
                     service.pid = None;
+                    for warning in service.logs.begin_run(persist_logs) {
+                        warn!(service = %name, %warning, "log history degraded");
+                    }
                 }
             }
             WorkerEvent::Started { name, pid, tty: _ } => {
@@ -335,7 +345,9 @@ impl ManagerState {
             }
             WorkerEvent::Output { name, bytes } => {
                 if let Some(service) = self.services.get_mut(&name) {
-                    service.output.push(&bytes);
+                    if let Some(warning) = service.logs.append(&bytes) {
+                        warn!(service = %name, %warning, "log history degraded");
+                    }
                 }
             }
             WorkerEvent::Exited {
@@ -392,8 +404,9 @@ impl ManagerState {
                 pid: service.pid,
                 tty: service.definition.config.tty,
                 restart: restart_name(service.definition.config.restart).to_owned(),
+                persist_logs: service.definition.config.persist_logs,
                 attach_active: service.attach_active,
-                output_tail: service.output.display(),
+                output_tail: service.logs.output_tail(),
             })
             .collect();
         services.sort_by(|left, right| left.name.cmp(&right.name));
@@ -468,6 +481,20 @@ fn restart_name(policy: RestartPolicy) -> &'static str {
 pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
     fs::create_dir_all(paths.registry_dir()).context("create served enable registry")?;
     fs::create_dir_all(&paths.runtime_dir).context("create served runtime directory")?;
+    let state_served_dir = paths.state_home.join("served");
+    let log_directory = paths.logs_dir();
+    if let Err(error) = fs::create_dir_all(&log_directory) {
+        warn!(path = %log_directory.display(), %error, "cannot create log directory; persistent logs will fall back to memory");
+    } else {
+        if let Err(error) =
+            fs::set_permissions(&state_served_dir, fs::Permissions::from_mode(0o700))
+        {
+            warn!(path = %state_served_dir.display(), %error, "cannot restrict served state directory");
+        }
+        if let Err(error) = fs::set_permissions(&log_directory, fs::Permissions::from_mode(0o700)) {
+            warn!(path = %log_directory.display(), %error, "cannot restrict served log directory");
+        }
+    }
     let socket_path = paths.socket_path();
     if let Ok(metadata) = fs::symlink_metadata(&socket_path) {
         if metadata.file_type().is_socket() {

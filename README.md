@@ -15,8 +15,8 @@ Docker 替代的容器运行时，也不负责 root 服务、命名空间或资�
 - `never`、`on-failure`、`always` 重启策略和指数退避。
 - PTY 服务支持可写 attach；pipe 服务支持只读 attach。所有 attach 都使用终端第二屏。
 - `served attach [name]` 可绕过 TUI 直接进入 attach 会话。
-- 全局 TUI 展示状态、restart、disable、attach 和随机 `tips:`。
-- 输出只保存在内存 ring buffer 中，不写入持久化日志。
+- 全局 TUI 展示状态、restart、disable、attach、历史和随机 `tips:`。
+- 日志可以按服务选择持久化，也可以只保存在 manager 内存中。
 - manager 与 CLI/TUI 通过 `$XDG_RUNTIME_DIR` 下的用户 Unix socket 通信。
 
 ## 快速开始
@@ -64,14 +64,14 @@ export PATH="$HOME/.local/bin:$PATH"
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并
-构建 Linux amd64/glibc 产物。例如版本 `0.1.2` 使用 tag `v0.1.2`，Release 会
+构建 Linux amd64/glibc 产物。例如版本 `0.1.3` 使用 tag `v0.1.3`，Release 会
 包含：
 
 ```text
-served-linux-amd64-v0.1.2-binary
-served-linux-amd64-v0.1.2-binary.sha256
-served-linux-amd64-v0.1.2-full.tar.gz
-served-linux-amd64-v0.1.2-full.tar.gz.sha256
+served-linux-amd64-v0.1.3-binary
+served-linux-amd64-v0.1.3-binary.sha256
+served-linux-amd64-v0.1.3-full.tar.gz
+served-linux-amd64-v0.1.3-full.tar.gz.sha256
 ```
 
 `binary` 是只包含可执行文件的产物；`full.tar.gz` 是包含 `served`、
@@ -90,7 +90,8 @@ served-linux-amd64-v0.1.2-full.tar.gz.sha256
   "name": "api",
   "command": "python app.py",
   "tty": true,
-  "restart": "never"
+  "restart": "never",
+  "persist_logs": false
 }
 ```
 
@@ -100,6 +101,8 @@ served-linux-amd64-v0.1.2-full.tar.gz.sha256
 - `command`：通过 `/bin/sh -c` 执行的命令字符串。
 - `tty`：可选，默认 `true`；设置为 `false` 使用管道模式。
 - `restart`：可选，默认 `never`；可选值为 `never`、`on-failure`、`always`。
+- `persist_logs`：可选，默认 `false`；设置为 `true` 将每次运行的完整输出保存到
+  XDG state 日志目录。配置修改在下次启动或重启时生效。
 
 `.env` 只支持配置目录下的这个固定文件。它使用 dotenv 解析规则，可以包含
 注释、引号和支持的变量展开，但不会被当作 shell 脚本执行。
@@ -110,13 +113,14 @@ manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值�
 ## TUI 操作
 
 全局 TUI 底部会同时显示随机 `tips:` 和上下文操作栏。没有服务时，操作栏显示
-`up/down/j/k move` 与退出；选中服务后会显示 `r restart`、`d disable` 和
-`a attach`。TTY 服务的 attach 可写入服务，`tty: false` 服务的 attach 只读；两者
+`up/down/j/k move` 与退出；选中服务后会显示 `r restart`、`d disable`、`a attach`
+和 `h history`。TTY 服务的 attach 可写入服务，`tty: false` 服务的 attach 只读；两者
 都进入终端第二屏。操作栏在窄终端中自动换行到两行。
 
-`served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`restart` 和
-`.env`。使用 `Tab` 前进、`Shift-Tab` 后退；TTY 字段显示 `Enabled/Disabled`，
-restart 字段显示 `never/on-failure/always`。焦点在这两个选择字段时按 `Enter`
+`served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`restart`、
+`persist logs` 和 `.env`。使用 `Tab` 前进、`Shift-Tab` 后退；TTY 和 `persist logs`
+字段显示 `Enabled/Disabled`，restart 字段显示 `never/on-failure/always`。焦点在
+选择字段时按 `Enter`
 打开菜单，用上下方向键或 `j/k` 移动，`Enter` 应用选择，`Esc` 关闭菜单且不应用
 暂存值。普通编辑状态下底部会显示当前可用按键；`Ctrl-S` 保存，`Esc` 或
 `Ctrl-C` 取消整个编辑。编辑器也会在启动时显示一条随机 `tips:`。
@@ -131,6 +135,9 @@ served enable          启用当前目录并立即运行
 served disable [name]  禁用当前服务，或按名称禁用
 served restart [name]  重启当前服务，或按名称重启
 served attach [name]   直接 attach 当前服务，或按名称 attach
+served history [name]  列出服务的 latest 和时间归档
+served history [name] --run <id>
+                       输出指定历史记录，例如 latest 或 20260724-233045.log
 served list            列出 manager 管理的服务
 ```
 
@@ -140,6 +147,27 @@ served list            列出 manager 管理的服务
 服务只转发连接建立后的 stdout/stderr 原始字节，并忽略输入。pipe 服务可以有多个只读
 观察者。attach 会话中按 `Ctrl-C` 退出 attach，服务本身不会被停止；该按键不会转发
 给服务。
+
+按 `h` 后先选择 `latest` 或时间归档，再按 `Enter` 查看清理后的日志内容；内容页
+支持上下键、`j/k`、`PgUp/PgDn` 和 `g/G`。历史页与 attach 分离，attach 不会回放
+旧的 PTY 控制状态。
+
+日志历史按每次进程启动分段，包括首次启动、自动重启和手动重启。持久化日志位于：
+
+```text
+$XDG_STATE_HOME/served/logs/<name>/
+~/.local/state/served/logs/<name>/  # 未设置 XDG_STATE_HOME 时
+```
+
+当前运行写入 `latest.log`，下一次启动时按旧运行的开始时间归档为
+`YYYYMMDD-HHMMSS.log`；同一秒冲突时追加 `-1`、`-2`。`.latest.started` 保存当前
+记录的开始时间。每个服务最多保留 100 个归档和一个 latest，日志目录权限为 `0700`，
+日志文件权限为 `0600`。`persist_logs: false` 时不会新增磁盘日志，manager 运行期间
+保留当前记录和最近 100 条内存归档；manager 重启后内存历史清空，已有磁盘归档仍可查看。
+
+TTY 日志保存原始 PTY 字节，pipe 日志按 manager 收到的顺序合并 stdout/stderr；历史
+展示会移除 ANSI 和不可见控制序列。持久化写入失败时服务继续运行并降级到内存，同时
+记录 manager warning。
 
 V1 不提供独立的 `start`、`stop` 或 `reload` 命令。修改配置后使用 `restart`；
 manager 会先完整校验新配置，校验失败时保留旧进程不变。启用服务后，注册链接

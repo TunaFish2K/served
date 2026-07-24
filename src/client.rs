@@ -75,6 +75,7 @@ mod tests {
             pid: Some(42),
             tty: true,
             restart: "never".to_owned(),
+            persist_logs: false,
             attach_active: false,
             output_tail: String::new(),
         }

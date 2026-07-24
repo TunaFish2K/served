@@ -10,7 +10,7 @@ use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
 };
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::net::UnixStream;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -19,6 +19,7 @@ use tokio::{
     task::JoinHandle,
     time::{sleep, timeout},
 };
+use tracing::warn;
 
 use crate::{
     config::LoadedService,
@@ -41,6 +42,11 @@ pub enum WorkerCommand {
     },
     Attach {
         stream: UnixStream,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+        reply: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -250,6 +256,10 @@ async fn wait_backoff(
                 drop(stream);
                 BackoffOutcome::Timer
             }
+            Some(WorkerCommand::Resize { reply, .. }) => {
+                let _ = reply.send(Ok(()));
+                BackoffOutcome::Timer
+            }
             None => BackoffOutcome::Stop,
         }
     }
@@ -363,6 +373,9 @@ async fn run_pipe(
                         let _ = done.send(());
                     });
                 }
+                Some(WorkerCommand::Resize { reply, .. }) => {
+                    let _ = reply.send(Ok(()));
+                }
                 None => {
                     terminate_and_reap(pid, &mut wait_task).await;
                     abort_reader(stdout_task);
@@ -424,6 +437,7 @@ async fn run_pty(
     let spawned = spawn_pty_process(&service).await?;
     let pid = spawned.pid;
     let name = service.config.name.clone();
+    let master = spawned.master;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let output_hub = Arc::new(OutputHub::new());
     let reader_output = output_hub.clone();
@@ -533,6 +547,18 @@ async fn run_pty(
                         });
                     }
                 }
+                Some(WorkerCommand::Resize { cols, rows, reply }) => {
+                    let result = master.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    }).map_err(|error| error.to_string());
+                    if let Err(error) = &result {
+                        warn!(service = %name, %error, cols, rows, "cannot resize PTY");
+                    }
+                    let _ = reply.send(result);
+                }
                 None => {
                     terminate_pty(pid, &mut status).await;
                     reader_task.abort();
@@ -552,6 +578,7 @@ async fn run_pty(
 
 struct PtySpawn {
     pid: u32,
+    master: Box<dyn MasterPty + Send>,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
     status: oneshot::Receiver<Result<u32, String>>,
@@ -601,6 +628,7 @@ async fn spawn_pty_process(service: &LoadedService) -> Result<PtySpawn, String> 
         });
         Ok(PtySpawn {
             pid,
+            master: pair.master,
             reader,
             writer,
             status: status_rx,

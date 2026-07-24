@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, stdout},
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -14,7 +14,7 @@ use crossterm::{
     execute,
     terminal::{
         Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-        disable_raw_mode, enable_raw_mode,
+        disable_raw_mode, enable_raw_mode, size,
     },
 };
 use rand::{seq::SliceRandom, thread_rng};
@@ -28,7 +28,7 @@ use ratatui::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
+    time::interval,
 };
 use tui_textarea::{Input, TextArea};
 
@@ -49,13 +49,16 @@ const TIPS: &[&str] = &[
     "persistent logs live below the XDG state directory",
 ];
 
-const EDITOR_FIXED_HEIGHT: u16 = 22;
+const EDITOR_FIXED_HEIGHT: u16 = 25;
 const EDITOR_COMMAND_MIN_HEIGHT: u16 = 3;
 const EDITOR_COMMAND_MAX_HEIGHT: u16 = 8;
 
 pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
-    let stream = match name {
-        Some(name) => client::attach(&paths, name).await?,
+    let (service_name, session) = match name {
+        Some(name) => {
+            let session = client::attach(&paths, name.clone()).await?;
+            (name, session)
+        }
         None => {
             client::attach_current(
                 &paths,
@@ -65,7 +68,7 @@ pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
         }
     };
     let _screen = AttachScreen::enter()?;
-    attach_session(stream).await
+    attach_session(&paths, service_name, session).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,7 @@ enum EditorField {
     Name,
     Command,
     Tty,
+    SyncRowsCols,
     Restart,
     PersistLogs,
     Env,
@@ -83,7 +87,8 @@ impl EditorField {
         match self {
             Self::Name => Self::Command,
             Self::Command => Self::Tty,
-            Self::Tty => Self::Restart,
+            Self::Tty => Self::SyncRowsCols,
+            Self::SyncRowsCols => Self::Restart,
             Self::Restart => Self::PersistLogs,
             Self::PersistLogs => Self::Env,
             Self::Env => Self::Name,
@@ -95,7 +100,8 @@ impl EditorField {
             Self::Name => Self::Env,
             Self::Command => Self::Name,
             Self::Tty => Self::Command,
-            Self::Restart => Self::Tty,
+            Self::SyncRowsCols => Self::Tty,
+            Self::Restart => Self::SyncRowsCols,
             Self::PersistLogs => Self::Restart,
             Self::Env => Self::PersistLogs,
         }
@@ -106,7 +112,7 @@ impl EditorField {
             Self::Name => Some(0),
             Self::Command => Some(1),
             Self::Env => Some(2),
-            Self::Tty | Self::Restart | Self::PersistLogs => None,
+            Self::Tty | Self::SyncRowsCols | Self::Restart | Self::PersistLogs => None,
         }
     }
 
@@ -115,6 +121,7 @@ impl EditorField {
             Self::Name => "name",
             Self::Command => "command",
             Self::Tty => "TTY",
+            Self::SyncRowsCols => "sync rows/cols",
             Self::Restart => "restart",
             Self::PersistLogs => "persist logs",
             Self::Env => ENV_FILE,
@@ -125,6 +132,7 @@ impl EditorField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorPopup {
     Tty { selected: bool },
+    SyncRowsCols { selected: bool },
     Restart { selected: RestartPolicy },
     PersistLogs { selected: bool },
 }
@@ -133,11 +141,15 @@ impl EditorPopup {
     fn open(
         field: EditorField,
         tty: bool,
+        sync_rows_cols: bool,
         restart: RestartPolicy,
         persist_logs: bool,
     ) -> Option<Self> {
         match field {
             EditorField::Tty => Some(Self::Tty { selected: tty }),
+            EditorField::SyncRowsCols => Some(Self::SyncRowsCols {
+                selected: sync_rows_cols,
+            }),
             EditorField::Restart => Some(Self::Restart { selected: restart }),
             EditorField::PersistLogs => Some(Self::PersistLogs {
                 selected: persist_logs,
@@ -149,6 +161,7 @@ impl EditorPopup {
     fn title(self) -> &'static str {
         match self {
             Self::Tty { .. } => "select TTY",
+            Self::SyncRowsCols { .. } => "sync rows/cols",
             Self::Restart { .. } => "select restart policy",
             Self::PersistLogs { .. } => "persist logs",
         }
@@ -157,6 +170,7 @@ impl EditorPopup {
     fn option_count(self) -> usize {
         match self {
             Self::Tty { .. } => 2,
+            Self::SyncRowsCols { .. } => 2,
             Self::Restart { .. } => 3,
             Self::PersistLogs { .. } => 2,
         }
@@ -165,6 +179,10 @@ impl EditorPopup {
     fn option_label(self, index: usize) -> &'static str {
         match self {
             Self::Tty { .. } => match index {
+                0 => "Enabled",
+                _ => "Disabled",
+            },
+            Self::SyncRowsCols { .. } => match index {
                 0 => "Enabled",
                 _ => "Disabled",
             },
@@ -179,6 +197,7 @@ impl EditorPopup {
     fn selected_index(self) -> usize {
         match self {
             Self::Tty { selected } => usize::from(!selected),
+            Self::SyncRowsCols { selected } => usize::from(!selected),
             Self::Restart { selected } => restart_index(selected),
             Self::PersistLogs { selected } => usize::from(!selected),
         }
@@ -187,6 +206,7 @@ impl EditorPopup {
     fn move_up(&mut self) {
         match self {
             Self::Tty { selected } => *selected = !*selected,
+            Self::SyncRowsCols { selected } => *selected = !*selected,
             Self::Restart { selected } => *selected = previous_restart(*selected),
             Self::PersistLogs { selected } => *selected = !*selected,
         }
@@ -195,14 +215,22 @@ impl EditorPopup {
     fn move_down(&mut self) {
         match self {
             Self::Tty { selected } => *selected = !*selected,
+            Self::SyncRowsCols { selected } => *selected = !*selected,
             Self::Restart { selected } => *selected = next_restart(*selected),
             Self::PersistLogs { selected } => *selected = !*selected,
         }
     }
 
-    fn apply(self, tty: &mut bool, restart: &mut RestartPolicy, persist_logs: &mut bool) {
+    fn apply(
+        self,
+        tty: &mut bool,
+        sync_rows_cols: &mut bool,
+        restart: &mut RestartPolicy,
+        persist_logs: &mut bool,
+    ) {
         match self {
             Self::Tty { selected } => *tty = selected,
+            Self::SyncRowsCols { selected } => *sync_rows_cols = selected,
             Self::Restart { selected } => *restart = selected,
             Self::PersistLogs { selected } => *persist_logs = selected,
         }
@@ -216,6 +244,7 @@ fn random_tip() -> &'static str {
 #[derive(Debug, Clone, Copy)]
 struct EditorChoices {
     tty: bool,
+    sync_rows_cols: bool,
     restart: RestartPolicy,
     persist_logs: bool,
 }
@@ -343,9 +372,9 @@ async fn run_loop(
             KeyCode::Char('a') => {
                 if let Some(service) = services.get(selected) {
                     match client::attach(&paths, service.name.clone()).await {
-                        Ok(stream) => {
+                        Ok(session) => {
                             notice = "".to_owned();
-                            attach_in_tui(terminal, stream).await?;
+                            attach_in_tui(terminal, &paths, service.name.clone(), session).await?;
                         }
                         Err(error) => notice = format!("attach: {error}"),
                     }
@@ -670,10 +699,12 @@ fn draw_history_content(frame: &mut Frame<'_>, name: &str, view: &HistoryView, t
 
 async fn attach_in_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    stream: UnixStream,
+    paths: &ServedPaths,
+    name: String,
+    session: client::AttachSession,
 ) -> Result<()> {
     clear_attach_screen(terminal)?;
-    let attach_result = attach_session(stream).await;
+    let attach_result = attach_session(paths, name, session).await;
     let restore_result = clear_attach_screen(terminal);
     if let Err(error) = attach_result {
         restore_result?;
@@ -688,12 +719,100 @@ fn clear_attach_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) ->
     Ok(())
 }
 
-async fn attach_session(stream: UnixStream) -> Result<()> {
+struct ResizeController<'a> {
+    paths: &'a ServedPaths,
+    name: String,
+    token: String,
+    frame: Option<crate::protocol::Frame>,
+    current_size: Option<(u16, u16)>,
+    applied_size: Option<(u16, u16)>,
+    retry_at: Instant,
+    retry_delay: Duration,
+}
+
+impl<'a> ResizeController<'a> {
+    const BASE_RETRY: Duration = Duration::from_millis(250);
+    const MAX_RETRY: Duration = Duration::from_secs(5);
+
+    fn new(paths: &'a ServedPaths, name: String, token: String) -> Self {
+        Self {
+            paths,
+            name,
+            token,
+            frame: None,
+            current_size: None,
+            applied_size: None,
+            retry_at: Instant::now(),
+            retry_delay: Self::BASE_RETRY,
+        }
+    }
+
+    async fn sync(&mut self) {
+        if let Ok((cols, rows)) = size() {
+            if cols > 0 && rows > 0 {
+                self.current_size = Some((cols, rows));
+            }
+        }
+        let Some((cols, rows)) = self.current_size else {
+            return;
+        };
+
+        if self.frame.is_none() {
+            if Instant::now() < self.retry_at {
+                return;
+            }
+            match client::open_resize_control(self.paths).await {
+                Ok(frame) => {
+                    self.frame = Some(frame);
+                    self.applied_size = None;
+                    self.retry_delay = Self::BASE_RETRY;
+                }
+                Err(_) => {
+                    self.schedule_retry();
+                    return;
+                }
+            }
+        }
+
+        if self.applied_size == Some((cols, rows)) {
+            return;
+        }
+        let result = match self.frame.as_mut() {
+            Some(frame) => client::send_resize(frame, &self.name, &self.token, cols, rows).await,
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                self.applied_size = Some((cols, rows));
+                self.retry_delay = Self::BASE_RETRY;
+            }
+            Err(_) => {
+                self.frame = None;
+                self.schedule_retry();
+            }
+        }
+    }
+
+    fn schedule_retry(&mut self) {
+        self.retry_at = Instant::now() + self.retry_delay;
+        self.retry_delay = self.retry_delay.saturating_mul(2).min(Self::MAX_RETRY);
+    }
+}
+
+async fn attach_session(
+    paths: &ServedPaths,
+    name: String,
+    session: client::AttachSession,
+) -> Result<()> {
+    let client::AttachSession { stream, token } = session;
     let (mut socket_read, mut socket_write) = stream.into_split();
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut input = [0_u8; 8192];
     let mut output = [0_u8; 8192];
+    let mut resize = ResizeController::new(paths, name, token);
+    resize.sync().await;
+    let mut resize_tick = interval(Duration::from_millis(250));
     loop {
         tokio::select! {
             count = stdin.read(&mut input) => {
@@ -711,6 +830,7 @@ async fn attach_session(stream: UnixStream) -> Result<()> {
                 stdout.write_all(&output[..count]).await?;
                 stdout.flush().await?;
             }
+            _ = resize_tick.tick() => resize.sync().await,
         }
     }
 }
@@ -763,6 +883,7 @@ pub fn edit_current(directory: &Path) -> Result<()> {
         &mut terminal,
         &mut fields,
         config.tty,
+        config.sync_rows_cols,
         config.restart,
         config.persist_logs,
         random_tip(),
@@ -774,7 +895,7 @@ pub fn edit_current(directory: &Path) -> Result<()> {
         LeaveAlternateScreen
     )
     .ok();
-    let (tty, restart, persist_logs) = match result {
+    let (tty, sync_rows_cols, restart, persist_logs) = match result {
         Ok(value) => value,
         Err(error) if error.to_string() == "editor cancelled" => return Ok(()),
         Err(error) => return Err(error),
@@ -784,6 +905,7 @@ pub fn edit_current(directory: &Path) -> Result<()> {
         name: fields[0].lines().join("\n").trim().to_owned(),
         command: fields[1].lines().join("\n"),
         tty,
+        sync_rows_cols,
         restart,
         persist_logs,
     };
@@ -822,10 +944,11 @@ fn editor_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     fields: &mut [TextArea<'static>],
     mut tty: bool,
+    mut sync_rows_cols: bool,
     mut restart: RestartPolicy,
     mut persist_logs: bool,
     tip: &str,
-) -> Result<(bool, RestartPolicy, bool)> {
+) -> Result<(bool, bool, RestartPolicy, bool)> {
     let mut selected = EditorField::Name;
     let mut popup = None;
     loop {
@@ -835,6 +958,7 @@ fn editor_loop(
                 fields,
                 EditorChoices {
                     tty,
+                    sync_rows_cols,
                     restart,
                     persist_logs,
                 },
@@ -863,7 +987,12 @@ fn editor_loop(
                 KeyCode::Down | KeyCode::Char('j') => current_popup.move_down(),
                 KeyCode::Enter => {
                     if let Some(current_popup) = popup.take() {
-                        current_popup.apply(&mut tty, &mut restart, &mut persist_logs);
+                        current_popup.apply(
+                            &mut tty,
+                            &mut sync_rows_cols,
+                            &mut restart,
+                            &mut persist_logs,
+                        );
                     }
                 }
                 KeyCode::Esc => popup = None,
@@ -885,7 +1014,7 @@ fn editor_loop(
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if key.code == KeyCode::Char('s') {
-                return Ok((tty, restart, persist_logs));
+                return Ok((tty, sync_rows_cols, restart, persist_logs));
             }
             continue;
         }
@@ -898,7 +1027,8 @@ fn editor_loop(
             }
             KeyCode::Tab => selected = selected.next(),
             KeyCode::Enter => {
-                if let Some(current_popup) = EditorPopup::open(selected, tty, restart, persist_logs)
+                if let Some(current_popup) =
+                    EditorPopup::open(selected, tty, sync_rows_cols, restart, persist_logs)
                 {
                     popup = Some(current_popup);
                 } else if let Some(index) = selected.text_index() {
@@ -934,6 +1064,7 @@ fn draw_editor(
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(command_height),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -995,6 +1126,19 @@ fn draw_editor(
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
+            tty_name(choices.sync_rows_cols),
+            option_style(selected == EditorField::SyncRowsCols),
+        )))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(choice_border_style(selected == EditorField::SyncRowsCols))
+                .title(EditorField::SyncRowsCols.title()),
+        ),
+        areas[4],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
             restart_name(choices.restart),
             option_style(selected == EditorField::Restart),
         )))
@@ -1004,7 +1148,7 @@ fn draw_editor(
                 .border_style(choice_border_style(selected == EditorField::Restart))
                 .title(EditorField::Restart.title()),
         ),
-        areas[4],
+        areas[5],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -1017,7 +1161,7 @@ fn draw_editor(
                 .border_style(choice_border_style(selected == EditorField::PersistLogs))
                 .title(EditorField::PersistLogs.title()),
         ),
-        areas[5],
+        areas[6],
     );
 
     if let Some(field) = fields.get(2) {
@@ -1036,13 +1180,13 @@ fn draw_editor(
         if selected == EditorField::Env {
             field.set_cursor_line_style(Style::default().bg(Color::DarkGray));
         }
-        frame.render_widget(&field, areas[6]);
+        frame.render_widget(&field, areas[7]);
     }
 
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[7]);
+    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[8]);
     frame.render_widget(
         Paragraph::new(editor_footer(selected, popup.is_some())).wrap(Wrap { trim: false }),
-        areas[8],
+        areas[9],
     );
 
     if let Some(popup) = popup {
@@ -1106,7 +1250,10 @@ fn editor_footer(selected: EditorField, popup_open: bool) -> String {
         "up/down/j/k choose   Enter apply   Esc close".to_owned()
     } else if matches!(
         selected,
-        EditorField::Tty | EditorField::Restart | EditorField::PersistLogs
+        EditorField::Tty
+            | EditorField::SyncRowsCols
+            | EditorField::Restart
+            | EditorField::PersistLogs
     ) {
         "Tab next   Shift-Tab previous   Enter choose   Ctrl-S save   Esc/Ctrl-C cancel".to_owned()
     } else if selected == EditorField::Command {
@@ -1206,32 +1353,36 @@ mod tests {
     #[test]
     fn editor_command_height_grows_and_stays_bounded() {
         assert_eq!(editor_command_height(1, 30), 3);
-        assert_eq!(editor_command_height(4, 30), 6);
-        assert_eq!(editor_command_height(20, 30), EDITOR_COMMAND_MAX_HEIGHT);
+        assert_eq!(editor_command_height(4, 30), 5);
+        assert_eq!(editor_command_height(20, 40), EDITOR_COMMAND_MAX_HEIGHT);
     }
 
     #[test]
     fn editor_focus_follows_visual_order_and_wraps() {
         assert_eq!(EditorField::Name.next(), EditorField::Command);
         assert_eq!(EditorField::Command.next(), EditorField::Tty);
-        assert_eq!(EditorField::Tty.next(), EditorField::Restart);
+        assert_eq!(EditorField::Tty.next(), EditorField::SyncRowsCols);
+        assert_eq!(EditorField::SyncRowsCols.next(), EditorField::Restart);
         assert_eq!(EditorField::Restart.next(), EditorField::PersistLogs);
         assert_eq!(EditorField::PersistLogs.next(), EditorField::Env);
         assert_eq!(EditorField::Env.next(), EditorField::Name);
 
         assert_eq!(EditorField::Name.previous(), EditorField::Env);
         assert_eq!(EditorField::Env.previous(), EditorField::PersistLogs);
-        assert_eq!(EditorField::Restart.previous(), EditorField::Tty);
+        assert_eq!(EditorField::Restart.previous(), EditorField::SyncRowsCols);
+        assert_eq!(EditorField::SyncRowsCols.previous(), EditorField::Tty);
         assert_eq!(EditorField::PersistLogs.previous(), EditorField::Restart);
     }
 
     #[test]
     fn popup_selection_is_staged_until_apply() {
         let mut tty = true;
+        let mut sync_rows_cols = true;
         let mut restart = RestartPolicy::Never;
         let mut persist_logs = false;
         let mut tty_popup =
-            EditorPopup::open(EditorField::Tty, tty, restart, persist_logs).expect("TTY popup");
+            EditorPopup::open(EditorField::Tty, tty, sync_rows_cols, restart, persist_logs)
+                .expect("TTY popup");
         tty_popup.move_down();
         assert_eq!(
             tty_popup.option_label(tty_popup.selected_index()),
@@ -1239,21 +1390,59 @@ mod tests {
         );
         assert!(tty);
 
-        let mut restart_popup = EditorPopup::open(EditorField::Restart, tty, restart, persist_logs)
-            .expect("restart popup");
+        let mut sync_popup = EditorPopup::open(
+            EditorField::SyncRowsCols,
+            tty,
+            sync_rows_cols,
+            restart,
+            persist_logs,
+        )
+        .expect("sync rows/cols popup");
+        sync_popup.move_down();
+        sync_popup.apply(
+            &mut tty,
+            &mut sync_rows_cols,
+            &mut restart,
+            &mut persist_logs,
+        );
+        assert!(!sync_rows_cols);
+
+        let mut restart_popup = EditorPopup::open(
+            EditorField::Restart,
+            tty,
+            sync_rows_cols,
+            restart,
+            persist_logs,
+        )
+        .expect("restart popup");
         restart_popup.move_down();
         restart_popup.move_down();
         assert_eq!(restart_popup.selected_index(), 2);
         restart_popup.move_up();
-        restart_popup.apply(&mut tty, &mut restart, &mut persist_logs);
+        restart_popup.apply(
+            &mut tty,
+            &mut sync_rows_cols,
+            &mut restart,
+            &mut persist_logs,
+        );
         assert!(tty);
         assert_eq!(restart, RestartPolicy::OnFailure);
 
-        let mut persist_popup =
-            EditorPopup::open(EditorField::PersistLogs, tty, restart, persist_logs)
-                .expect("persist popup");
+        let mut persist_popup = EditorPopup::open(
+            EditorField::PersistLogs,
+            tty,
+            sync_rows_cols,
+            restart,
+            persist_logs,
+        )
+        .expect("persist popup");
         persist_popup.move_down();
-        persist_popup.apply(&mut tty, &mut restart, &mut persist_logs);
+        persist_popup.apply(
+            &mut tty,
+            &mut sync_rows_cols,
+            &mut restart,
+            &mut persist_logs,
+        );
         assert!(persist_logs);
     }
 
@@ -1321,6 +1510,7 @@ mod tests {
                     &fields,
                     EditorChoices {
                         tty: false,
+                        sync_rows_cols: true,
                         restart: RestartPolicy::OnFailure,
                         persist_logs: false,
                     },
@@ -1340,6 +1530,7 @@ mod tests {
         assert!(text.contains("echo second"));
         assert!(text.contains("TTY"));
         assert!(text.contains("Disabled"));
+        assert!(text.contains("sync rows/cols"));
         assert!(text.contains("restart"));
         assert!(text.contains("on-failure"));
         assert!(text.contains("always"));

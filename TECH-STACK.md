@@ -51,7 +51,8 @@ container runtime, namespace manager, or resource policy engine.
   to multiple read-only observers and discard their input. Each attach relay gets a
   manager-owned sanitized snapshot of the current run; the worker subscribes to
   live output before writing it, and the snapshot is 48 logical lines capped at
-  16 KiB.
+  16 KiB. Attach resize control uses a separate long-lived framed connection and
+  an opaque token, so terminal-size messages never share the raw byte stream.
 - The socket is created with user-only filesystem permissions and is never
   exposed over TCP.
 
@@ -70,10 +71,11 @@ container runtime, namespace manager, or resource policy engine.
   contextual two-line operation bar stays visible below the tip and exposes attach
   for both PTY and pipe services.
 - `served edit` keeps the JSON and fixed `.env` buffers in `tui-textarea` fields
-  and renders `TTY`, `restart`, and `persist logs` as ordinary visible choice rows.
+  and renders `TTY`, `sync rows/cols`, `restart`, and `persist logs` as ordinary
+  visible choice rows.
   The visual order is also the keyboard focus order. Enter opens an in-memory
   popup for a choice; Enter applies it and Esc discards it. Tab and Shift-Tab move
-  through all six fields.
+  through all seven fields.
 - The `h` history page first lists records and then loads sanitized content in
   paginated chunks. It reuses the manager TUI alternate screen and never replays
   history through attach.
@@ -83,6 +85,10 @@ container runtime, namespace manager, or resource policy engine.
   owns an alternate screen until exit.
 - TUI attach reuses the TUI-owned alternate screen, clearing and redrawing around
   the raw relay instead of nesting a second alternate-screen owner.
+- The attach client samples `crossterm::terminal::size()` about every 250ms and
+  sends only changes, beginning with an immediate initial size. Control failures
+  are retried with backoff while raw attach continues. The manager resizes the
+  active worker PTY only when `syncRowsCols` and the attach token are valid.
 - The shared attach relay treats `Ctrl-C` as detach for both direct and TUI attach;
   it is not forwarded to the service. Pipe attach ignores all other input. Attach
   snapshots are display-only cleaned output and do not replay terminal control state.

@@ -36,6 +36,7 @@ manager can consistently load `.served.json`, `.env`, and the working directory.
   "name": "api",
   "command": "python app.py",
   "tty": true,
+  "syncRowsCols": true,
   "restart": "never"
 }
 ```
@@ -46,6 +47,9 @@ Fields:
 - `command`: required shell command string. It may contain multiple lines and is
   executed as a multi-line `/bin/sh -c` script.
 - `tty`: optional boolean, default `true`.
+- `syncRowsCols`: optional boolean, default `true`; for TTY attach, synchronize
+  the managed PTY size to the attaching terminal. It is stored but has no effect
+  when `tty` is `false`.
 - `restart`: optional policy, default `never`.
 - Supported restart policies: `never`, `on-failure`, and `always`.
 
@@ -89,13 +93,13 @@ changes files only; it does not apply a running-service change automatically.
 
 The JSON editor is form-based. The `.env` editor manages the fixed same-directory
 file. The fields are rendered from top to bottom in this order: `name`, `command`,
-`TTY`, `restart`, `persist logs`, and `.env`. The command area grows with its line
+`TTY`, `sync rows/cols`, `restart`, `persist logs`, and `.env`. The command area grows with its line
 count up to a bounded height and then scrolls. `Tab` moves forward and `Shift-Tab`
 moves backward.
 The `TTY` field displays `Enabled` or `Disabled`; the `restart` field displays
 `never`, `on-failure`, or `always`.
 
-When `TTY`, `restart`, or `persist logs` has focus, `Enter` opens a selection popup. Up/down arrow
+When `TTY`, `sync rows/cols`, `restart`, or `persist logs` has focus, `Enter` opens a selection popup. Up/down arrow
 keys or `j`/`k` move its temporary highlight. `Enter` applies the highlighted
 value, while `Esc` closes the popup without applying it. In the normal editor,
 `Enter` inserts a command line break when `command` has focus. Bracketed paste
@@ -150,6 +154,10 @@ attach. For `tty: false`, the session is read-only: stdout and stderr are forwar
 as raw bytes after the snapshot, input is ignored, and multiple observers are allowed. `Ctrl+C`
 detaches from either session and is not forwarded to the service. Detaching does
 not stop or disable the service.
+For a TTY service, the client immediately sends its terminal size and polls for
+changes about every 250ms. When `syncRowsCols` is true, the manager applies those
+dimensions to the active PTY. Resize-control failures are recoverable and do not
+terminate raw attach; `syncRowsCols: false` makes valid resize requests no-ops.
 
 ### `served list`
 
@@ -174,6 +182,9 @@ Lists services currently running under the manager.
 
 - Services use a PTY by default.
 - A service may opt out with `tty: false`.
+- A TTY attach synchronizes rows/cols by default; a service may opt out with
+  `syncRowsCols: false`. The last attached size remains after detach, while a
+  newly started PTY begins at its default size.
 - TUI attach takes over the TUI-owned alternate screen, clears it, and redraws the
   service manager after detach; it does not nest another alternate-screen owner.
 - Direct CLI attach enters its own alternate screen and returns to the shell after
@@ -186,6 +197,8 @@ Lists services currently running under the manager.
 - `Ctrl+C` in an attach session detaches instead of being sent to the service.
 - `Ctrl+C` in the service-management TUI outside an attach session exits the TUI
   client; it does not stop managed services.
+- The manager IPC protocol is versioned; attach resize control uses the current
+  protocol and does not share frames with the raw PTY stream.
 
 ## Output History
 
@@ -238,7 +251,7 @@ The `served edit` screen uses the same rotating tips set and displays its own
 contextual operation bar. Its focus order is the same as the visual field order
 above.
 
-The editor focus order is `name`, `command`, `TTY`, `restart`, `persist logs`, and
+The editor focus order is `name`, `command`, `TTY`, `sync rows/cols`, `restart`, `persist logs`, and
 `.env`. Choice rows use an Enter popup and show their available keys in the bottom
 operation bar.
 

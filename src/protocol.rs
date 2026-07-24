@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_FRAME_LENGTH: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +32,12 @@ pub enum Request {
     },
     Attach {
         name: String,
+    },
+    Resize {
+        name: String,
+        token: String,
+        cols: u16,
+        rows: u16,
     },
     HistoryList {
         target: Target,
@@ -79,6 +85,9 @@ pub struct HistoryRecord {
 pub enum Response {
     Hello {
         version: u32,
+    },
+    Attach {
+        token: String,
     },
     Ok,
     Services {
@@ -186,5 +195,25 @@ mod tests {
         let value = serde_json::to_value(&request).expect("serialize");
         let decoded: Request = serde_json::from_value(value).expect("decode");
         assert!(matches!(decoded, Request::HistoryChunk { .. }));
+    }
+
+    #[test]
+    fn resize_request_round_trips_as_json() {
+        let request = Request::Resize {
+            name: "vim".to_owned(),
+            token: "session-token".to_owned(),
+            cols: 120,
+            rows: 40,
+        };
+        let value = serde_json::to_value(&request).expect("serialize");
+        let decoded: Request = serde_json::from_value(value).expect("decode");
+        assert!(matches!(
+            decoded,
+            Request::Resize {
+                cols: 120,
+                rows: 40,
+                ..
+            }
+        ));
     }
 }

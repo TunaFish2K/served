@@ -10,6 +10,9 @@ Status: accepted implementation context for attach and output history behavior.
   attach session is bidirectional and has one writer.
 - **Pipe service** means a service with `tty: false`. Its attach session is a
   read-only live output viewer.
+- **PTY size synchronization** means that an active TTY attach client can apply
+  its terminal rows and columns to the manager-owned PTY. It is controlled by
+  `syncRowsCols` and does not replay terminal screen state.
 - **Attach** is the same named raw socket handoff for the TUI `a` action and the
   `served attach [name]` command.
 - **Output history** is manager-owned stdout/stderr or PTY output captured per
@@ -48,9 +51,20 @@ Status: accepted implementation context for attach and output history behavior.
 - The structured editor exposes actual command newlines as separate rows. CRLF and
   standalone CR are normalized to LF when editing; actual LF remains `/bin/sh -c`
   script syntax.
+- `syncRowsCols` defaults to `true`, is shown as a choice row in the structured
+  editor, and takes effect on the next service start or restart. It is a no-op for
+  pipe services.
+- Resize control uses a separate long-lived framed manager connection, an opaque
+  attach token, and a versioned protocol. The client sends the initial terminal
+  size immediately, polls for changes, and reconnects with backoff after control
+  failures. The last PTY size remains after detach; a newly started PTY uses its
+  default size.
 
 ## Compatibility
 
-The `Request::Attach { name }` wire shape and protocol version remain unchanged.
-The manager selects the PTY or pipe relay from the enabled service configuration.
+The `Request::Attach { name }` request remains named and the manager selects the
+PTY or pipe relay from the enabled service configuration. The protocol version is
+2 because attach now returns an opaque token and resize control is an explicit
+`Request::Resize` message on a separate framed connection. Version mismatch is
+rejected during the handshake; raw PTY bytes are never mixed with control frames.
 History requests use the same manager IPC and require a current manager binary.

@@ -60,6 +60,8 @@ pub struct ServiceConfig {
     pub command: String,
     #[serde(default = "default_tty")]
     pub tty: bool,
+    #[serde(rename = "syncRowsCols", default = "default_sync_rows_cols")]
+    pub sync_rows_cols: bool,
     #[serde(default)]
     pub restart: RestartPolicy,
     #[serde(default)]
@@ -67,6 +69,10 @@ pub struct ServiceConfig {
 }
 
 fn default_tty() -> bool {
+    true
+}
+
+fn default_sync_rows_cols() -> bool {
     true
 }
 
@@ -107,6 +113,7 @@ impl ServiceConfig {
             name,
             command: "./run.sh".to_owned(),
             tty: true,
+            sync_rows_cols: true,
             restart: RestartPolicy::Never,
             persist_logs: false,
         }
@@ -200,6 +207,7 @@ mod tests {
 
         let service = load_service(directory.path(), &base).expect("load");
         assert!(service.config.tty);
+        assert!(service.config.sync_rows_cols);
         assert!(!service.config.persist_logs);
         assert_eq!(service.environment.get("PORT"), Some(&"8080".to_owned()));
         assert_eq!(
@@ -238,5 +246,22 @@ mod tests {
         .expect("config");
         let service = load_service(directory.path(), &BTreeMap::new()).expect("load");
         assert!(service.config.persist_logs);
+    }
+
+    #[test]
+    fn sync_rows_cols_can_be_disabled_with_camel_case_json_key() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            r#"{"name":"api","command":"echo ok","syncRowsCols":false}"#,
+        )
+        .expect("config");
+        let service = load_service(directory.path(), &BTreeMap::new()).expect("load");
+        assert!(!service.config.sync_rows_cols);
+        let encoded = serde_json::to_value(&service.config).expect("serialize config");
+        assert_eq!(
+            encoded.get("syncRowsCols"),
+            Some(&serde_json::Value::Bool(false))
+        );
     }
 }

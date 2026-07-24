@@ -1,6 +1,6 @@
 [package]
 name = "served"
-version = "0.1.4"
+version = "1.0.5"
 edition = "2024"
 description = "A lightweight per-user service manager for local development"
 license = "MIT"

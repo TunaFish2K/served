@@ -12,6 +12,8 @@ Docker 替代的容器运行时，也不负责 root 服务、命名空间或资�
 - 服务工作目录固定为配置目录。
 - `.env` 只读取当前服务目录中的文件，并覆盖 manager 的启动环境。
 - 默认使用 PTY，可用 `tty: false` 改用 stdout/stderr 管道。
+- TTY attach 默认把服务 PTY 的 rows/cols 同步为当前 attach 终端尺寸，可用
+  `syncRowsCols: false` 关闭。
 - `never`、`on-failure`、`always` 重启策略和指数退避。
 - PTY 服务支持可写 attach；pipe 服务支持只读 attach。所有 attach 都使用终端第二屏。
 - `served attach [name]` 可绕过 TUI 直接进入 attach 会话。
@@ -64,14 +66,14 @@ export PATH="$HOME/.local/bin:$PATH"
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并
-构建 Linux amd64/glibc 产物。例如版本 `0.1.4` 使用 tag `v0.1.4`，Release 会
+构建 Linux amd64/glibc 产物。例如版本 `1.0.5` 使用 tag `v1.0.5`，Release 会
 包含：
 
 ```text
-served-linux-amd64-v0.1.4-binary
-served-linux-amd64-v0.1.4-binary.sha256
-served-linux-amd64-v0.1.4-full.tar.gz
-served-linux-amd64-v0.1.4-full.tar.gz.sha256
+served-linux-amd64-v1.0.5-binary
+served-linux-amd64-v1.0.5-binary.sha256
+served-linux-amd64-v1.0.5-full.tar.gz
+served-linux-amd64-v1.0.5-full.tar.gz.sha256
 ```
 
 `binary` 是只包含可执行文件的产物；`full.tar.gz` 是包含 `served`、
@@ -90,6 +92,7 @@ served-linux-amd64-v0.1.4-full.tar.gz.sha256
   "name": "api",
   "command": "python app.py",
   "tty": true,
+  "syncRowsCols": true,
   "restart": "never",
   "persist_logs": false
 }
@@ -103,6 +106,8 @@ served-linux-amd64-v0.1.4-full.tar.gz.sha256
   表示实际换行，保存后仍由 shell 按多行脚本执行；如果参数需要字面量 `\n`，
   JSON 中应写成 `\\n`。
 - `tty`：可选，默认 `true`；设置为 `false` 使用管道模式。
+- `syncRowsCols`：可选，默认 `true`；attach TTY 服务时把 PTY 尺寸同步为当前终端
+  尺寸。`tty: false` 时该字段保留但不生效。
 - `restart`：可选，默认 `never`；可选值为 `never`、`on-failure`、`always`。
 - `persist_logs`：可选，默认 `false`；设置为 `true` 将每次运行的完整输出保存到
   XDG state 日志目录。配置修改在下次启动或重启时生效。
@@ -120,9 +125,9 @@ manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值�
 和 `h history`。TTY 服务的 attach 可写入服务，`tty: false` 服务的 attach 只读；两者
 都进入终端第二屏。操作栏在窄终端中自动换行到两行。
 
-`served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`restart`、
-`persist logs` 和 `.env`。command 区域会按行数动态扩展，标题显示总行数，过长时
-支持滚动；粘贴文本会保留多行结构，CRLF 和 CR 会规范为 LF。使用 `Tab` 前进、`Shift-Tab` 后退；TTY 和 `persist logs`
+`served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`sync rows/cols`、
+`restart`、`persist logs` 和 `.env`。command 区域会按行数动态扩展，标题显示总行数，过长时
+支持滚动；粘贴文本会保留多行结构，CRLF 和 CR 会规范为 LF。使用 `Tab` 前进、`Shift-Tab` 后退；TTY、`sync rows/cols` 和 `persist logs`
 字段显示 `Enabled/Disabled`，restart 字段显示 `never/on-failure/always`。焦点在
 选择字段时按 `Enter`
 打开菜单，用上下方向键或 `j/k` 移动，`Enter` 应用选择，`Esc` 关闭菜单且不应用
@@ -152,6 +157,9 @@ served list            列出 manager 管理的服务
 `tty: true` 服务的会话可写入 PTY；`tty: false` 服务只转发快照和实时 stdout/stderr，
 并忽略输入。pipe 服务可以有多个只读观察者。attach 会话中按 `Ctrl-C` 退出 attach，
 服务本身不会被停止；该按键不会转发给服务。
+对于 `tty: true`，attach 首次连接和终端尺寸变化会更新服务 PTY 的 rows/cols；
+`syncRowsCols: false` 时保持 PTY 的初始尺寸。控制连接断开时原始 attach 仍可继续，
+客户端会在后台重连并重新发送当前尺寸；detach 不会把尺寸重置为初始值。
 
 按 `h` 后先选择 `latest` 或时间归档，再按 `Enter` 查看清理后的日志内容；内容页
 支持上下键、`j/k`、`PgUp/PgDn` 和 `g/G`。历史页与 attach 分离，attach 不会回放

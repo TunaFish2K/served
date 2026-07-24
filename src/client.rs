@@ -5,35 +5,72 @@ use tokio::net::UnixStream;
 
 use crate::{
     paths::ServedPaths,
-    protocol::{Request, Response, ServiceInfo, Target, connect, receive_json, send_json},
+    protocol::{Frame, Request, Response, ServiceInfo, Target, connect, receive_json, send_json},
 };
+
+pub struct AttachSession {
+    pub stream: UnixStream,
+    pub token: String,
+}
 
 pub async fn request(paths: &ServedPaths, request: Request) -> Result<Response> {
     crate::protocol::request(&paths.socket_path(), request).await
 }
 
-pub async fn attach(paths: &ServedPaths, name: String) -> Result<UnixStream> {
+pub async fn attach(paths: &ServedPaths, name: String) -> Result<AttachSession> {
     let mut frame = connect(&paths.socket_path()).await?;
     send_json(&mut frame, &Request::Attach { name }).await?;
-    match receive_json::<Response>(&mut frame).await? {
-        Response::Ok => {}
+    let token = match receive_json::<Response>(&mut frame).await? {
+        Response::Attach { token } => token,
         Response::Error { message } => anyhow::bail!("attach: {message}"),
         response => anyhow::bail!("unexpected attach response: {response:?}"),
-    }
-    Ok(frame.into_inner())
+    };
+    Ok(AttachSession {
+        stream: frame.into_inner(),
+        token,
+    })
 }
 
 pub async fn attach_current(
     paths: &ServedPaths,
     directory: impl AsRef<Path>,
-) -> Result<UnixStream> {
+) -> Result<(String, AttachSession)> {
     let directory = fs::canonicalize(directory).context("canonicalize current directory")?;
     let response = request(paths, Request::List).await?;
     let Response::Services { services } = response else {
         bail!("unexpected manager response while resolving current service")
     };
     let name = service_name_for_directory(&services, &directory)?;
-    attach(paths, name).await
+    let session = attach(paths, name.clone()).await?;
+    Ok((name, session))
+}
+
+pub async fn open_resize_control(paths: &ServedPaths) -> Result<Frame> {
+    connect(&paths.socket_path()).await
+}
+
+pub async fn send_resize(
+    frame: &mut Frame,
+    name: &str,
+    token: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
+    send_json(
+        frame,
+        &Request::Resize {
+            name: name.to_owned(),
+            token: token.to_owned(),
+            cols,
+            rows,
+        },
+    )
+    .await?;
+    match receive_json::<Response>(frame).await? {
+        Response::Ok => Ok(()),
+        Response::Error { message } => bail!("resize: {message}"),
+        response => bail!("unexpected resize response: {response:?}"),
+    }
 }
 
 fn service_name_for_directory(services: &[ServiceInfo], directory: &Path) -> Result<String> {

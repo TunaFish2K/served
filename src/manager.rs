@@ -29,10 +29,11 @@ pub enum ManagerCommand {
     },
     PrepareAttach {
         name: String,
-        reply: oneshot::Sender<std::result::Result<(), String>>,
+        reply: oneshot::Sender<std::result::Result<String, String>>,
     },
     Attach {
         name: String,
+        token: String,
         stream: UnixStream,
     },
 }
@@ -43,6 +44,7 @@ struct ManagedService {
     pid: Option<u32>,
     worker: Option<mpsc::Sender<WorkerCommand>>,
     attach_active: bool,
+    attach_token: Option<String>,
     logs: LogStore,
 }
 
@@ -122,6 +124,7 @@ impl ManagerState {
             existing.pid = None;
             existing.worker = Some(worker);
             existing.attach_active = false;
+            existing.attach_token = None;
             return Ok(());
         }
         let log_directory = self.paths.logs_dir().join(&name);
@@ -133,6 +136,7 @@ impl ManagerState {
                 pid: None,
                 worker: Some(worker),
                 attach_active: false,
+                attach_token: None,
                 logs: LogStore::new(log_directory),
             },
         );
@@ -149,6 +153,12 @@ impl ManagerState {
             Request::Disable { target } => self.disable(target).await,
             Request::Restart { target } => self.restart(target).await,
             Request::Attach { .. } => Err("attach requires a raw socket handoff".to_owned()),
+            Request::Resize {
+                name,
+                token,
+                cols,
+                rows,
+            } => self.resize(name, token, cols, rows).await,
             Request::HistoryList { target } => self.history_list(target),
             Request::HistoryChunk {
                 target,
@@ -290,7 +300,7 @@ impl ManagerState {
         }
     }
 
-    fn prepare_attach(&mut self, name: &str) -> std::result::Result<(), String> {
+    fn prepare_attach(&mut self, name: &str) -> std::result::Result<String, String> {
         let Some(service) = self.services.get_mut(name) else {
             return Err(format!("service {name:?} is not enabled"));
         };
@@ -302,11 +312,14 @@ impl ManagerState {
         }
         if service.definition.config.tty {
             service.attach_active = true;
+            let token = new_attach_token();
+            service.attach_token = Some(token.clone());
+            return Ok(token);
         }
-        Ok(())
+        Ok(new_attach_token())
     }
 
-    async fn handle_attach(&mut self, name: String, stream: UnixStream) {
+    async fn handle_attach(&mut self, name: String, token: String, stream: UnixStream) {
         let Some(service) = self.services.get(&name) else {
             return;
         };
@@ -315,15 +328,58 @@ impl ManagerState {
             if tty {
                 if let Some(service) = self.services.get_mut(&name) {
                     service.attach_active = false;
+                    service.attach_token = None;
                 }
             }
             return;
         };
         if worker.send(WorkerCommand::Attach { stream }).await.is_err() && tty {
             if let Some(service) = self.services.get_mut(&name) {
-                service.attach_active = false;
+                if service.attach_token.as_deref() == Some(token.as_str()) {
+                    service.attach_active = false;
+                    service.attach_token = None;
+                }
             }
         }
+    }
+
+    async fn resize(
+        &mut self,
+        name: String,
+        token: String,
+        cols: u16,
+        rows: u16,
+    ) -> std::result::Result<Response, String> {
+        if cols == 0 || rows == 0 {
+            return Err("resize dimensions must be greater than zero".to_owned());
+        }
+        let Some(service) = self.services.get(&name) else {
+            return Err(format!("service {name:?} is not enabled"));
+        };
+        if service.worker.is_none() || !matches!(service.state, ServiceState::Running) {
+            return Err(format!("service {name:?} is not running"));
+        }
+        if !service.definition.config.tty
+            || !service.definition.config.sync_rows_cols
+            || !service.attach_active
+            || service.attach_token.as_deref() != Some(token.as_str())
+        {
+            return Ok(Response::Ok);
+        }
+        let worker = service
+            .worker
+            .clone()
+            .expect("running service must have a worker");
+        let (reply, receiver) = oneshot::channel();
+        worker
+            .send(WorkerCommand::Resize { cols, rows, reply })
+            .await
+            .map_err(|_| "service worker is no longer available".to_owned())?;
+        receiver
+            .await
+            .map_err(|_| "service worker stopped during resize".to_owned())?
+            .map_err(|error| format!("cannot resize service PTY: {error}"))?;
+        Ok(Response::Ok)
     }
 
     fn handle_event(&mut self, event: WorkerEvent) {
@@ -357,6 +413,8 @@ impl ManagerState {
             } => {
                 if let Some(service) = self.services.get_mut(&name) {
                     service.pid = None;
+                    service.attach_active = false;
+                    service.attach_token = None;
                     service.state = if service.definition.config.restart.should_restart(success) {
                         ServiceState::Restarting
                     } else {
@@ -368,6 +426,8 @@ impl ManagerState {
                 if let Some(service) = self.services.get_mut(&name) {
                     service.state = ServiceState::Restarting;
                     service.pid = None;
+                    service.attach_active = false;
+                    service.attach_token = None;
                 }
             }
             WorkerEvent::Stopped { name } => {
@@ -376,6 +436,7 @@ impl ManagerState {
                     service.pid = None;
                     service.worker = None;
                     service.attach_active = false;
+                    service.attach_token = None;
                 }
             }
             WorkerEvent::Failed { name, error } => {
@@ -383,11 +444,16 @@ impl ManagerState {
                 if let Some(service) = self.services.get_mut(&name) {
                     service.state = ServiceState::Failed;
                     service.pid = None;
+                    service.attach_active = false;
+                    service.attach_token = None;
                 }
             }
             WorkerEvent::AttachChanged { name, active } => {
                 if let Some(service) = self.services.get_mut(&name) {
                     service.attach_active = active;
+                    if !active {
+                        service.attach_token = None;
+                    }
                 }
             }
         }
@@ -470,6 +536,10 @@ fn validate_target_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+fn new_attach_token() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
 fn restart_name(policy: RestartPolicy) -> &'static str {
     match policy {
         RestartPolicy::Never => "never",
@@ -536,7 +606,11 @@ pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
                 ManagerCommand::PrepareAttach { name, reply } => {
                     let _ = reply.send(state.prepare_attach(&name));
                 }
-                ManagerCommand::Attach { name, stream } => state.handle_attach(name, stream).await,
+                ManagerCommand::Attach {
+                    name,
+                    token,
+                    stream,
+                } => state.handle_attach(name, token, stream).await,
             },
             Some(event) = event_receiver.recv() => state.handle_event(event),
             else => break,
@@ -598,14 +672,27 @@ async fn handle_connection(
                 })
                 .await
                 .context("prepare attach request")?;
-            if let Err(message) = receiver.await.context("receive attach response")? {
-                send_json(&mut frame, &Response::Error { message }).await?;
-                return Ok(());
-            }
-            send_json(&mut frame, &Response::Ok).await?;
+            let token = match receiver.await.context("receive attach response")? {
+                Ok(token) => token,
+                Err(message) => {
+                    send_json(&mut frame, &Response::Error { message }).await?;
+                    return Ok(());
+                }
+            };
+            send_json(
+                &mut frame,
+                &Response::Attach {
+                    token: token.clone(),
+                },
+            )
+            .await?;
             let stream = frame.into_inner();
             commands
-                .send(ManagerCommand::Attach { name, stream })
+                .send(ManagerCommand::Attach {
+                    name,
+                    token,
+                    stream,
+                })
                 .await
                 .context("send attach request to manager")?;
             return Ok(());

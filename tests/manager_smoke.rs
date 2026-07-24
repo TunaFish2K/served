@@ -265,8 +265,9 @@ async fn pty_service_accepts_one_attach_session() {
         service_dir.join(".served.json"),
         r#"{
   "name": "pty-smoke",
-  "command": "for i in $(seq 0 57); do printf 'cache-%02d\\n' \"$i\"; done; read -r line; printf 'reply:%s\\n' \"$line\"; sleep 60",
+  "command": "for i in $(seq 0 57); do printf 'cache-%02d\\n' \"$i\"; done; read -r line; stty size; printf 'reply:%s\\n' \"$line\"; sleep 60",
   "tty": true,
+  "syncRowsCols": true,
   "restart": "never"
 }
 "#,
@@ -298,35 +299,28 @@ async fn pty_service_accepts_one_attach_session() {
     .expect("enable");
     wait_for_state(&paths, "pty-smoke", ServiceState::Running).await;
     wait_for_output_tail(&paths, "pty-smoke", "cache-57").await;
-    let mut stream = client::attach(&paths, "pty-smoke".to_owned())
+    let session = client::attach(&paths, "pty-smoke".to_owned())
         .await
         .expect("attach");
+    let mut resize_control = client::open_resize_control(&paths)
+        .await
+        .expect("open resize control");
+    client::send_resize(&mut resize_control, "pty-smoke", &session.token, 120, 40)
+        .await
+        .expect("resize PTY");
+    let mut stream = session.stream;
     stream
         .write_all(b"hello\n")
         .await
         .expect("write attach input");
+    let output = read_until(&mut stream, b"reply:hello").await;
     let second_attach = client::attach(&paths, "pty-smoke".to_owned()).await;
     assert!(second_attach.is_err(), "second attach must be rejected");
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let count = stream.read(&mut buffer).await.expect("read attach output");
-            if count == 0 {
-                break;
-            }
-            output.extend_from_slice(&buffer[..count]);
-            if String::from_utf8_lossy(&output).contains("reply:hello") {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("attach output timeout");
     let output = String::from_utf8_lossy(&output);
     assert!(output.contains("cache-10"));
     assert!(output.contains("cache-57"));
     assert!(!output.contains("cache-09"));
+    assert!(output.contains("40 120"));
     assert!(output.contains("reply:hello"));
     drop(stream);
     client::expect_ok(
@@ -387,12 +381,14 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
     wait_for_state(&paths, "pipe-attach", ServiceState::Running).await;
     wait_for_output_tail(&paths, "pipe-attach", "pipe-cache-57").await;
 
-    let mut first = client::attach(&paths, "pipe-attach".to_owned())
+    let first_session = client::attach(&paths, "pipe-attach".to_owned())
         .await
         .expect("first read-only attach");
-    let mut second = client::attach(&paths, "pipe-attach".to_owned())
+    let second_session = client::attach(&paths, "pipe-attach".to_owned())
         .await
         .expect("second read-only attach");
+    let mut first = first_session.stream;
+    let mut second = second_session.stream;
     first
         .write_all(b"ignored input\n")
         .await
@@ -472,7 +468,7 @@ async fn direct_attach_supports_name_and_current_directory() {
         service_dir.join(".served.json"),
         r#"{
   "name": "direct-attach",
-  "command": "while true; do printf 'attach-ready\\n'; sleep 1; done",
+  "command": "while true; do stty size; printf 'attach-ready\\n'; sleep 1; done",
   "tty": true,
   "restart": "never"
 }
@@ -524,8 +520,8 @@ fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) 
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: 40,
+            cols: 100,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -556,10 +552,13 @@ fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) 
                 }
                 Ok(count) => {
                     output.extend_from_slice(&buffer[..count]);
-                    if output
+                    let ready = output
                         .windows(b"attach-ready".len())
-                        .any(|window| window == b"attach-ready")
-                    {
+                        .any(|window| window == b"attach-ready");
+                    let resized = output
+                        .windows(b"40 100".len())
+                        .any(|window| window == b"40 100");
+                    if ready && resized {
                         let _ = ready_sender.send(());
                     }
                 }

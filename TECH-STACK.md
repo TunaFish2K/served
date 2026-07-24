@@ -48,7 +48,10 @@ container runtime, namespace manager, or resource policy engine.
   not access the state directory directly and large files do not exceed one frame.
 - Attach switches the already-authenticated connection to a raw byte stream. PTY
   services use one bidirectional writer; pipe services broadcast raw stdout/stderr
-  to multiple read-only observers and discard their input.
+  to multiple read-only observers and discard their input. Each attach relay gets a
+  manager-owned sanitized snapshot of the current run; the worker subscribes to
+  live output before writing it, and the snapshot is 48 logical lines capped at
+  16 KiB.
 - The socket is created with user-only filesystem permissions and is never
   exposed over TCP.
 
@@ -58,6 +61,9 @@ container runtime, namespace manager, or resource policy engine.
 - `ratatui` and `crossterm` render the service list and editor.
 - `tui-textarea` supplies text fields for the structured editor, including the
   `.env` buffer.
+- The command TextArea is initialized from normalized LF-separated rows, grows with
+  the script up to a bounded height, and handles crossterm bracketed paste so pasted
+  multi-line scripts remain visible and editable.
 - `rand` supplies a non-cryptographic random tip selection on each TUI start.
 - The first TUI screen is the global enabled-service list. It exposes status,
   restart, disable, attach, history, and the single `tips:` line. A
@@ -78,8 +84,8 @@ container runtime, namespace manager, or resource policy engine.
 - TUI attach reuses the TUI-owned alternate screen, clearing and redrawing around
   the raw relay instead of nesting a second alternate-screen owner.
 - The shared attach relay treats `Ctrl-C` as detach for both direct and TUI attach;
-  it is not forwarded to the service. Pipe attach ignores all other input and does
-  not replay the output ring buffer.
+  it is not forwarded to the service. Pipe attach ignores all other input. Attach
+  snapshots are display-only cleaned output and do not replay terminal control state.
 
 ## Errors, Logging, and Tests
 

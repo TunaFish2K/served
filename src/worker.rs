@@ -35,6 +35,7 @@ pub enum WorkerCommand {
     },
     Attach {
         stream: UnixStream,
+        replay: Vec<u8>,
     },
 }
 
@@ -207,7 +208,7 @@ async fn wait_backoff(
                 let _ = reply.send(Ok(()));
                 BackoffOutcome::Restart(service)
             }
-            Some(WorkerCommand::Attach { stream }) => {
+            Some(WorkerCommand::Attach { stream, .. }) => {
                 drop(stream);
                 BackoffOutcome::Timer
             }
@@ -309,7 +310,7 @@ async fn run_pipe(
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Restart { service });
                 }
-                Some(WorkerCommand::Attach { stream }) => {
+                Some(WorkerCommand::Attach { stream, replay }) => {
                     if attach_count == 0 {
                         let _ = events.send(WorkerEvent::AttachChanged {
                             name: name.clone(),
@@ -320,7 +321,7 @@ async fn run_pipe(
                     let output = output_tx.subscribe();
                     let done = attach_done_tx.clone();
                     tokio::spawn(async move {
-                        relay_readonly_attach(stream, output).await;
+                        relay_readonly_attach(stream, output, replay).await;
                         let _ = done.send(());
                     });
                 }
@@ -476,7 +477,7 @@ async fn run_pty(
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Restart { service });
                 }
-                Some(WorkerCommand::Attach { stream }) => {
+                Some(WorkerCommand::Attach { stream, replay }) => {
                     if attach_active {
                         drop(stream);
                     } else {
@@ -489,7 +490,7 @@ async fn run_pty(
                         let output = output_tx.subscribe();
                         let done = attach_done_tx.clone();
                         tokio::spawn(async move {
-                            relay_attach(stream, input, output).await;
+                            relay_attach(stream, input, output, replay).await;
                             let _ = done.send(());
                         });
                     }
@@ -575,8 +576,12 @@ async fn relay_attach(
     stream: UnixStream,
     input: mpsc::UnboundedSender<Vec<u8>>,
     mut output: broadcast::Receiver<Vec<u8>>,
+    replay: Vec<u8>,
 ) {
     let (mut reader, mut writer) = stream.into_split();
+    if !replay.is_empty() && writer.write_all(&replay).await.is_err() {
+        return;
+    }
     let mut buffer = [0_u8; 8192];
     loop {
         tokio::select! {
@@ -601,8 +606,15 @@ async fn relay_attach(
     }
 }
 
-async fn relay_readonly_attach(stream: UnixStream, mut output: broadcast::Receiver<Vec<u8>>) {
+async fn relay_readonly_attach(
+    stream: UnixStream,
+    mut output: broadcast::Receiver<Vec<u8>>,
+    replay: Vec<u8>,
+) {
     let (mut reader, mut writer) = stream.into_split();
+    if !replay.is_empty() && writer.write_all(&replay).await.is_err() {
+        return;
+    }
     let mut input = [0_u8; 8192];
     loop {
         tokio::select! {

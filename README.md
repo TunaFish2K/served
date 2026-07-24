@@ -99,6 +99,9 @@ served-linux-amd64-v0.1.3-full.tar.gz.sha256
 
 - `name`：全局唯一的启用服务名，只允许字母、数字、`.`, `_`, `-`。
 - `command`：通过 `/bin/sh -c` 执行的命令字符串。
+- `command` 可以是多行 shell 脚本；编辑器会逐行显示实际换行。JSON 中的 `\n`
+  表示实际换行，保存后仍由 shell 按多行脚本执行；如果参数需要字面量 `\n`，
+  JSON 中应写成 `\\n`。
 - `tty`：可选，默认 `true`；设置为 `false` 使用管道模式。
 - `restart`：可选，默认 `never`；可选值为 `never`、`on-failure`、`always`。
 - `persist_logs`：可选，默认 `false`；设置为 `true` 将每次运行的完整输出保存到
@@ -118,7 +121,8 @@ manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值�
 都进入终端第二屏。操作栏在窄终端中自动换行到两行。
 
 `served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`restart`、
-`persist logs` 和 `.env`。使用 `Tab` 前进、`Shift-Tab` 后退；TTY 和 `persist logs`
+`persist logs` 和 `.env`。command 区域会按行数动态扩展，标题显示总行数，过长时
+支持滚动；粘贴文本会保留多行结构，CRLF 和 CR 会规范为 LF。使用 `Tab` 前进、`Shift-Tab` 后退；TTY 和 `persist logs`
 字段显示 `Enabled/Disabled`，restart 字段显示 `never/on-failure/always`。焦点在
 选择字段时按 `Enter`
 打开菜单，用上下方向键或 `j/k` 移动，`Enter` 应用选择，`Esc` 关闭菜单且不应用
@@ -143,10 +147,11 @@ served list            列出 manager 管理的服务
 
 `served attach` 不启动服务管理 TUI。省略名称时使用当前目录对应的已启用服务；
 提供名称时可以从任意目录 attach。目标服务必须正在运行。attach 会话进入终端第二屏，
-退出时恢复原来的 shell 或 TUI 画面。`tty: true` 服务的会话可写入 PTY；`tty: false`
-服务只转发连接建立后的 stdout/stderr 原始字节，并忽略输入。pipe 服务可以有多个只读
-观察者。attach 会话中按 `Ctrl-C` 退出 attach，服务本身不会被停止；该按键不会转发
-给服务。
+先显示当前运行最近 48 个逻辑行的清理快照，再接入实时输出；快照最多约 16 KiB，
+不会发送给服务，也不是 PTY 屏幕状态回放。退出时恢复原来的 shell 或 TUI 画面。
+`tty: true` 服务的会话可写入 PTY；`tty: false` 服务只转发快照和实时 stdout/stderr，
+并忽略输入。pipe 服务可以有多个只读观察者。attach 会话中按 `Ctrl-C` 退出 attach，
+服务本身不会被停止；该按键不会转发给服务。
 
 按 `h` 后先选择 `latest` 或时间归档，再按 `Enter` 查看清理后的日志内容；内容页
 支持上下键、`j/k`、`PgUp/PgDn` 和 `g/G`。历史页与 attach 分离，attach 不会回放

@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use crossterm::{
     cursor::{MoveTo, Show},
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{
         Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
@@ -46,6 +46,10 @@ const TIPS: &[&str] = &[
     "history keeps live output separate from attach",
     "persistent logs live below the XDG state directory",
 ];
+
+const EDITOR_FIXED_HEIGHT: u16 = 22;
+const EDITOR_COMMAND_MIN_HEIGHT: u16 = 3;
+const EDITOR_COMMAND_MAX_HEIGHT: u16 = 8;
 
 pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
     let stream = match name {
@@ -729,7 +733,7 @@ pub fn edit_current(directory: &Path) -> Result<()> {
     };
     let mut fields = vec![
         TextArea::new(vec![config.name]),
-        TextArea::new(vec![config.command]),
+        TextArea::new(command_lines(&config.command)),
         TextArea::new(if env.is_empty() {
             vec![String::new()]
         } else {
@@ -747,7 +751,12 @@ pub fn edit_current(directory: &Path) -> Result<()> {
     let mut terminal =
         Terminal::new(CrosstermBackend::new(stdout())).context("create editor terminal")?;
     enable_raw_mode().context("enable editor raw mode")?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen).context("enter editor screen")?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste
+    )
+    .context("enter editor screen")?;
     let result = editor_loop(
         &mut terminal,
         &mut fields,
@@ -757,7 +766,12 @@ pub fn edit_current(directory: &Path) -> Result<()> {
         random_tip(),
     );
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )
+    .ok();
     let (tty, restart, persist_logs) = match result {
         Ok(value) => value,
         Err(error) if error.to_string() == "editor cancelled" => return Ok(()),
@@ -779,6 +793,27 @@ pub fn edit_current(directory: &Path) -> Result<()> {
     )?;
     fs::write(env_path, format!("{}\n", fields[2].lines().join("\n")))?;
     Ok(())
+}
+
+fn normalize_editor_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn command_lines(value: &str) -> Vec<String> {
+    normalize_editor_line_endings(value)
+        .split('\n')
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn editor_command_height(line_count: usize, terminal_height: u16) -> u16 {
+    let desired = line_count.saturating_add(2).min(u16::MAX as usize) as u16;
+    let desired = desired.clamp(EDITOR_COMMAND_MIN_HEIGHT, EDITOR_COMMAND_MAX_HEIGHT);
+    desired.min(
+        terminal_height
+            .saturating_sub(EDITOR_FIXED_HEIGHT)
+            .max(EDITOR_COMMAND_MIN_HEIGHT),
+    )
 }
 
 fn editor_loop(
@@ -809,15 +844,12 @@ fn editor_loop(
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            bail!("editor cancelled");
-        }
+        let event = event::read()?;
 
         if let Some(current_popup) = popup.as_mut() {
+            let Event::Key(key) = event else {
+                continue;
+            };
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => current_popup.move_up(),
                 KeyCode::Down | KeyCode::Char('j') => current_popup.move_down(),
@@ -830,6 +862,21 @@ fn editor_loop(
                 _ => {}
             }
             continue;
+        }
+
+        if let Event::Paste(text) = event {
+            if let Some(index) = selected.text_index() {
+                fields[index].insert_str(normalize_editor_line_endings(&text));
+            }
+            continue;
+        }
+
+        let Event::Key(key) = event else {
+            continue;
+        };
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            bail!("editor cancelled");
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -871,12 +918,14 @@ fn draw_editor(
     popup: Option<EditorPopup>,
     tip: &str,
 ) {
+    let command_line_count = fields.get(1).map(|field| field.lines().len()).unwrap_or(1);
+    let command_height = editor_command_height(command_line_count, frame.area().height);
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(command_height),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -911,7 +960,11 @@ fn draw_editor(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(block_style)
-                .title(field_kind.title()),
+                .title(if field_kind == EditorField::Command {
+                    format!("command ({} lines)", command_line_count)
+                } else {
+                    field_kind.title().to_owned()
+                }),
         );
         if selected == field_kind {
             field.set_cursor_line_style(Style::default().bg(Color::DarkGray));
@@ -1048,6 +1101,9 @@ fn editor_footer(selected: EditorField, popup_open: bool) -> String {
         EditorField::Tty | EditorField::Restart | EditorField::PersistLogs
     ) {
         "Tab next   Shift-Tab previous   Enter choose   Ctrl-S save   Esc/Ctrl-C cancel".to_owned()
+    } else if selected == EditorField::Command {
+        "Tab next   Shift-Tab previous   Enter new line   Ctrl-S save   Esc/Ctrl-C cancel"
+            .to_owned()
     } else {
         "Tab next   Shift-Tab previous   Ctrl-S save   Esc/Ctrl-C cancel".to_owned()
     }
@@ -1125,9 +1181,25 @@ mod tests {
     fn editor_fields() -> Vec<TextArea<'static>> {
         vec![
             TextArea::new(vec!["api".to_owned()]),
-            TextArea::new(vec!["./run.sh".to_owned()]),
+            TextArea::new(vec!["echo first".to_owned(), "echo second".to_owned()]),
             TextArea::new(vec!["PORT=8080".to_owned()]),
         ]
+    }
+
+    #[test]
+    fn command_lines_expose_json_newlines_and_normalize_carriage_returns() {
+        assert_eq!(
+            command_lines("echo first\r\necho second\recho third"),
+            ["echo first", "echo second", "echo third"]
+        );
+        assert_eq!(command_lines(r"printf '\n'"), [r"printf '\n'"]);
+    }
+
+    #[test]
+    fn editor_command_height_grows_and_stays_bounded() {
+        assert_eq!(editor_command_height(1, 30), 3);
+        assert_eq!(editor_command_height(4, 30), 6);
+        assert_eq!(editor_command_height(20, 30), EDITOR_COMMAND_MAX_HEIGHT);
     }
 
     #[test]
@@ -1244,7 +1316,9 @@ mod tests {
 
         let text = buffer_text(&terminal);
         assert!(text.contains("name"));
-        assert!(text.contains("command"));
+        assert!(text.contains("command (2 lines)"));
+        assert!(text.contains("echo first"));
+        assert!(text.contains("echo second"));
         assert!(text.contains("TTY"));
         assert!(text.contains("Disabled"));
         assert!(text.contains("restart"));

@@ -28,8 +28,9 @@ want either temporary history or complete records across manager restarts.
 - Persistence failures produce a warning and fall back to memory for that run; they
   do not stop the service.
 - History is served through manager IPC, with paginated content reads. TUI `h` and
-  `served history [name]` use the same records. Attach remains live-only and keeps
-  its existing alternate-screen ownership.
+  `served history [name]` use the same records. Attach may begin with ADR 0003's
+  small sanitized current-run snapshot but does not replay history records or
+  terminal state.
 
 ## Consequences
 

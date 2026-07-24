@@ -265,7 +265,7 @@ async fn pty_service_accepts_one_attach_session() {
         service_dir.join(".served.json"),
         r#"{
   "name": "pty-smoke",
-  "command": "read -r line; printf 'reply:%s\\n' \"$line\"; sleep 60",
+  "command": "for i in $(seq 0 57); do printf 'cache-%02d\\n' \"$i\"; done; read -r line; printf 'reply:%s\\n' \"$line\"; sleep 60",
   "tty": true,
   "restart": "never"
 }
@@ -297,6 +297,7 @@ async fn pty_service_accepts_one_attach_session() {
     .await
     .expect("enable");
     wait_for_state(&paths, "pty-smoke", ServiceState::Running).await;
+    wait_for_output_tail(&paths, "pty-smoke", "cache-57").await;
     let mut stream = client::attach(&paths, "pty-smoke".to_owned())
         .await
         .expect("attach");
@@ -322,7 +323,11 @@ async fn pty_service_accepts_one_attach_session() {
     })
     .await
     .expect("attach output timeout");
-    assert!(String::from_utf8_lossy(&output).contains("reply:hello"));
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("cache-10"));
+    assert!(output.contains("cache-57"));
+    assert!(!output.contains("cache-09"));
+    assert!(output.contains("reply:hello"));
     drop(stream);
     client::expect_ok(
         &paths,
@@ -348,7 +353,7 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
         service_dir.join(".served.json"),
         r#"{
   "name": "pipe-attach",
-  "command": "while true; do printf 'pipe-ready\\n'; sleep 1; done",
+  "command": "for i in $(seq 0 57); do printf 'pipe-cache-%02d\\n' \"$i\"; done; sleep 1; while true; do printf 'pipe-live\\n'; sleep 1; done",
   "tty": false,
   "restart": "never"
 }
@@ -380,6 +385,7 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
     .await
     .expect("enable");
     wait_for_state(&paths, "pipe-attach", ServiceState::Running).await;
+    wait_for_output_tail(&paths, "pipe-attach", "pipe-cache-57").await;
 
     let mut first = client::attach(&paths, "pipe-attach".to_owned())
         .await
@@ -396,17 +402,47 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
         .await
         .expect("write ignored input");
 
-    let first_output = read_until(&mut first, b"pipe-ready").await;
-    let second_output = read_until(&mut second, b"pipe-ready").await;
+    let first_output = read_until(&mut first, b"pipe-live").await;
+    let second_output = read_until(&mut second, b"pipe-live").await;
     assert!(
         first_output
-            .windows(b"pipe-ready".len())
-            .any(|window| window == b"pipe-ready")
+            .windows(b"pipe-cache-10".len())
+            .any(|window| window == b"pipe-cache-10")
     );
     assert!(
         second_output
-            .windows(b"pipe-ready".len())
-            .any(|window| window == b"pipe-ready")
+            .windows(b"pipe-cache-10".len())
+            .any(|window| window == b"pipe-cache-10")
+    );
+    assert!(
+        first_output
+            .windows(b"pipe-cache-57".len())
+            .any(|window| window == b"pipe-cache-57")
+    );
+    assert!(
+        second_output
+            .windows(b"pipe-cache-57".len())
+            .any(|window| window == b"pipe-cache-57")
+    );
+    assert!(
+        !first_output
+            .windows(b"pipe-cache-09".len())
+            .any(|window| window == b"pipe-cache-09")
+    );
+    assert!(
+        !second_output
+            .windows(b"pipe-cache-09".len())
+            .any(|window| window == b"pipe-cache-09")
+    );
+    assert!(
+        first_output
+            .windows(b"pipe-live".len())
+            .any(|window| window == b"pipe-live")
+    );
+    assert!(
+        second_output
+            .windows(b"pipe-live".len())
+            .any(|window| window == b"pipe-live")
     );
 
     drop(first);
@@ -655,6 +691,21 @@ async fn wait_for_state(paths: &ServedPaths, name: &str, expected: ServiceState)
         sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for service state");
+}
+
+async fn wait_for_output_tail(paths: &ServedPaths, name: &str, needle: &str) {
+    for _ in 0..100 {
+        if let Ok(Response::Services { services }) = client::request(paths, Request::List).await {
+            if services
+                .iter()
+                .any(|service| service.name == name && service.output_tail.contains(needle))
+            {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for output tail");
 }
 
 async fn wait_for_attach_state(paths: &ServedPaths, name: &str, expected: bool) {

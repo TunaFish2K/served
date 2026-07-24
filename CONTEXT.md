@@ -14,6 +14,8 @@ Status: accepted implementation context for attach and output history behavior.
   `served attach [name]` command.
 - **Output history** is manager-owned stdout/stderr or PTY output captured per
   process run. It is not shell command history and is not a replayable terminal screen.
+- **Attach snapshot** is a sanitized display-only tail of the current run: the most
+  recent 48 logical lines, capped at 16 KiB. It is not a terminal-state replay.
 - **Persistent log** is a complete raw run file below the XDG state directory. A
   non-persistent log is a bounded in-memory run record.
 
@@ -27,9 +29,10 @@ Status: accepted implementation context for attach and output history behavior.
 - Only attach clients enter the alternate screen. `tty` continues to control PTY
   allocation and does not cause the manager to inject terminal control sequences
   when a service starts.
-- Attach displays only output received after the connection starts. Output history
-  is exposed by a separate TUI history page and the `served history` CLI command;
-  it is not replayed into attach.
+- Attach starts with the current run's sanitized 48-line snapshot, then displays
+  live output. The snapshot is display-only and is not sent to the service PTY.
+  Full output history remains exposed by the separate TUI history page and the
+  `served history` CLI command; history records are not replayed as terminal state.
 - Pipe attach forwards stdout/stderr as raw bytes, ignores input, and permits
   multiple observers. PTY attach remains bidirectional and single-writer.
 - `Ctrl-C` detaches without forwarding the byte to either service type.
@@ -42,6 +45,9 @@ Status: accepted implementation context for attach and output history behavior.
   when the new run is non-persistent, so the history model has one `latest` record.
 - TTY and pipe output are both captured as raw bytes. History display removes ANSI and
   other unsafe control sequences; raw files remain unchanged.
+- The structured editor exposes actual command newlines as separate rows. CRLF and
+  standalone CR are normalized to LF when editing; actual LF remains `/bin/sh -c`
+  script syntax.
 
 ## Compatibility
 

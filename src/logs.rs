@@ -13,6 +13,9 @@ use crate::protocol::HistoryRecord;
 pub const MEMORY_LOG_LIMIT: usize = 64 * 1024;
 pub const MAX_ARCHIVED_LOGS: usize = 100;
 pub const DEFAULT_CHUNK_LIMIT: u32 = 48 * 1024;
+pub const ATTACH_CACHE_LINES: usize = 48;
+
+const ATTACH_CACHE_MAX_BYTES: usize = 16 * 1024;
 
 const LATEST_FILE: &str = "latest.log";
 const STARTED_FILE: &str = ".latest.started";
@@ -113,6 +116,23 @@ impl LogStore {
         } else {
             cleaned
         }
+    }
+
+    pub fn attach_snapshot(&self) -> Vec<u8> {
+        let raw: Vec<u8> = self.current.iter().copied().collect();
+        let cleaned = normalize_line_endings(&sanitize_log(&raw));
+        let ended_with_newline = cleaned.ends_with('\n');
+        let mut lines: Vec<&str> = cleaned.split('\n').collect();
+        if ended_with_newline {
+            lines.pop();
+        }
+        let start = lines.len().saturating_sub(ATTACH_CACHE_LINES);
+        let mut snapshot = lines[start..].join("\r\n");
+        snapshot = tail_chars(&snapshot, ATTACH_CACHE_MAX_BYTES);
+        if !snapshot.is_empty() {
+            snapshot.push_str("\r\n");
+        }
+        snapshot.into_bytes()
     }
 
     pub fn records(&self) -> Vec<HistoryRecord> {
@@ -448,6 +468,27 @@ pub fn sanitize_log(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&clean).into_owned()
 }
 
+fn normalize_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn tail_chars(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut used = 0_usize;
+    let mut start = value.len();
+    for (index, character) in value.char_indices().rev() {
+        let length = character.len_utf8();
+        if used.saturating_add(length) > max_bytes {
+            break;
+        }
+        used += length;
+        start = index;
+    }
+    value[start..].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +498,36 @@ mod tests {
     fn sanitizer_removes_ansi_sequences_but_keeps_text() {
         assert_eq!(sanitize_log(b"\x1b[31mred\x1b[0m\n"), "red\n");
         assert_eq!(sanitize_log(b"a\0b\tc\n"), "ab\tc\n");
+    }
+
+    #[test]
+    fn attach_snapshot_joins_multiple_output_chunks_and_keeps_recent_lines() {
+        let directory = tempdir().expect("tempdir");
+        let mut store = LogStore::new(directory.path().to_path_buf());
+        store.begin_run(false);
+        store.append(b"old-1\nold-2\n");
+        store.append(b"\x1b[31mnew-1\x1b[0m\r\nnew-2");
+
+        assert_eq!(
+            String::from_utf8(store.attach_snapshot()).expect("snapshot utf8"),
+            "old-1\r\nold-2\r\nnew-1\r\nnew-2\r\n"
+        );
+    }
+
+    #[test]
+    fn attach_snapshot_limits_logical_lines_and_bytes() {
+        let directory = tempdir().expect("tempdir");
+        let mut store = LogStore::new(directory.path().to_path_buf());
+        store.begin_run(false);
+        for index in 0..(ATTACH_CACHE_LINES + 10) {
+            store.append(format!("line-{index}\n").as_bytes());
+        }
+
+        let snapshot = String::from_utf8(store.attach_snapshot()).expect("snapshot utf8");
+        assert!(!snapshot.contains("line-0\r\n"));
+        assert!(snapshot.contains("line-10\r\n"));
+        assert!(snapshot.contains("line-57\r\n"));
+        assert!(snapshot.len() <= ATTACH_CACHE_MAX_BYTES + 2);
     }
 
     #[test]

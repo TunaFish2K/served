@@ -43,13 +43,16 @@ manager can consistently load `.served.json`, `.env`, and the working directory.
 Fields:
 
 - `name`: required, globally unique among enabled services.
-- `command`: required shell command string.
+- `command`: required shell command string. It may contain multiple lines and is
+  executed as a multi-line `/bin/sh -c` script.
 - `tty`: optional boolean, default `true`.
 - `restart`: optional policy, default `never`.
 - Supported restart policies: `never`, `on-failure`, and `always`.
 
 Commands are executed through `/bin/sh -c`. Inline shell assignments such as
 `FOO=bar command` require no special configuration support.
+The editor shows actual command newlines as separate rows. JSON `\n` is decoded as
+an actual newline; a literal backslash-n argument must be written as `\\n` in JSON.
 
 The service environment starts with the environment of the `systemd --user`
 manager. If `.env` exists, it overlays that environment. `.env` is parsed using
@@ -86,15 +89,19 @@ changes files only; it does not apply a running-service change automatically.
 
 The JSON editor is form-based. The `.env` editor manages the fixed same-directory
 file. The fields are rendered from top to bottom in this order: `name`, `command`,
-`TTY`, `restart`, and `.env`. `Tab` moves forward and `Shift-Tab` moves backward.
+`TTY`, `restart`, `persist logs`, and `.env`. The command area grows with its line
+count up to a bounded height and then scrolls. `Tab` moves forward and `Shift-Tab`
+moves backward.
 The `TTY` field displays `Enabled` or `Disabled`; the `restart` field displays
 `never`, `on-failure`, or `always`.
 
-When `TTY` or `restart` has focus, `Enter` opens a selection popup. Up/down arrow
+When `TTY`, `restart`, or `persist logs` has focus, `Enter` opens a selection popup. Up/down arrow
 keys or `j`/`k` move its temporary highlight. `Enter` applies the highlighted
 value, while `Esc` closes the popup without applying it. In the normal editor,
-`Ctrl-S` saves and `Esc` or `Ctrl-C` cancels the edit. The bottom operation bar
-shows the controls available for the current focus.
+`Enter` inserts a command line break when `command` has focus. Bracketed paste
+preserves pasted line breaks, and CRLF/CR are normalized to LF. `Ctrl-S` saves and
+`Esc` or `Ctrl-C` cancels the edit. The bottom operation bar shows the controls
+available for the current focus.
 
 ### `served enable`
 
@@ -129,17 +136,18 @@ Validation must complete before the old process is stopped. Invalid JSON or
 
 ### `served attach [name]`
 
-Attaches directly to a running PTY service without opening the service-management
-TUI. With no name, the current directory is canonicalized and matched against an
-enabled service directory. With a name, the enabled service can be attached from
-any directory.
+Attaches directly to a running PTY or pipe service without opening the
+service-management TUI. With no name, the current directory is canonicalized and
+matched against an enabled service directory. With a name, the enabled service can
+be attached from any directory.
 
 The target must be running. The command uses the current terminal in raw mode and
-enters the terminal alternate screen, clearing it before streaming live output.
+enters the terminal alternate screen, showing a sanitized 48-line current-run
+snapshot before streaming live output.
 The original shell screen and terminal mode are restored when the session ends.
 For `tty: true`, the session forwards input to the PTY and only one client may
 attach. For `tty: false`, the session is read-only: stdout and stderr are forwarded
-as raw bytes, input is ignored, and multiple observers are allowed. `Ctrl+C`
+as raw bytes after the snapshot, input is ignored, and multiple observers are allowed. `Ctrl+C`
 detaches from either session and is not forwarded to the service. Detaching does
 not stop or disable the service.
 
@@ -172,8 +180,9 @@ Lists services currently running under the manager.
   detach.
 - PTY attach forwards input and permits one write client. Pipe attach forwards raw
   stdout/stderr only, ignores input, and permits multiple observers.
-- Attach starts with live bytes received after connection; `output_tail` is not
-  replayed as a terminal screen.
+- Attach starts with a sanitized display-only tail of the current run, aggregated
+  across output events, then receives live bytes. It is not a terminal-state replay
+  and is not sent to the service.
 - `Ctrl+C` in an attach session detaches instead of being sent to the service.
 - `Ctrl+C` in the service-management TUI outside an attach session exits the TUI
   client; it does not stop managed services.
@@ -195,7 +204,8 @@ Lists services currently running under the manager.
   manager restart clears those records. Existing disk records remain viewable.
 - Persistent write failures warn and fall back to memory without stopping the service.
 - History is accessed through a separate TUI list/content page and
-  `served history [name]`; attach remains live-only and does not replay history.
+  `served history [name]`; attach only adds a sanitized current-run prelude and
+  does not replay archived history or terminal state.
 - History content is read through paginated manager IPC and displayed after ANSI and
   unsafe control-sequence cleanup.
 

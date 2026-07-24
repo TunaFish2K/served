@@ -24,12 +24,14 @@ services that intentionally do not allocate a PTY.
   to one attach writer.
 - `tty: false` gets a raw stdout/stderr broadcast with ignored input. Multiple
   read-only observers are allowed.
-- Attach starts at the live stream boundary. Output history is retained separately
-  and is not interpreted as a terminal screen or replayed into attach.
+- Attach begins with a sanitized display-only snapshot of the current run's most
+  recent 48 logical lines, then continues with live output. The snapshot is not
+  interpreted as terminal state and is not sent to the service.
 
 ## Consequences
 
 The terminal cleanup path is explicit for both direct and TUI attach. Pipe attach
-does not require a fake PTY or a new protocol message, but it is a live viewer and
-does not reconstruct an already-rendered screen. History is accessed through a
+does not require a fake PTY or a new protocol message, and each observer receives
+its own snapshot before the shared live broadcast. The snapshot is a cleaned output
+prelude rather than a reconstructed terminal screen. History is accessed through a
 separate list/content view and does not alter attach terminal state.

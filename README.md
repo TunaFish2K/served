@@ -41,6 +41,25 @@ uninstall.sh
 安装二进制、user unit、`daemon-reload`、启用服务和设置 linger；Rust 程序不会
 调用 `systemctl`、`loginctl` 或 D-Bus。
 
+安装脚本把可执行文件放到 `~/.local/bin`，不会修改用户的 shell 配置文件。安装
+成功后会输出以下命令，复制到当前 shell 执行即可在当前会话的任意目录运行
+`served`：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+如果希望新开的 shell 也能直接运行 `served`，请自行把这条命令加入你的 shell
+配置文件。卸载脚本不会修改用户 shell 配置。
+
+首次安装会直接启用并启动 `served.service`。如果 `~/.local/bin/served` 或
+`~/.config/systemd/user/served.service` 已存在，脚本会进入覆盖升级流程：确认覆盖
+后，只有运行中的服务才会再次询问是否停止；文件安装成功后，原本运行中的服务
+会询问是否重启，原本停止的服务保持停止。升级失败会尝试恢复旧文件和旧服务。
+覆盖升级、停止和重启提示回车默认为同意；卸载提示为 `y/N`，回车取消。卸载
+确认后会先 disable，再停止运行中的服务，成功后才删除文件；卸载不会修改 shell
+配置。非交互环境不会执行需要确认的操作。
+
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并

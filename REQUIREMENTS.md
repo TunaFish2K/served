@@ -191,6 +191,63 @@ clears the in-memory output history.
 If the user manager is not installed, `served` reports that setup is required;
 it does not silently start an alternate in-process manager.
 
+## Installation Lifecycle
+
+- The install script installs the binary into `~/.local/bin` without modifying
+  user shell configuration files.
+- A fresh install does not ask for an upgrade confirmation.
+- If either the target binary or the user unit already exists, the install is
+  treated as an overwrite upgrade and asks for confirmation before changing
+  files. This also covers repairing a partial installation.
+- For an overwrite upgrade of a running manager, the script asks for
+  confirmation before stopping it. The stop operation does not disable the
+  service, so its enabled state is preserved. If stopping is declined, the
+  upgrade makes no file changes.
+- If the confirmed stop fails or the service remains active, the upgrade aborts
+  before changing any installation file.
+- After a confirmed upgrade, the script asks whether to restart the manager,
+  with restart selected by the default `Y` response.
+- If restart is declined, the upgraded manager remains stopped and the script
+  prints the manual `systemctl --user start served.service` command. The
+  service remains enabled.
+- Uninstallation asks for confirmation. After confirmation it disables the user
+  service, stops it if still active, and removes the installed unit and binary
+  only after both service operations succeed.
+- An already-disabled service or a missing enable link satisfies the disable
+  step during uninstall; only an actual systemd failure aborts cleanup.
+- Uninstall never modifies user shell configuration, including PATH blocks that
+  may have been written by an older release.
+- Confirmation prompts require an interactive terminal; in non-interactive
+  execution the script aborts without changing service state or files.
+- If disabling succeeds but stopping an active service fails, uninstall aborts
+  before removing any file.
+- The uninstall confirmation is the only uninstall prompt; after it is
+  accepted, disabling and stopping are performed without a second prompt.
+- A fresh install enables user lingering; an overwrite upgrade preserves the
+  user's existing lingering state and does not reconfigure it.
+- If a fresh install fails, the script removes files and service enablement
+  created by that attempt before exiting.
+- If a failed fresh install enabled linger, it disables linger only when linger
+  was disabled before the attempt; pre-existing linger remains enabled.
+- Upgrade, stop, and post-install restart prompts use `Y/n` with affirmative
+  default. The uninstall prompt uses `y/N` and requires an explicit `y`.
+- A fresh install enables and starts the user service directly without a
+  restart prompt. The post-install restart prompt applies only to overwrite
+  upgrades.
+- An overwrite upgrade preserves an inactive service as inactive; it does not
+  start a service that was already stopped before the upgrade.
+- An overwrite upgrade preserves the service's enabled or disabled state and
+  does not call `enable` or `disable`; only a fresh install enables the user
+  service.
+- After a successful install or upgrade, the script prints an export command
+  that the user can copy into the current shell to add `~/.local/bin` to PATH.
+- Upgrade file replacement is transactional: if installing the new binary or
+  unit fails after the old files were saved, the script restores both old files
+  and leaves the service stopped.
+- If the confirmed post-upgrade restart fails, the script restores the old
+  binary and unit and attempts to start the old manager. If the rollback start
+  also fails, the service remains stopped and both errors are reported.
+
 ## Non-Goals for V1
 
 - Docker-compatible image or filesystem isolation.

@@ -1,8 +1,8 @@
 [package]
 name = "served"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
-description = "A lightweight per-user service manager for local development"
+description = "A lightweight service manager for one installation user"
 license = "MIT"
 rust-version = "1.85"
 

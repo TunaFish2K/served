@@ -550,17 +550,17 @@ fn restart_name(policy: RestartPolicy) -> &'static str {
 
 pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
     fs::create_dir_all(paths.registry_dir()).context("create served enable registry")?;
-    fs::create_dir_all(&paths.runtime_dir).context("create served runtime directory")?;
     let state_served_dir = paths.state_home.join("served");
+    fs::create_dir_all(&state_served_dir).context("create served state directory")?;
+    fs::set_permissions(&state_served_dir, fs::Permissions::from_mode(0o700))
+        .context("restrict served state directory")?;
+    fs::create_dir_all(&paths.runtime_dir).context("create served runtime directory")?;
+    fs::set_permissions(&paths.runtime_dir, fs::Permissions::from_mode(0o700))
+        .context("restrict served runtime directory")?;
     let log_directory = paths.logs_dir();
     if let Err(error) = fs::create_dir_all(&log_directory) {
         warn!(path = %log_directory.display(), %error, "cannot create log directory; persistent logs will fall back to memory");
     } else {
-        if let Err(error) =
-            fs::set_permissions(&state_served_dir, fs::Permissions::from_mode(0o700))
-        {
-            warn!(path = %state_served_dir.display(), %error, "cannot restrict served state directory");
-        }
         if let Err(error) = fs::set_permissions(&log_directory, fs::Permissions::from_mode(0o700)) {
             warn!(path = %log_directory.display(), %error, "cannot restrict served log directory");
         }
@@ -568,7 +568,25 @@ pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
     let socket_path = paths.socket_path();
     if let Ok(metadata) = fs::symlink_metadata(&socket_path) {
         if metadata.file_type().is_socket() {
-            fs::remove_file(&socket_path).context("remove stale manager socket")?;
+            match UnixStream::connect(&socket_path).await {
+                Ok(_) => bail!(
+                    "manager already running; socket is in use at {}",
+                    socket_path.display()
+                ),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    ) =>
+                {
+                    fs::remove_file(&socket_path).context("remove stale manager socket")?;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("check existing manager socket {}", socket_path.display())
+                    });
+                }
+            }
         } else {
             bail!(
                 "manager socket path is not a socket: {}",

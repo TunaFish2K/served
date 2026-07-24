@@ -1,8 +1,8 @@
 # served
 
-`served` 是一个面向 Linux 本地开发环境的轻量级、按用户运行的服务管理器。
-它直接管理宿主机进程，用一个 `systemd --user` unit 负责启动 manager；它不是
-Docker 替代的容器运行时，也不负责 root 服务、命名空间或资源隔离。
+`served` 是一个面向 Linux 本地开发环境的轻量级服务管理器。它直接管理宿主机进程，
+由一个 systemd system unit 以安装用户身份启动 manager；它不是 Docker 替代的容器
+运行时，也不负责任意 root 服务、命名空间或资源隔离。
 
 当前代码是 V1 implementation baseline，目标平台是 Linux/glibc。
 
@@ -10,7 +10,8 @@ Docker 替代的容器运行时，也不负责 root 服务、命名空间或资�
 
 - 一个服务对应一个目录和一个 `.served.json`。
 - 服务工作目录固定为配置目录。
-- `.env` 只读取当前服务目录中的文件，并覆盖 manager 的启动环境。
+- `.env.served` 只读取当前服务目录中的文件，并覆盖 manager 的启动环境；项目的
+  `.env` 不会被 served 读取。
 - 默认使用 PTY，可用 `tty: false` 改用 stdout/stderr 管道。
 - TTY attach 默认把服务 PTY 的 rows/cols 同步为当前 attach 终端尺寸，可用
   `syncRowsCols: false` 关闭。
@@ -19,19 +20,20 @@ Docker 替代的容器运行时，也不负责 root 服务、命名空间或资�
 - `served attach [name]` 可绕过 TUI 直接进入 attach 会话。
 - 全局 TUI 展示状态、restart、disable、attach、历史和随机 `tips:`。
 - 日志可以按服务选择持久化，也可以只保存在 manager 内存中。
-- manager 与 CLI/TUI 通过 `$XDG_RUNTIME_DIR` 下的用户 Unix socket 通信。
+- manager 与 CLI/TUI 通过安装用户 HOME 下的 Unix socket 通信：
+  `$HOME/.local/state/served/runtime/served.sock`。
 
 ## 快速开始
 
-需要 Rust stable、Linux 和可用的用户级 systemd。
+需要 Rust stable、Linux、systemd system manager 和可用的 `sudo`。
 
 ```bash
 cargo build --release
 cargo test
 ```
 
-manager 通常由 `systemd --user` 启动。离线发布包应包含以下文件，并从包目录
-运行安装脚本：
+manager 通常由 `served.service` system unit 启动。离线发布包应包含以下文件，并从包
+目录运行安装脚本：
 
 ```text
 served
@@ -40,40 +42,39 @@ install.sh
 uninstall.sh
 ```
 
-仓库中的安装脚本位于 `scripts/`，user unit 模板位于 `systemd/`。安装脚本负责
-安装二进制、user unit、`daemon-reload`、启用服务和设置 linger；Rust 程序不会
-调用 `systemctl`、`loginctl` 或 D-Bus。
+仓库中的安装脚本位于 `scripts/`，system unit 模板位于 `systemd/`。安装脚本由普通
+安装用户执行，并在需要时通过 `sudo` 安装 `/usr/local/bin/served` 和
+`/etc/systemd/system/served.service`，执行 system scope 的 `daemon-reload`、启用和
+启动服务。Rust 程序不会调用 `systemctl` 或 D-Bus。
 
-安装脚本把可执行文件放到 `~/.local/bin`，不会修改用户的 shell 配置文件。安装
-成功后会输出以下命令，复制到当前 shell 执行即可在当前会话的任意目录运行
-`served`：
+安装脚本把可执行文件安装到 `/usr/local/bin/served`，不会修改用户 shell 配置文件，
+安装后无需 PATH export，在任意目录都可以运行 `served`。脚本最后会输出安装路径。
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-如果希望新开的 shell 也能直接运行 `served`，请自行把这条命令加入你的 shell
-配置文件。卸载脚本不会修改用户 shell 配置。
-
-首次安装会直接启用并启动 `served.service`。如果 `~/.local/bin/served` 或
-`~/.config/systemd/user/served.service` 已存在，脚本会进入覆盖升级流程：确认覆盖
-后，只有运行中的服务才会再次询问是否停止；文件安装成功后，原本运行中的服务
-会询问是否重启，原本停止的服务保持停止。升级失败会尝试恢复旧文件和旧服务。
+首次安装会直接启用并启动 `served.service` 到 `multi-user.target`。如果
+`/usr/local/bin/served` 或 `/etc/systemd/system/served.service` 已存在，脚本会进入
+覆盖升级流程：确认覆盖后，只有运行中的服务才会再次询问是否停止；文件安装成功
+后，原本运行中的服务会询问是否重启，原本停止的服务保持停止。升级失败会尝试恢复
+旧文件和旧服务。
 覆盖升级、停止和重启提示回车默认为同意；卸载提示为 `y/N`，回车取消。卸载
-确认后会先 disable，再停止运行中的服务，成功后才删除文件；卸载不会修改 shell
-配置。非交互环境不会执行需要确认的操作。
+确认后会先 disable，再停止运行中的服务，成功后才删除文件；卸载不会删除配置和
+状态，也不会修改 shell 配置。非交互环境不会执行需要确认的操作。
+
+旧版本的 `~/.config/systemd/user/served.service` 或 `~/.local/bin/served` 会被检测。
+确认迁移后，脚本会先停止并 disable 旧 user service，确认新的 system service active
+后再删除旧文件。如果旧 user manager 不可用，迁移会安全中止且不会删除旧文件。自定义
+XDG 目录只会收到迁移提示，不会被自动复制或删除。
 
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并
-构建 Linux amd64/glibc 产物。例如版本 `0.1.5` 使用 tag `v0.1.5`，Release 会
+构建 Linux amd64/glibc 产物。例如版本 `0.1.6` 使用 tag `v0.1.6`，Release 会
 包含：
 
 ```text
-served-linux-amd64-v0.1.5-binary
-served-linux-amd64-v0.1.5-binary.sha256
-served-linux-amd64-v0.1.5-full.tar.gz
-served-linux-amd64-v0.1.5-full.tar.gz.sha256
+served-linux-amd64-v0.1.6-binary
+served-linux-amd64-v0.1.6-binary.sha256
+served-linux-amd64-v0.1.6-full.tar.gz
+served-linux-amd64-v0.1.6-full.tar.gz.sha256
 ```
 
 `binary` 是只包含可执行文件的产物；`full.tar.gz` 是包含 `served`、
@@ -84,7 +85,7 @@ served-linux-amd64-v0.1.5-full.tar.gz.sha256
 
 ## 服务目录
 
-在服务目录中运行 `served edit`，编辑器会创建 `.served.json` 和 `.env` 模板。
+在服务目录中运行 `served edit`，编辑器会创建 `.served.json` 和 `.env.served` 模板。
 最小配置如下：
 
 ```json
@@ -110,12 +111,12 @@ served-linux-amd64-v0.1.5-full.tar.gz.sha256
   尺寸。`tty: false` 时该字段保留但不生效。
 - `restart`：可选，默认 `never`；可选值为 `never`、`on-failure`、`always`。
 - `persist_logs`：可选，默认 `false`；设置为 `true` 将每次运行的完整输出保存到
-  XDG state 日志目录。配置修改在下次启动或重启时生效。
+  `$HOME/.local/state/served/logs/<name>/`。配置修改在下次启动或重启时生效。
 
-`.env` 只支持配置目录下的这个固定文件。它使用 dotenv 解析规则，可以包含
+`.env.served` 只支持配置目录下的这个固定文件。它使用 dotenv 解析规则，可以包含
 注释、引号和支持的变量展开，但不会被当作 shell 脚本执行。
 
-manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值覆盖它。修改
+manager 启动时记录自己的环境快照；服务启动时再用 `.env.served` 值覆盖它。修改
 `/etc/profile` 等 shell 启动文件不会自动更新已经运行的 manager。
 
 ## TUI 操作
@@ -126,7 +127,7 @@ manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值�
 都进入终端第二屏。操作栏在窄终端中自动换行到两行。
 
 `served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`sync rows/cols`、
-`restart`、`persist logs` 和 `.env`。command 区域会按行数动态扩展，标题显示总行数，过长时
+`restart`、`persist logs` 和 `.env.served`。command 区域会按行数动态扩展，标题显示总行数，过长时
 支持滚动；粘贴文本会保留多行结构，CRLF 和 CR 会规范为 LF。使用 `Tab` 前进、`Shift-Tab` 后退；TTY、`sync rows/cols` 和 `persist logs`
 字段显示 `Enabled/Disabled`，restart 字段显示 `never/on-failure/always`。焦点在
 选择字段时按 `Enter`
@@ -138,8 +139,8 @@ manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值�
 
 ```text
 served                 打开全局服务 TUI
-served daemon          运行 per-user manager
-served edit            编辑当前目录的 .served.json 和 .env
+served daemon          运行 manager；与 system service 使用相同固定路径
+served edit            编辑当前目录的 .served.json 和 .env.served
 served enable          启用当前目录并立即运行
 served disable [name]  禁用当前服务，或按名称禁用
 served restart [name]  重启当前服务，或按名称重启
@@ -168,8 +169,7 @@ served list            列出 manager 管理的服务
 日志历史按每次进程启动分段，包括首次启动、自动重启和手动重启。持久化日志位于：
 
 ```text
-$XDG_STATE_HOME/served/logs/<name>/
-~/.local/state/served/logs/<name>/  # 未设置 XDG_STATE_HOME 时
+$HOME/.local/state/served/logs/<name>/
 ```
 
 当前运行写入 `latest.log`，下一次启动时按旧运行的开始时间归档为
@@ -193,8 +193,10 @@ manager 会先完整校验新配置，校验失败时保留旧进程不变。启
 ## 安全边界
 
 - manager 以普通用户身份运行，socket 设置为用户可读写。
-- `systemd --user` 只负责启动和监督 manager；manager 直接管理服务子进程。
-- manager 或其 user unit 重启后，enabled registry 会被重新扫描。
+- systemd system unit 以安装用户身份启动和监督 manager；manager 直接管理服务子进程。
+- manager 或其 system unit 重启后，enabled registry 会被重新扫描。
+- system service 设置 `HOME` 并通过 login shell 启动 manager，因此 `/etc/profile` 等环境
+  在 manager 启动时被读取；manager 运行期间仍使用启动时的环境快照。
 - 停止服务先发送 `SIGTERM`，超时后发送 `SIGKILL`。
 - `nohup`、后台化、daemonize 等脱离受管 shell 的子进程不在清理保证内。
 - V1 不提供 root 模式、容器隔离、namespace、资源限制、依赖图或健康检查。

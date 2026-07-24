@@ -31,9 +31,10 @@ impl Drop for DaemonGuard {
 #[tokio::test]
 async fn enable_restart_and_disable_a_pipe_service() {
     let root = tempdir().expect("tempdir");
-    let config_home = root.path().join("config");
-    let runtime_dir = root.path().join("runtime");
-    let state_home = root.path().join("state");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -49,7 +50,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
 "#,
     )
     .expect("config");
-    fs::write(service_dir.join(".env"), "SMOKE_PORT=8080\n").expect("env");
+    fs::write(service_dir.join(".env.served"), "SMOKE_PORT=8080\n").expect("env.served");
 
     let paths = ServedPaths {
         config_home,
@@ -58,9 +59,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
-        .env("XDG_CONFIG_HOME", &paths.config_home)
-        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
-        .env("XDG_STATE_HOME", &paths.state_home)
+        .env("HOME", &home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -91,7 +90,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
     wait_for_state(&paths, "smoke", ServiceState::Running).await;
     fs::write(service_dir.join(".served.json"), original_config).expect("restore config");
 
-    fs::write(service_dir.join(".env"), "SMOKE_PORT=9090\n").expect("new env");
+    fs::write(service_dir.join(".env.served"), "SMOKE_PORT=9090\n").expect("new env.served");
     client::expect_ok(
         &paths,
         Request::Restart {
@@ -102,7 +101,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
     .expect("restart with changed env");
     wait_for_state(&paths, "smoke", ServiceState::Stopped).await;
 
-    fs::write(service_dir.join(".env"), "SMOKE_PORT=8080\n").expect("restored env");
+    fs::write(service_dir.join(".env.served"), "SMOKE_PORT=8080\n").expect("restored env.served");
     client::expect_ok(
         &paths,
         Request::Restart {
@@ -127,9 +126,10 @@ async fn enable_restart_and_disable_a_pipe_service() {
 #[tokio::test]
 async fn persistent_and_memory_history_survive_service_restarts() {
     let root = tempdir().expect("tempdir");
-    let config_home = root.path().join("config");
-    let runtime_dir = root.path().join("runtime");
-    let state_home = root.path().join("state");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
     let persistent_dir = root.path().join("persistent");
     let memory_dir = root.path().join("memory");
     fs::create_dir_all(&config_home).expect("config home");
@@ -168,9 +168,7 @@ async fn persistent_and_memory_history_survive_service_restarts() {
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
-        .env("XDG_CONFIG_HOME", &paths.config_home)
-        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
-        .env("XDG_STATE_HOME", &paths.state_home)
+        .env("HOME", &home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -254,9 +252,10 @@ async fn persistent_and_memory_history_survive_service_restarts() {
 #[tokio::test]
 async fn pty_service_accepts_one_attach_session() {
     let root = tempdir().expect("tempdir");
-    let config_home = root.path().join("config");
-    let runtime_dir = root.path().join("runtime");
-    let state_home = root.path().join("state");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -273,7 +272,7 @@ async fn pty_service_accepts_one_attach_session() {
 "#,
     )
     .expect("config");
-    fs::write(service_dir.join(".env"), "").expect("env");
+    fs::write(service_dir.join(".env.served"), "").expect("env.served");
 
     let paths = ServedPaths {
         config_home,
@@ -282,9 +281,7 @@ async fn pty_service_accepts_one_attach_session() {
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
-        .env("XDG_CONFIG_HOME", &paths.config_home)
-        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
-        .env("XDG_STATE_HOME", &paths.state_home)
+        .env("HOME", &home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -336,9 +333,10 @@ async fn pty_service_accepts_one_attach_session() {
 #[tokio::test]
 async fn pipe_service_supports_multiple_readonly_attach_sessions() {
     let root = tempdir().expect("tempdir");
-    let config_home = root.path().join("config");
-    let runtime_dir = root.path().join("runtime");
-    let state_home = root.path().join("state");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -354,7 +352,7 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
 "#,
     )
     .expect("config");
-    fs::write(service_dir.join(".env"), "").expect("env");
+    fs::write(service_dir.join(".env.served"), "").expect("env.served");
 
     let paths = ServedPaths {
         config_home,
@@ -363,9 +361,7 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
-        .env("XDG_CONFIG_HOME", &paths.config_home)
-        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
-        .env("XDG_STATE_HOME", &paths.state_home)
+        .env("HOME", &home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -455,11 +451,49 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
 }
 
 #[tokio::test]
+async fn daemon_uses_fixed_home_paths_and_rejects_duplicate_manager() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", root.path().join("wrong-config"))
+        .env("XDG_RUNTIME_DIR", root.path().join("wrong-runtime"))
+        .env("XDG_STATE_HOME", root.path().join("wrong-state"))
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .output()
+        .expect("spawn duplicate manager");
+    assert!(!duplicate.status.success());
+    let stderr = String::from_utf8_lossy(&duplicate.stderr);
+    assert!(stderr.contains("manager already running"), "{stderr}");
+    assert!(!root.path().join("wrong-runtime/served.sock").exists());
+}
+
+#[tokio::test]
 async fn direct_attach_supports_name_and_current_directory() {
     let root = tempdir().expect("tempdir");
-    let config_home = root.path().join("config");
-    let runtime_dir = root.path().join("runtime");
-    let state_home = root.path().join("state");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
     let service_dir = root.path().join("service");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
@@ -475,7 +509,7 @@ async fn direct_attach_supports_name_and_current_directory() {
 "#,
     )
     .expect("config");
-    fs::write(service_dir.join(".env"), "").expect("env");
+    fs::write(service_dir.join(".env.served"), "").expect("env.served");
 
     let paths = ServedPaths {
         config_home,
@@ -484,9 +518,7 @@ async fn direct_attach_supports_name_and_current_directory() {
     };
     let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
-        .env("XDG_CONFIG_HOME", &paths.config_home)
-        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
-        .env("XDG_STATE_HOME", &paths.state_home)
+        .env("HOME", &home)
         .spawn()
         .expect("spawn manager");
     let _guard = DaemonGuard(daemon);
@@ -531,8 +563,7 @@ fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) 
     if let Some(name) = name {
         command.arg(name);
     }
-    command.env("XDG_CONFIG_HOME", &paths.config_home);
-    command.env("XDG_RUNTIME_DIR", &paths.runtime_dir);
+    command.env("HOME", paths.config_home.parent().expect("home"));
     command.cwd(directory);
     let mut child = pair.slave.spawn_command(command).expect("spawn attach");
     drop(pair.slave);

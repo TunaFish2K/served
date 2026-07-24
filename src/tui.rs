@@ -849,7 +849,7 @@ pub fn edit_current(directory: &Path) -> Result<()> {
         ServiceConfig::template(directory)
     };
     let env = if env_path.is_file() {
-        fs::read_to_string(&env_path).context("read .env")?
+        fs::read_to_string(&env_path).context("read .env.served")?
     } else {
         String::new()
     };
@@ -1075,7 +1075,7 @@ fn draw_editor(
         .split(frame.area());
 
     frame.render_widget(
-        Paragraph::new("edit .served.json and .env").block(
+        Paragraph::new("edit .served.json and .env.served").block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(".served editor"),
@@ -1534,7 +1534,7 @@ mod tests {
         assert!(text.contains("restart"));
         assert!(text.contains("on-failure"));
         assert!(text.contains("always"));
-        assert!(text.contains(".env"));
+        assert!(text.contains(".env.served"));
         assert!(text.contains("tips: editor tip"));
         assert!(text.contains("Enter apply"));
     }

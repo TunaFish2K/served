@@ -1,6 +1,7 @@
 # served Context
 
-Status: accepted implementation context for attach and output history behavior.
+Status: accepted implementation context for attach, output history, and service
+installation behavior.
 
 ## Glossary
 
@@ -19,8 +20,17 @@ Status: accepted implementation context for attach and output history behavior.
   process run. It is not shell command history and is not a replayable terminal screen.
 - **Attach snapshot** is a sanitized display-only tail of the current run: the most
   recent 48 logical lines, capped at 16 KiB. It is not a terminal-state replay.
-- **Persistent log** is a complete raw run file below the XDG state directory. A
-  non-persistent log is a bounded in-memory run record.
+- **Persistent log** is a complete raw run file below the fixed HOME state
+  directory. A non-persistent log is a bounded in-memory run record.
+- **System service** means the fixed `/etc/systemd/system/served.service` unit
+  managed by the system manager, not a `systemd --user` unit.
+- **Installation user** means the one ordinary user selected by the installer;
+  the system unit and all managed children run with this identity.
+- **Fixed HOME paths** means configuration under `$HOME/.config` and state under
+  `$HOME/.local/state`; `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and
+  `XDG_RUNTIME_DIR` do not select served's paths.
+- **Served environment file** means the optional `.env.served` file beside
+  `.served.json`; a project `.env` file is outside served's configuration.
 
 ## Confirmed Decisions
 
@@ -42,7 +52,7 @@ Status: accepted implementation context for attach and output history behavior.
 - The main TUI no longer renders a recent-output panel and shows `a attach` for
   either TTY mode.
 - `persist_logs` defaults to `false` and takes effect on the next process start or
-  restart. Persistent logs use `$XDG_STATE_HOME/served/logs/<service>/`, keep
+  restart. Persistent logs use `$HOME/.local/state/served/logs/<service>/`, keep
   `latest.log` plus 100 archives, and use private `0700`/`0600` permissions.
 - Every process start rotates an existing `latest.log` using `.latest.started`, even
   when the new run is non-persistent, so the history model has one `latest` record.

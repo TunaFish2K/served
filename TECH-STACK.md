@@ -3,7 +3,7 @@
 Status: implementation baseline
 
 This document records the implementation choices for V1. The product is a
-Linux-first, per-user process manager. "Minimal" means a small operational
+Linux-first process manager with one installation user. "Minimal" means a small operational
 surface and simple ownership boundaries, not the fewest possible crates.
 
 ## Runtime
@@ -19,21 +19,21 @@ surface and simple ownership boundaries, not the fewest possible crates.
 | Process with PTY | `portable-pty` | Default path; master remains owned by the worker |
 | Local timestamps | `chrono` | Human-readable local run names for archived logs |
 
-The manager runs once per user as `systemd --user` service. Managed children
-remain in that user service's cgroup. `served` does not become a root daemon,
-container runtime, namespace manager, or resource policy engine.
+The manager runs as the fixed `served.service` system unit with `User=` and
+`Group=` set to the installation user's identity. Managed children remain in that
+unit's cgroup. `served` does not become a root daemon, container runtime,
+namespace manager, or resource policy engine. The unit loads the installation
+user's profile through `/bin/sh -lc` and sets `HOME` explicitly.
 
 ## Configuration and State
 
 - `serde` and `serde_json` parse the direct-object `.served.json` format.
-- `dotenvy` parses the fixed `.env` file using dotenv semantics. The file is
+- `dotenvy` parses the fixed `.env.served` file using dotenv semantics. The file is
   parsed as data and is never sourced by a shell.
-- The manager captures its startup environment and overlays `.env` values for
+- The manager captures its startup environment and overlays `.env.served` values for
   each service.
-- The enable registry is symlinks in
-  `$XDG_CONFIG_HOME/served/enabled/<name>` (or `~/.config/...`).
-- Optional service history is stored under
-  `$XDG_STATE_HOME/served/logs/<name>` (or `~/.local/state/...`). Persistent runs
+- The enable registry is symlinks in `$HOME/.config/served/enabled/<name>`.
+- Optional service history is stored under `$HOME/.local/state/served/logs/<name>`. Persistent runs
   are complete raw files; memory-only runs retain a 64 KiB tail per run.
 - The active persistent file is `latest.log`; `.latest.started` carries its start
   label and old latest files are renamed into timestamped archives.
@@ -41,7 +41,7 @@ container runtime, namespace manager, or resource policy engine.
 
 ## IPC
 
-- Control commands use a Unix domain socket below `$XDG_RUNTIME_DIR`.
+- Control commands use `$HOME/.local/state/served/runtime/served.sock`.
 - Frames are length-prefixed JSON messages through `tokio-util`.
 - Every connection starts with a protocol-version handshake.
 - History uses manager-owned list requests and paginated chunk reads, so clients do
@@ -61,7 +61,7 @@ container runtime, namespace manager, or resource policy engine.
 - `clap` derive defines the single-binary command surface.
 - `ratatui` and `crossterm` render the service list and editor.
 - `tui-textarea` supplies text fields for the structured editor, including the
-  `.env` buffer.
+  `.env.served` buffer.
 - The command TextArea is initialized from normalized LF-separated rows, grows with
   the script up to a bounded height, and handles crossterm bracketed paste so pasted
   multi-line scripts remain visible and editable.
@@ -70,7 +70,7 @@ container runtime, namespace manager, or resource policy engine.
   restart, disable, attach, history, and the single `tips:` line. A
   contextual two-line operation bar stays visible below the tip and exposes attach
   for both PTY and pipe services.
-- `served edit` keeps the JSON and fixed `.env` buffers in `tui-textarea` fields
+- `served edit` keeps the JSON and fixed `.env.served` buffers in `tui-textarea` fields
   and renders `TTY`, `sync rows/cols`, `restart`, and `persist logs` as ordinary
   visible choice rows.
   The visual order is also the keyboard focus order. Enter opens an in-memory
@@ -102,7 +102,7 @@ container runtime, namespace manager, or resource policy engine.
 - Unit tests cover configuration, dotenv overlay, registry behavior, protocol
   framing, log rotation, history pagination, and restart backoff.
 - Integration tests use `tempfile` and `assert_cmd`; Linux release smoke tests
-  additionally exercise a real `systemd --user` installation when available.
+  additionally exercise a real system-service installation when available.
 - TUI rendering tests use Ratatui's `TestBackend`; snapshots are optional and
   are not required for the first implementation slice.
 
@@ -113,10 +113,10 @@ container runtime, namespace manager, or resource policy engine.
   plus a full offline installation package.
 - Each asset has its own SHA-256 sidecar named by appending `.sha256` to the
   original filename.
-- The full package contains the glibc-linked binary, the user unit,
+- The full package contains the glibc-linked binary, the system unit template,
   `install.sh`, `uninstall.sh`, and `README.md`.
-- Shell scripts own user-unit installation, `daemon-reload`, enable/start, and
-  linger setup. Rust does not shell out to `systemctl`, `loginctl`, or D-Bus.
+- Shell scripts own system-unit installation, `daemon-reload`, enable/start, and
+  legacy user-service migration. Rust does not shell out to `systemctl` or D-Bus.
 - V1 targets Linux with glibc first. Other platforms are not a compatibility
   promise.
 

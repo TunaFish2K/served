@@ -14,8 +14,7 @@ want either temporary history or complete records across manager restarts.
 - `persist_logs` is a per-service boolean in `.served.json`, defaulting to `false`.
 - Every process start creates a new run record, including automatic and manual
   restarts.
-- Persistent records live under `$XDG_STATE_HOME/served/logs/<service>/`, with a
-  fallback of `~/.local/state/served/logs/<service>/`.
+- Persistent records live under `$HOME/.local/state/served/logs/<service>/`.
 - The active persistent record is `latest.log`. On the next process start it is
   renamed using the previous run's `.latest.started` timestamp in local
   `YYYYMMDD-HHMMSS.log` format. Name collisions receive numeric suffixes.

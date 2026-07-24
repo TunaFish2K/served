@@ -3,14 +3,15 @@
 Status: product requirements draft
 
 `served` is a lightweight Linux-first service manager for local development. It
-manages host processes through a per-user `systemd --user` manager. It is not a
-container runtime and does not manage root services.
+manages host processes through one systemd system unit running as the installation
+user. It is not a container runtime and does not manage arbitrary root services.
 
 ## Core Model
 
 - One service is represented by one directory.
 - The directory contains the service definition `.served.json`.
-- The optional environment file is `.env` in the same directory.
+- The optional served environment file is `.env.served` in the same directory.
+- A project `.env` file is unrelated and is never read by served.
 - The service working directory is always its configuration directory.
 - The manager discovers services through user-owned enable links.
 - A service name is defined by the JSON `name` field and must be globally unique
@@ -25,7 +26,7 @@ The enable registry is:
 ```
 
 The link points to the service directory, not directly to the JSON file, so the
-manager can consistently load `.served.json`, `.env`, and the working directory.
+manager can consistently load `.served.json`, `.env.served`, and the working directory.
 
 ## Configuration
 
@@ -58,14 +59,14 @@ Commands are executed through `/bin/sh -c`. Inline shell assignments such as
 The editor shows actual command newlines as separate rows. JSON `\n` is decoded as
 an actual newline; a literal backslash-n argument must be written as `\\n` in JSON.
 
-The service environment starts with the environment of the `systemd --user`
-manager. If `.env` exists, it overlays that environment. `.env` is parsed using
+The service environment starts with the environment captured by the system unit's
+login shell. If `.env.served` exists, it overlays that environment. `.env.served` is parsed using
 standard dotenv semantics; it is not sourced as a shell script and does not
 support arbitrary file paths or `env_file` configuration.
 
 The manager environment is a startup snapshot. Changes to `/etc/profile` or
 other shell startup files are not expected to update running services until the
-user manager is restarted or its environment is explicitly refreshed. `.env`
+user manager is restarted or its environment is explicitly refreshed. `.env.served`
 uses standard dotenv parsing (including comments, quoting, and supported
 variable expansion), but it is still data and is never shell-sourced.
 
@@ -88,12 +89,12 @@ An unenabled service is not manageable by the manager.
 ### `served edit`
 
 Opens the structured TUI editor for the current directory's `.served.json` and
-`.env`. If the files do not exist, the editor can create templates. Editing
+`.env.served`. If the files do not exist, the editor can create templates. Editing
 changes files only; it does not apply a running-service change automatically.
 
-The JSON editor is form-based. The `.env` editor manages the fixed same-directory
+The JSON editor is form-based. The `.env.served` editor manages the fixed same-directory
 file. The fields are rendered from top to bottom in this order: `name`, `command`,
-`TTY`, `sync rows/cols`, `restart`, `persist logs`, and `.env`. The command area grows with its line
+`TTY`, `sync rows/cols`, `restart`, `persist logs`, and `.env.served`. The command area grows with its line
 count up to a bounded height and then scrolls. `Tab` moves forward and `Shift-Tab`
 moves backward.
 The `TTY` field displays `Enabled` or `Disabled`; the `restart` field displays
@@ -111,7 +112,7 @@ available for the current focus.
 
 Only valid in a service directory.
 
-1. Read and validate `.served.json` and `.env`.
+1. Read and validate `.served.json` and `.env.served`.
 2. Reject missing or invalid configuration.
 3. Reject a duplicate global service name.
 4. Create the user-level enable link.
@@ -132,11 +133,11 @@ There is no separate `stop` command.
 With no name, operates on the current service directory. With a name, operates
 on an enabled service from any directory.
 
-Restart always reads the current `.served.json` and `.env`, validates them, then
+Restart always reads the current `.served.json` and `.env.served`, validates them, then
 stops and starts the service. There is no separate `reload` operation.
 
 Validation must complete before the old process is stopped. Invalid JSON or
-`.env` leaves the currently running service unchanged and reports the error.
+`.env.served` leaves the currently running service unchanged and reports the error.
 
 ### `served attach [name]`
 
@@ -208,7 +209,7 @@ Lists services currently running under the manager.
 - TTY and pipe services both produce history. TTY output is raw PTY bytes; pipe
   stdout/stderr are merged in manager event order.
 - With `persist_logs: true`, complete records are stored under
-  `$XDG_STATE_HOME/served/logs/<name>/` or `~/.local/state/served/logs/<name>/`.
+  `$HOME/.local/state/served/logs/<name>/`.
 - The current record is `latest.log`; old records use the previous run's start
   time in `YYYYMMDD-HHMMSS.log` format, with numeric suffixes on collisions.
 - Persistent storage keeps 100 archives plus `latest.log`. Directories are `0700`
@@ -232,7 +233,7 @@ The global TUI provides:
 - attach action for both PTY and pipe services;
 - history list and scrollable history content pages;
 - structured editing through `served edit`;
-- `.env` editing;
+- `.env.served` editing;
 - one rotating tips line:
 
 ```text
@@ -252,35 +253,35 @@ contextual operation bar. Its focus order is the same as the visual field order
 above.
 
 The editor focus order is `name`, `command`, `TTY`, `sync rows/cols`, `restart`, `persist logs`, and
-`.env`. Choice rows use an Enter popup and show their available keys in the bottom
+`.env.served`. Choice rows use an Enter popup and show their available keys in the bottom
 operation bar.
 
 ## Manager and Security Boundary
 
-- The manager runs as a `systemd --user` service.
-- User lingering is enabled so the manager and enabled services can continue
-  after logout.
-- `systemd --user` only starts and supervises the manager; the manager directly
-  owns the child service processes.
-- TUI and commands communicate with the manager through a Unix socket under
-  `$XDG_RUNTIME_DIR`.
+- The manager runs as the fixed `served.service` system unit in the system manager.
+- The unit uses `User=<installation user>` and that user's primary group; the
+  manager and all managed children remain unprivileged.
+- The unit is enabled for `multi-user.target`, so it survives SSH logout without
+  user lingering. `loginctl enable-linger` is not used.
+- TUI and commands communicate through
+  `$HOME/.local/state/served/runtime/served.sock`.
 - The socket is user-only.
 - All managed services run with the same user identity as the manager.
 - No root mode, privilege escalation, container isolation, namespace policy,
   resource limits, dependency graph, or health-check protocol is provided.
-- If the manager user service is restarted, its child processes are cleaned up
-  with the manager's cgroup. The manager then discovers enabled services again
-  and starts them.
-
-If the user manager is not installed, `served` reports that setup is required;
-it does not silently start an alternate in-process manager.
+- If the system service is restarted, its child processes are cleaned up with the
+  manager's cgroup. The manager then discovers enabled services again and starts
+  them.
+- `served daemon` uses the same fixed HOME-derived paths as the system service. A
+  second daemon refuses an occupied socket instead of taking over.
 
 ## Installation Lifecycle
 
-- The install script installs the binary into `~/.local/bin` without modifying
-  user shell configuration files.
+- The install script is run by the target user and uses internal `sudo` calls. It
+  installs `/usr/local/bin/served` and `/etc/systemd/system/served.service` without
+  modifying user shell configuration files.
 - A fresh install does not ask for an upgrade confirmation.
-- If either the target binary or the user unit already exists, the install is
+- If either the target binary or the system unit already exists, the install is
   treated as an overwrite upgrade and asks for confirmation before changing
   files. This also covers repairing a partial installation.
 - For an overwrite upgrade of a running manager, the script asks for
@@ -292,12 +293,12 @@ it does not silently start an alternate in-process manager.
 - After a confirmed upgrade, the script asks whether to restart the manager,
   with restart selected by the default `Y` response.
 - If restart is declined, the upgraded manager remains stopped and the script
-  prints the manual `systemctl --user start served.service` command. The
-  service remains enabled.
-- Uninstallation asks for confirmation. After confirmation it disables the user
+  prints the manual `sudo systemctl start served.service` command. The service
+  remains enabled.
+- Uninstallation asks for confirmation. After confirmation it disables the system
   service, stops it if still active, and removes the installed unit and binary
   only after both service operations succeed.
-- An already-disabled service or a missing enable link satisfies the disable
+- An already-disabled service or a missing unit satisfies the disable
   step during uninstall; only an actual systemd failure aborts cleanup.
 - Uninstall never modifies user shell configuration, including PATH blocks that
   may have been written by an older release.
@@ -307,49 +308,52 @@ it does not silently start an alternate in-process manager.
   before removing any file.
 - The uninstall confirmation is the only uninstall prompt; after it is
   accepted, disabling and stopping are performed without a second prompt.
-- A fresh install enables user lingering; an overwrite upgrade preserves the
-  user's existing lingering state and does not reconfigure it.
 - If a fresh install fails, the script removes files and service enablement
   created by that attempt before exiting.
-- If a failed fresh install enabled linger, it disables linger only when linger
-  was disabled before the attempt; pre-existing linger remains enabled.
 - Upgrade, stop, and post-install restart prompts use `Y/n` with affirmative
   default. The uninstall prompt uses `y/N` and requires an explicit `y`.
-- A fresh install enables and starts the user service directly without a
+- A fresh install enables and starts the system service directly without a
   restart prompt. The post-install restart prompt applies only to overwrite
   upgrades.
 - An overwrite upgrade preserves an inactive service as inactive; it does not
   start a service that was already stopped before the upgrade.
 - An overwrite upgrade preserves the service's enabled or disabled state and
-  does not call `enable` or `disable`; only a fresh install enables the user
+  does not call `enable` or `disable`; only a fresh install enables the system
   service.
-- After a successful install or upgrade, the script prints an export command
-  that the user can copy into the current shell to add `~/.local/bin` to PATH.
+- After a successful install or upgrade, the script prints the global binary path;
+  no export command is needed.
 - Upgrade file replacement is transactional: if installing the new binary or
   unit fails after the old files were saved, the script restores both old files
   and leaves the service stopped.
 - If the confirmed post-upgrade restart fails, the script restores the old
   binary and unit and attempts to start the old manager. If the rollback start
   also fails, the service remains stopped and both errors are reported.
+- A legacy `~/.config/systemd/user/served.service` or `~/.local/bin/served` is
+  detected during installation. After migration confirmation, the old user
+  service is disabled and stopped before the new system service is installed;
+  legacy files are removed only after the new service is active.
+- If the legacy user manager cannot be contacted, migration aborts without
+  deleting legacy files. Custom XDG directories are reported as a warning and
+  are never copied or deleted automatically.
 
 ## Non-Goals for V1
 
 - Docker-compatible image or filesystem isolation.
-- Root/system service management.
+- Arbitrary root/system service management beyond served's own unprivileged unit.
 - Multiple services in one directory or one JSON file.
 - Service dependencies or readiness checks.
 - Independent `start`, `stop`, or `reload` commands.
-- Arbitrary `.env` file locations.
+- Arbitrary `.env.served` file locations.
 - Automatic discovery of unrelated processes or ports.
 
 ## Acceptance Scenarios
 
-1. `served edit` creates `.served.json` and `.env` in an empty service directory.
+1. `served edit` creates `.served.json` and `.env.served` in an empty service directory.
 2. `served enable` creates a directory symlink, starts the service, and makes it
    visible in global `served` and `served list` views.
 3. Enabling a duplicate `name` fails without replacing the existing link.
 4. `served disable` removes the link and stops the service.
-5. `served restart` applies current JSON and `.env` changes only after complete
+5. `served restart` applies current JSON and `.env.served` changes only after complete
    validation.
 6. Invalid configuration leaves an already-running service untouched.
 7. `never`, `on-failure`, and `always` have distinct, testable behavior.
@@ -366,7 +370,7 @@ it does not silently start an alternate in-process manager.
 15. `Esc` closes an open editor popup without changing the in-memory value, while
     `Esc` outside a popup cancels the entire edit.
 16. The editor focus wraps through `name`, `command`, `TTY`, `restart`, `persist logs`,
-    and `.env` in both Tab directions.
+    and `.env.served` in both Tab directions.
 17. `served attach <name>` enters a running PTY service without opening the TUI;
     `Ctrl-C` exits the session while leaving the service running.
 18. `served attach` resolves the current directory to its enabled service, and

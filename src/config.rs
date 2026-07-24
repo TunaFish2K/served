@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CONFIG_FILE: &str = ".served.json";
-pub const ENV_FILE: &str = ".env";
+pub const ENV_FILE: &str = ".env.served";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -22,7 +22,7 @@ pub enum ConfigError {
     InvalidName(String),
     #[error("service command must not be empty")]
     EmptyCommand,
-    #[error("invalid .env key {0:?}")]
+    #[error("invalid .env.served key {0:?}")]
     InvalidEnvKey(String),
     #[error("I/O error while reading service configuration: {0}")]
     Io(#[from] std::io::Error),
@@ -201,7 +201,7 @@ mod tests {
             directory.path().join(ENV_FILE),
             "# a comment\nPORT=8080\nQUOTED=\"hello world\"\n",
         )
-        .expect("env");
+        .expect("env.served");
         let mut base = BTreeMap::new();
         base.insert("PORT".to_owned(), "old".to_owned());
 
@@ -263,5 +263,36 @@ mod tests {
             encoded.get("syncRowsCols"),
             Some(&serde_json::Value::Bool(false))
         );
+    }
+
+    #[test]
+    fn ignores_project_env_and_reads_only_served_env() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            r#"{"name":"api","command":"echo ok"}"#,
+        )
+        .expect("config");
+        fs::write(directory.path().join(".env"), "PORT=project\n").expect("project env");
+        fs::write(directory.path().join(ENV_FILE), "PORT=served\n").expect("served env");
+
+        let service = load_service(directory.path(), &BTreeMap::new()).expect("load");
+        assert_eq!(service.environment.get("PORT"), Some(&"served".to_owned()));
+
+        fs::remove_file(directory.path().join(ENV_FILE)).expect("remove served env");
+        let service =
+            load_service(directory.path(), &BTreeMap::new()).expect("load without served env");
+        assert!(!service.environment.contains_key("PORT"));
+    }
+
+    #[test]
+    fn template_creates_only_served_env_file() {
+        let directory = tempdir().expect("tempdir");
+
+        write_template(directory.path()).expect("write template");
+
+        assert!(directory.path().join(CONFIG_FILE).is_file());
+        assert!(directory.path().join(ENV_FILE).is_file());
+        assert!(!directory.path().join(".env").exists());
     }
 }

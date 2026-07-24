@@ -9,28 +9,29 @@ pub struct ServedPaths {
 
 impl ServedPaths {
     pub fn from_environment() -> io::Result<Self> {
-        let config_home = match env::var_os("XDG_CONFIG_HOME") {
-            Some(value) if !value.is_empty() => PathBuf::from(value),
-            _ => env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".config"))
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?,
-        };
-        let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
+        let home = env::var_os("HOME")
+            .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?;
-        let state_home = match env::var_os("XDG_STATE_HOME") {
-            Some(value) if !value.is_empty() => PathBuf::from(value),
-            _ => env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".local").join("state"))
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?,
-        };
-        Ok(Self {
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
+        if !home.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HOME must be an absolute path",
+            ));
+        }
+        Ok(Self::from_home(home))
+    }
+
+    pub fn from_home(home: impl Into<PathBuf>) -> Self {
+        let home = home.into();
+        let config_home = home.join(".config");
+        let state_home = home.join(".local").join("state");
+        let runtime_dir = state_home.join("served").join("runtime");
+        Self {
             config_home,
             runtime_dir,
             state_home,
-        })
+        }
     }
 
     pub fn registry_dir(&self) -> PathBuf {
@@ -43,5 +44,32 @@ impl ServedPaths {
 
     pub fn logs_dir(&self) -> PathBuf {
         self.state_home.join("served").join("logs")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::ServedPaths;
+
+    #[test]
+    fn fixed_paths_are_derived_from_home() {
+        let paths = ServedPaths::from_home("/tmp/served-home");
+
+        assert_eq!(paths.config_home, Path::new("/tmp/served-home/.config"));
+        assert_eq!(paths.state_home, Path::new("/tmp/served-home/.local/state"));
+        assert_eq!(
+            paths.runtime_dir,
+            Path::new("/tmp/served-home/.local/state/served/runtime")
+        );
+        assert_eq!(
+            paths.socket_path(),
+            Path::new("/tmp/served-home/.local/state/served/runtime/served.sock")
+        );
+        assert_eq!(
+            paths.logs_dir(),
+            Path::new("/tmp/served-home/.local/state/served/logs")
+        );
     }
 }

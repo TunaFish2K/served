@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "served",
     version,
-    about = "lightweight per-user service manager"
+    about = "lightweight service manager for one installation user"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -21,9 +21,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the per-user manager. Normally started by systemd --user.
+    /// Run the manager. Normally started by the served system service.
     Daemon,
-    /// Edit .served.json and .env in the current directory.
+    /// Edit .served.json and .env.served in the current directory.
     Edit,
     /// Enable the current service directory and start it.
     Enable,
@@ -57,8 +57,7 @@ async fn main() -> Result<()> {
             tui::edit_current(&std::env::current_dir().context("read current directory")?)
         }
         command => {
-            let paths =
-                ServedPaths::from_environment().context("served requires XDG_RUNTIME_DIR")?;
+            let paths = ServedPaths::from_environment().context("served requires HOME")?;
             match command {
                 None => tui::run(paths).await,
                 Some(Command::Daemon) => manager::run_daemon(paths).await,

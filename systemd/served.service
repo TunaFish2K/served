@@ -1,13 +1,17 @@
 [Unit]
-Description=served per-user service manager
-After=default.target
+Description=served system service manager
+After=local-fs.target
 
 [Service]
-ExecStart=%h/.local/bin/served daemon
+Type=simple
+User=@SERVED_USER@
+Group=@SERVED_GROUP@
+Environment=HOME=%h
+WorkingDirectory=%h
+ExecStart=/bin/sh -lc 'exec /usr/local/bin/served daemon'
 Restart=always
 RestartSec=1s
 NoNewPrivileges=yes
 
 [Install]
-WantedBy=default.target
-
+WantedBy=multi-user.target

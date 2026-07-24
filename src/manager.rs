@@ -287,16 +287,15 @@ impl ManagerState {
         let Some(service) = self.services.get_mut(name) else {
             return Err(format!("service {name:?} is not enabled"));
         };
-        if !service.definition.config.tty {
-            return Err(format!("service {name:?} does not use a PTY"));
-        }
-        if service.worker.is_none() {
+        if service.worker.is_none() || !matches!(service.state, ServiceState::Running) {
             return Err(format!("service {name:?} is not running"));
         }
-        if service.attach_active {
+        if service.definition.config.tty && service.attach_active {
             return Err(format!("service {name:?} already has an attach client"));
         }
-        service.attach_active = true;
+        if service.definition.config.tty {
+            service.attach_active = true;
+        }
         Ok(())
     }
 
@@ -304,10 +303,16 @@ impl ManagerState {
         let Some(service) = self.services.get(&name) else {
             return;
         };
+        let tty = service.definition.config.tty;
         let Some(worker) = service.worker.clone() else {
+            if tty {
+                if let Some(service) = self.services.get_mut(&name) {
+                    service.attach_active = false;
+                }
+            }
             return;
         };
-        if worker.send(WorkerCommand::Attach { stream }).await.is_err() {
+        if worker.send(WorkerCommand::Attach { stream }).await.is_err() && tty {
             if let Some(service) = self.services.get_mut(&name) {
                 service.attach_active = false;
             }

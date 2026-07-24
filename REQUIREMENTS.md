@@ -134,10 +134,14 @@ TUI. With no name, the current directory is canonicalized and matched against an
 enabled service directory. With a name, the enabled service can be attached from
 any directory.
 
-The target must be running and have `tty: true`; pipe services are rejected. The
-command uses the current terminal in raw mode and restores terminal mode when the
-session ends. `Ctrl+C` detaches from the session and is not forwarded to the
-service. Detaching does not stop or disable the service.
+The target must be running. The command uses the current terminal in raw mode and
+enters the terminal alternate screen, clearing it before streaming live output.
+The original shell screen and terminal mode are restored when the session ends.
+For `tty: true`, the session forwards input to the PTY and only one client may
+attach. For `tty: false`, the session is read-only: stdout and stderr are forwarded
+as raw bytes, input is ignored, and multiple observers are allowed. `Ctrl+C`
+detaches from either session and is not forwarded to the service. Detaching does
+not stop or disable the service.
 
 ### `served list`
 
@@ -162,12 +166,14 @@ Lists services currently running under the manager.
 
 - Services use a PTY by default.
 - A service may opt out with `tty: false`.
-- TUI attach enters a full-screen terminal session; direct CLI attach uses the
-  current terminal. Both forward input to the PTY.
-- TUI attach returns to the service TUI without stopping the service; direct CLI
-  attach returns to the shell without opening the TUI.
-- Only one client may hold attach write access at a time.
-- A second attach attempt is rejected rather than sharing input.
+- TUI attach takes over the TUI-owned alternate screen, clears it, and redraws the
+  service manager after detach; it does not nest another alternate-screen owner.
+- Direct CLI attach enters its own alternate screen and returns to the shell after
+  detach.
+- PTY attach forwards input and permits one write client. Pipe attach forwards raw
+  stdout/stderr only, ignores input, and permits multiple observers.
+- Attach starts with live bytes received after connection; `output_tail` is not
+  replayed as a terminal screen.
 - `Ctrl+C` in an attach session detaches instead of being sent to the service.
 - `Ctrl+C` in the service-management TUI outside an attach session exits the TUI
   client; it does not stop managed services.
@@ -179,8 +185,7 @@ The global TUI provides:
 - enabled-service list and current status;
 - restart action;
 - disable action;
-- attach action for PTY services;
-- recent output from an in-memory ring buffer;
+- attach action for both PTY and pipe services;
 - structured editing through `served edit`;
 - `.env` editing;
 - one rotating tips line:
@@ -194,9 +199,8 @@ may repeat; no tip position or other manager state is persisted.
 
 The TUI keeps the `tips:` line and the operation bar visible together. The global
 operation bar is contextual: it shows navigation and quit when no service is
-selected; for a selected service it shows restart and disable; it shows attach
-for a PTY service and `attach unavailable` for a pipe service. The bar wraps to
-two lines in a narrow terminal instead of being truncated.
+selected; for a selected service it shows restart, disable, and attach. The bar
+wraps to two lines in a narrow terminal instead of being truncated.
 
 The `served edit` screen uses the same rotating tips set and displays its own
 contextual operation bar. Its focus order is the same as the visual field order
@@ -310,8 +314,8 @@ it does not silently start an alternate in-process manager.
 10. Restarting the user manager restores all enabled services.
 11. The TUI tips line selects a built-in tip randomly on every TUI startup.
 12. Unenabled service directories are not controllable from the global manager.
-13. The global TUI operation bar reflects whether a service is selected and
-    whether its `tty` setting permits attach.
+13. The global TUI operation bar reflects whether a service is selected and shows
+    attach for either `tty` mode.
 14. `served edit` presents `TTY` and `restart` as visible fields in visual order,
     and popup selection changes are applied only after `Enter`.
 15. `Esc` closes an open editor popup without changing the in-memory value, while
@@ -321,4 +325,8 @@ it does not silently start an alternate in-process manager.
 17. `served attach <name>` enters a running PTY service without opening the TUI;
     `Ctrl-C` exits the session while leaving the service running.
 18. `served attach` resolves the current directory to its enabled service, and
-    rejects an unenabled directory or a `tty: false` service.
+    rejects an unenabled directory while allowing a running pipe service read-only.
+19. Direct attach enters and exits the alternate screen while restoring the shell;
+    TUI attach returns to a fully redrawn manager screen.
+20. Multiple pipe observers receive live raw output, while pipe input does not reach
+    the managed service.

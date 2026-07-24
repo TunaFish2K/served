@@ -13,9 +13,9 @@ Docker 替代的容器运行时，也不负责 root 服务、命名空间或资�
 - `.env` 只读取当前服务目录中的文件，并覆盖 manager 的启动环境。
 - 默认使用 PTY，可用 `tty: false` 改用 stdout/stderr 管道。
 - `never`、`on-failure`、`always` 重启策略和指数退避。
-- PTY 服务支持 attach、detach，并限制为单个写入客户端。
-- `served attach [name]` 可绕过 TUI 直接进入 PTY 会话。
-- 全局 TUI 展示状态、最近输出、restart、disable 和随机 `tips:`。
+- PTY 服务支持可写 attach；pipe 服务支持只读 attach。所有 attach 都使用终端第二屏。
+- `served attach [name]` 可绕过 TUI 直接进入 attach 会话。
+- 全局 TUI 展示状态、restart、disable、attach 和随机 `tips:`。
 - 输出只保存在内存 ring buffer 中，不写入持久化日志。
 - manager 与 CLI/TUI 通过 `$XDG_RUNTIME_DIR` 下的用户 Unix socket 通信。
 
@@ -64,14 +64,14 @@ export PATH="$HOME/.local/bin:$PATH"
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并
-构建 Linux amd64/glibc 产物。例如版本 `0.1.0` 使用 tag `v0.1.0`，Release 会
+构建 Linux amd64/glibc 产物。例如版本 `0.1.2` 使用 tag `v0.1.2`，Release 会
 包含：
 
 ```text
-served-linux-amd64-v0.1.0-binary
-served-linux-amd64-v0.1.0-binary.sha256
-served-linux-amd64-v0.1.0-full.tar.gz
-served-linux-amd64-v0.1.0-full.tar.gz.sha256
+served-linux-amd64-v0.1.2-binary
+served-linux-amd64-v0.1.2-binary.sha256
+served-linux-amd64-v0.1.2-full.tar.gz
+served-linux-amd64-v0.1.2-full.tar.gz.sha256
 ```
 
 `binary` 是只包含可执行文件的产物；`full.tar.gz` 是包含 `served`、
@@ -110,9 +110,9 @@ manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值�
 ## TUI 操作
 
 全局 TUI 底部会同时显示随机 `tips:` 和上下文操作栏。没有服务时，操作栏显示
-`up/down/j/k move` 与退出；选中服务后会显示 `r restart`、`d disable`，TTY
-服务显示 `a attach`，`tty: false` 服务显示 `a attach unavailable`。操作栏在窄
-终端中自动换行到两行。
+`up/down/j/k move` 与退出；选中服务后会显示 `r restart`、`d disable` 和
+`a attach`。TTY 服务的 attach 可写入服务，`tty: false` 服务的 attach 只读；两者
+都进入终端第二屏。操作栏在窄终端中自动换行到两行。
 
 `served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`restart` 和
 `.env`。使用 `Tab` 前进、`Shift-Tab` 后退；TTY 字段显示 `Enabled/Disabled`，
@@ -135,8 +135,11 @@ served list            列出 manager 管理的服务
 ```
 
 `served attach` 不启动服务管理 TUI。省略名称时使用当前目录对应的已启用服务；
-提供名称时可以从任意目录 attach。目标服务必须使用 PTY 且正在运行。attach 会话中
-按 `Ctrl-C` 退出 attach，服务本身不会被停止；该按键不会转发给服务。
+提供名称时可以从任意目录 attach。目标服务必须正在运行。attach 会话进入终端第二屏，
+退出时恢复原来的 shell 或 TUI 画面。`tty: true` 服务的会话可写入 PTY；`tty: false`
+服务只转发连接建立后的 stdout/stderr 原始字节，并忽略输入。pipe 服务可以有多个只读
+观察者。attach 会话中按 `Ctrl-C` 退出 attach，服务本身不会被停止；该按键不会转发
+给服务。
 
 V1 不提供独立的 `start`、`stop` 或 `reload` 命令。修改配置后使用 `restart`；
 manager 会先完整校验新配置，校验失败时保留旧进程不变。启用服务后，注册链接

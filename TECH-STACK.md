@@ -39,8 +39,9 @@ container runtime, namespace manager, or resource policy engine.
 - Control commands use a Unix domain socket below `$XDG_RUNTIME_DIR`.
 - Frames are length-prefixed JSON messages through `tokio-util`.
 - Every connection starts with a protocol-version handshake.
-- PTY attach switches the already-authenticated connection to a raw
-  bidirectional byte stream. The manager keeps one attach writer per service.
+- Attach switches the already-authenticated connection to a raw byte stream. PTY
+  services use one bidirectional writer; pipe services broadcast raw stdout/stderr
+  to multiple read-only observers and discard their input.
 - The socket is created with user-only filesystem permissions and is never
   exposed over TCP.
 
@@ -52,10 +53,10 @@ container runtime, namespace manager, or resource policy engine.
   `.env` buffer.
 - `rand` supplies a non-cryptographic random tip selection on each TUI start.
 - The first TUI screen is the global enabled-service list. It exposes status,
-  recent output, restart, disable, attach, and the single `tips:` line. A
-  contextual two-line operation bar stays visible below the tip and indicates
-  which actions are available for the current selection; pipe services expose
-  attach as unavailable.
+  restart, disable, attach, and the single `tips:` line. Recent output remains in
+  the manager's in-memory ring buffer but is not rendered in the main TUI. A
+  contextual two-line operation bar stays visible below the tip and exposes attach
+  for both PTY and pipe services.
 - `served edit` keeps the JSON and fixed `.env` buffers in `tui-textarea` fields
   and renders `TTY` and `restart` as ordinary visible choice rows. The visual
   order is also the keyboard focus order. Enter opens an in-memory popup for a
@@ -63,10 +64,13 @@ container runtime, namespace manager, or resource policy engine.
   all five fields.
 - `served attach [name]` reuses the existing name-based raw socket handoff. An
   omitted name is resolved client-side from the canonical current directory and
-  the manager's enabled-service list. Direct attach uses crossterm raw mode
-  without alternate-screen rendering and restores the terminal on exit.
-- The shared attach relay treats `Ctrl-C` as detach for both direct and TUI
-  attach; it is not forwarded to the service.
+  the manager's enabled-service list. Direct attach uses crossterm raw mode and
+  owns an alternate screen until exit.
+- TUI attach reuses the TUI-owned alternate screen, clearing and redrawing around
+  the raw relay instead of nesting a second alternate-screen owner.
+- The shared attach relay treats `Ctrl-C` as detach for both direct and TUI attach;
+  it is not forwarded to the service. Pipe attach ignores all other input and does
+  not replay the output ring buffer.
 
 ## Errors, Logging, and Tests
 

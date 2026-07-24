@@ -232,14 +232,23 @@ async fn run_pipe(
     let pid = child
         .id()
         .ok_or_else(|| "managed shell did not expose a pid".to_owned())?;
-    let stdout_task = child
-        .stdout
-        .take()
-        .map(|reader| spawn_pipe_reader(reader, service.config.name.clone(), events.clone()));
-    let stderr_task = child
-        .stderr
-        .take()
-        .map(|reader| spawn_pipe_reader(reader, service.config.name.clone(), events.clone()));
+    let (output_tx, _) = broadcast::channel::<Vec<u8>>(64);
+    let stdout_task = child.stdout.take().map(|reader| {
+        spawn_pipe_reader(
+            reader,
+            service.config.name.clone(),
+            events.clone(),
+            output_tx.clone(),
+        )
+    });
+    let stderr_task = child.stderr.take().map(|reader| {
+        spawn_pipe_reader(
+            reader,
+            service.config.name.clone(),
+            events.clone(),
+            output_tx.clone(),
+        )
+    });
     let name = service.config.name.clone();
     let _ = events.send(WorkerEvent::Started {
         name: name.clone(),
@@ -247,12 +256,20 @@ async fn run_pipe(
         tty: false,
     });
     let mut wait_task = tokio::spawn(async move { child.wait().await });
+    let mut attach_count = 0_usize;
+    let (attach_done_tx, mut attach_done_rx) = mpsc::unbounded_channel::<()>();
 
     loop {
         tokio::select! {
             result = &mut wait_task => {
                 abort_reader(stdout_task);
                 abort_reader(stderr_task);
+                if attach_count > 0 {
+                    let _ = events.send(WorkerEvent::AttachChanged {
+                        name: name.clone(),
+                        active: false,
+                    });
+                }
                 let status = result
                     .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())?;
@@ -266,6 +283,12 @@ async fn run_pipe(
                     terminate_and_reap(pid, &mut wait_task).await;
                     abort_reader(stdout_task);
                     abort_reader(stderr_task);
+                    if attach_count > 0 {
+                        let _ = events.send(WorkerEvent::AttachChanged {
+                            name: name.clone(),
+                            active: false,
+                        });
+                    }
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Stopped);
                 }
@@ -273,15 +296,50 @@ async fn run_pipe(
                     terminate_and_reap(pid, &mut wait_task).await;
                     abort_reader(stdout_task);
                     abort_reader(stderr_task);
+                    if attach_count > 0 {
+                        let _ = events.send(WorkerEvent::AttachChanged {
+                            name: name.clone(),
+                            active: false,
+                        });
+                    }
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Restart { service });
                 }
-                Some(WorkerCommand::Attach { stream }) => drop(stream),
+                Some(WorkerCommand::Attach { stream }) => {
+                    if attach_count == 0 {
+                        let _ = events.send(WorkerEvent::AttachChanged {
+                            name: name.clone(),
+                            active: true,
+                        });
+                    }
+                    attach_count += 1;
+                    let output = output_tx.subscribe();
+                    let done = attach_done_tx.clone();
+                    tokio::spawn(async move {
+                        relay_readonly_attach(stream, output).await;
+                        let _ = done.send(());
+                    });
+                }
                 None => {
                     terminate_and_reap(pid, &mut wait_task).await;
                     abort_reader(stdout_task);
                     abort_reader(stderr_task);
+                    if attach_count > 0 {
+                        let _ = events.send(WorkerEvent::AttachChanged {
+                            name: name.clone(),
+                            active: false,
+                        });
+                    }
                     return Ok(ProcessOutcome::Stopped);
+                }
+            },
+            Some(_) = attach_done_rx.recv(), if attach_count > 0 => {
+                attach_count -= 1;
+                if attach_count == 0 {
+                    let _ = events.send(WorkerEvent::AttachChanged {
+                        name: name.clone(),
+                        active: false,
+                    });
                 }
             }
         }
@@ -292,6 +350,7 @@ fn spawn_pipe_reader<R>(
     mut reader: R,
     name: String,
     events: mpsc::UnboundedSender<WorkerEvent>,
+    output: broadcast::Sender<Vec<u8>>,
 ) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -302,9 +361,11 @@ where
             match reader.read(&mut buffer).await {
                 Ok(0) | Err(_) => return,
                 Ok(length) => {
+                    let bytes = buffer[..length].to_vec();
+                    let _ = output.send(bytes.clone());
                     let _ = events.send(WorkerEvent::Output {
                         name: name.clone(),
-                        bytes: buffer[..length].to_vec(),
+                        bytes,
                     });
                 }
             }
@@ -365,6 +426,12 @@ async fn run_pty(
             result = &mut status => {
                 reader_task.abort();
                 writer_task.abort();
+                if attach_active {
+                    let _ = events.send(WorkerEvent::AttachChanged {
+                        name: name.clone(),
+                        active: false,
+                    });
+                }
                 let (code, success) = result
                     .map_err(|error| error.to_string())?
                     .map(|code| (Some(code as i32), code == 0))
@@ -383,6 +450,12 @@ async fn run_pty(
                     terminate_pty(pid, &mut status).await;
                     reader_task.abort();
                     writer_task.abort();
+                    if attach_active {
+                        let _ = events.send(WorkerEvent::AttachChanged {
+                            name: name.clone(),
+                            active: false,
+                        });
+                    }
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Stopped);
                 }
@@ -390,6 +463,12 @@ async fn run_pty(
                     terminate_pty(pid, &mut status).await;
                     reader_task.abort();
                     writer_task.abort();
+                    if attach_active {
+                        let _ = events.send(WorkerEvent::AttachChanged {
+                            name: name.clone(),
+                            active: false,
+                        });
+                    }
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Restart { service });
                 }
@@ -415,6 +494,12 @@ async fn run_pty(
                     terminate_pty(pid, &mut status).await;
                     reader_task.abort();
                     writer_task.abort();
+                    if attach_active {
+                        let _ = events.send(WorkerEvent::AttachChanged {
+                            name: name.clone(),
+                            active: false,
+                        });
+                    }
                     return Ok(ProcessOutcome::Stopped);
                 }
             }
@@ -498,6 +583,28 @@ async fn relay_attach(
                         return;
                     }
                 }
+            },
+            result = output.recv() => match result {
+                Ok(bytes) => {
+                    if writer.write_all(&bytes).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+async fn relay_readonly_attach(stream: UnixStream, mut output: broadcast::Receiver<Vec<u8>>) {
+    let (mut reader, mut writer) = stream.into_split();
+    let mut input = [0_u8; 8192];
+    loop {
+        tokio::select! {
+            result = reader.read(&mut input) => match result {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
             },
             result = output.recv() => match result {
                 Ok(bytes) => {

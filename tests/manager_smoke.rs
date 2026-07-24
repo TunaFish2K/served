@@ -201,6 +201,91 @@ async fn pty_service_accepts_one_attach_session() {
 }
 
 #[tokio::test]
+async fn pipe_service_supports_multiple_readonly_attach_sessions() {
+    let root = tempdir().expect("tempdir");
+    let config_home = root.path().join("config");
+    let runtime_dir = root.path().join("runtime");
+    let service_dir = root.path().join("service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  "name": "pipe-attach",
+  "command": "while true; do printf 'pipe-ready\\n'; sleep 1; done",
+  "tty": false,
+  "restart": "never"
+}
+"#,
+    )
+    .expect("config");
+    fs::write(service_dir.join(".env"), "").expect("env");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("XDG_CONFIG_HOME", &paths.config_home)
+        .env("XDG_RUNTIME_DIR", &paths.runtime_dir)
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable");
+    wait_for_state(&paths, "pipe-attach", ServiceState::Running).await;
+
+    let mut first = client::attach(&paths, "pipe-attach".to_owned())
+        .await
+        .expect("first read-only attach");
+    let mut second = client::attach(&paths, "pipe-attach".to_owned())
+        .await
+        .expect("second read-only attach");
+    first
+        .write_all(b"ignored input\n")
+        .await
+        .expect("write ignored input");
+    second
+        .write_all(b"ignored input\n")
+        .await
+        .expect("write ignored input");
+
+    let first_output = read_until(&mut first, b"pipe-ready").await;
+    let second_output = read_until(&mut second, b"pipe-ready").await;
+    assert!(
+        first_output
+            .windows(b"pipe-ready".len())
+            .any(|window| window == b"pipe-ready")
+    );
+    assert!(
+        second_output
+            .windows(b"pipe-ready".len())
+            .any(|window| window == b"pipe-ready")
+    );
+
+    drop(first);
+    drop(second);
+    wait_for_attach_state(&paths, "pipe-attach", false).await;
+    client::expect_ok(
+        &paths,
+        Request::Disable {
+            target: Target::Name("pipe-attach".to_owned()),
+        },
+    )
+    .await
+    .expect("disable");
+}
+
+#[tokio::test]
 async fn direct_attach_supports_name_and_current_directory() {
     let root = tempdir().expect("tempdir");
     let config_home = root.path().join("config");
@@ -283,12 +368,16 @@ fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) 
     let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
     let mut writer = pair.master.take_writer().expect("take pty writer");
     let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let (output_sender, output_receiver) = std::sync::mpsc::channel();
     let reader_thread = std::thread::spawn(move || {
         let mut output = Vec::new();
         let mut buffer = [0_u8; 1024];
         loop {
             match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => return,
+                Ok(0) | Err(_) => {
+                    let _ = output_sender.send(output);
+                    return;
+                }
                 Ok(count) => {
                     output.extend_from_slice(&buffer[..count]);
                     if output
@@ -296,7 +385,6 @@ fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) 
                         .any(|window| window == b"attach-ready")
                     {
                         let _ = ready_sender.send(());
-                        return;
                     }
                 }
             }
@@ -311,6 +399,38 @@ fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) 
     let status = wait_for_pty_child(&mut child);
     assert!(status.success(), "attach exited unsuccessfully: {status:?}");
     reader_thread.join().expect("join pty reader");
+    let output = output_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("collect attach terminal output");
+    assert!(
+        output
+            .windows(b"\x1b[?1049h".len())
+            .any(|window| window == b"\x1b[?1049h")
+    );
+    assert!(
+        output
+            .windows(b"\x1b[?1049l".len())
+            .any(|window| window == b"\x1b[?1049l")
+    );
+}
+
+async fn read_until(stream: &mut tokio::net::UnixStream, needle: &[u8]) -> Vec<u8> {
+    timeout(Duration::from_secs(3), async {
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut buffer).await.expect("read attach output");
+            if count == 0 {
+                return output;
+            }
+            output.extend_from_slice(&buffer[..count]);
+            if output.windows(needle.len()).any(|window| window == needle) {
+                return output;
+            }
+        }
+    })
+    .await
+    .expect("attach output timeout")
 }
 
 fn wait_for_pty_child(child: &mut Box<dyn PtyChild + Send + Sync>) -> portable_pty::ExitStatus {
@@ -347,6 +467,21 @@ async fn wait_for_state(paths: &ServedPaths, name: &str, expected: ServiceState)
         sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for service state");
+}
+
+async fn wait_for_attach_state(paths: &ServedPaths, name: &str, expected: bool) {
+    for _ in 0..100 {
+        if let Ok(Response::Services { services }) = client::request(paths, Request::List).await {
+            if services
+                .iter()
+                .any(|service| service.name == name && service.attach_active == expected)
+            {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for attach state");
 }
 
 fn same_state(left: &ServiceState, right: &ServiceState) -> bool {

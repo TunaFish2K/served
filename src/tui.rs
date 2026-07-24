@@ -7,9 +7,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use crossterm::{
+    cursor::{MoveTo, Show},
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+        disable_raw_mode, enable_raw_mode,
+    },
 };
 use rand::{seq::SliceRandom, thread_rng};
 use ratatui::{
@@ -36,7 +40,7 @@ use crate::{
 const TIPS: &[&str] = &[
     "one directory, one .served.json, one working directory",
     "the manager starts enabled services after a user-session restart",
-    "tty:false keeps output as pipes and disables attach",
+    "tty:false services support read-only attach",
     "restart validates the new files before stopping the old process",
     "service output is intentionally kept in memory only",
 ];
@@ -52,10 +56,8 @@ pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
             .await?
         }
     };
-    enable_raw_mode().context("enable attach raw mode")?;
-    let result = attach_session(stream).await;
-    disable_raw_mode().ok();
-    result
+    let _screen = AttachScreen::enter()?;
+    attach_session(stream).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +182,34 @@ fn random_tip() -> &'static str {
     TIPS.choose(&mut thread_rng()).copied().unwrap_or(TIPS[0])
 }
 
+struct AttachScreen;
+
+impl AttachScreen {
+    fn enter() -> Result<Self> {
+        enable_raw_mode().context("enable attach raw mode")?;
+        let mut output = stdout();
+        if let Err(error) = execute!(
+            output,
+            EnterAlternateScreen,
+            TerminalClear(ClearType::All),
+            MoveTo(0, 0),
+            Show
+        ) {
+            disable_raw_mode().ok();
+            return Err(error).context("enter attach alternate screen");
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for AttachScreen {
+    fn drop(&mut self) {
+        disable_raw_mode().ok();
+        let mut output = stdout();
+        let _ = execute!(output, LeaveAlternateScreen, Show);
+    }
+}
+
 pub async fn run(paths: ServedPaths) -> Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend).context("create terminal")?;
@@ -273,11 +303,11 @@ async fn run_loop(
                 }
             }
             KeyCode::Char('a') => {
-                if let Some(service) = services.get(selected).filter(|service| service.tty) {
+                if let Some(service) = services.get(selected) {
                     match client::attach(&paths, service.name.clone()).await {
                         Ok(stream) => {
                             notice = "".to_owned();
-                            attach_session(stream).await?;
+                            attach_in_tui(terminal, stream).await?;
                         }
                         Err(error) => notice = format!("attach: {error}"),
                     }
@@ -301,7 +331,6 @@ fn draw(frame: &mut Frame<'_>, services: &[ServiceInfo], selected: usize, tip: &
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(7),
             Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Length(2),
@@ -340,39 +369,20 @@ fn draw(frame: &mut Frame<'_>, services: &[ServiceInfo], selected: usize, tip: &
     }
     frame.render_stateful_widget(list, areas[1], &mut list_state);
 
-    let output = services
-        .get(selected)
-        .map(|service| service.output_tail.as_str())
-        .unwrap_or("No service selected");
-    frame.render_widget(
-        Paragraph::new(output)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("recent output"),
-            )
-            .wrap(Wrap { trim: false }),
-        areas[2],
-    );
-    frame.render_widget(Paragraph::new(notice), areas[3]);
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[4]);
+    frame.render_widget(Paragraph::new(notice), areas[2]);
+    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[3]);
     frame.render_widget(
         Paragraph::new(main_footer(services, selected)).wrap(Wrap { trim: false }),
-        areas[5],
+        areas[4],
     );
 }
 
 fn main_footer(services: &[ServiceInfo], selected: usize) -> String {
     let navigation = "up/down/j/k move";
-    let Some(service) = services.get(selected) else {
+    if services.get(selected).is_none() {
         return format!("{navigation}   q/Esc quit");
-    };
-    let attach = if service.tty {
-        "a attach"
-    } else {
-        "a attach unavailable"
-    };
-    format!("{navigation}   r restart   d disable   {attach}   q/Esc quit")
+    }
+    format!("{navigation}   r restart   d disable   a attach   q/Esc quit")
 }
 
 fn state_name(state: &ServiceState) -> &'static str {
@@ -383,6 +393,26 @@ fn state_name(state: &ServiceState) -> &'static str {
         ServiceState::Stopped => "stopped",
         ServiceState::Failed => "failed",
     }
+}
+
+async fn attach_in_tui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    stream: UnixStream,
+) -> Result<()> {
+    clear_attach_screen(terminal)?;
+    let attach_result = attach_session(stream).await;
+    let restore_result = clear_attach_screen(terminal);
+    if let Err(error) = attach_result {
+        restore_result?;
+        return Err(error);
+    }
+    restore_result
+}
+
+fn clear_attach_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    terminal.clear().context("clear attach screen")?;
+    execute!(terminal.backend_mut(), MoveTo(0, 0), Show).context("reset attach cursor")?;
+    Ok(())
 }
 
 async fn attach_session(stream: UnixStream) -> Result<()> {
@@ -847,7 +877,7 @@ mod tests {
         assert!(!tty_footer.contains("unavailable"));
 
         let pipe_services = vec![service_info(false)];
-        assert!(main_footer(&pipe_services, 0).contains("a attach unavailable"));
+        assert!(main_footer(&pipe_services, 0).contains("a attach"));
     }
 
     #[test]
@@ -871,6 +901,8 @@ mod tests {
         assert!(text.contains("r restart"));
         assert!(text.contains("a attach"));
         assert!(text.contains("q/Esc quit"));
+        assert!(!text.contains("recent output"));
+        assert!(!text.contains("ready"));
     }
 
     #[test]

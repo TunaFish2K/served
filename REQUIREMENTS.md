@@ -85,7 +85,16 @@ Opens the structured TUI editor for the current directory's `.served.json` and
 changes files only; it does not apply a running-service change automatically.
 
 The JSON editor is form-based. The `.env` editor manages the fixed same-directory
-file.
+file. The fields are rendered from top to bottom in this order: `name`, `command`,
+`TTY`, `restart`, and `.env`. `Tab` moves forward and `Shift-Tab` moves backward.
+The `TTY` field displays `Enabled` or `Disabled`; the `restart` field displays
+`never`, `on-failure`, or `always`.
+
+When `TTY` or `restart` has focus, `Enter` opens a selection popup. Up/down arrow
+keys or `j`/`k` move its temporary highlight. `Enter` applies the highlighted
+value, while `Esc` closes the popup without applying it. In the normal editor,
+`Ctrl-S` saves and `Esc` or `Ctrl-C` cancels the edit. The bottom operation bar
+shows the controls available for the current focus.
 
 ### `served enable`
 
@@ -167,6 +176,16 @@ tips: <tip text>
 
 Tips are built in and a tip is selected randomly on every TUI startup. A tip
 may repeat; no tip position or other manager state is persisted.
+
+The TUI keeps the `tips:` line and the operation bar visible together. The global
+operation bar is contextual: it shows navigation and quit when no service is
+selected; for a selected service it shows restart and disable; it shows attach
+for a PTY service and `attach unavailable` for a pipe service. The bar wraps to
+two lines in a narrow terminal instead of being truncated.
+
+The `served edit` screen uses the same rotating tips set and displays its own
+contextual operation bar. Its focus order is the same as the visual field order
+above.
 
 Service output is not persisted to disk in the first version. Manager restart
 clears the in-memory output history.
@@ -276,3 +295,11 @@ it does not silently start an alternate in-process manager.
 10. Restarting the user manager restores all enabled services.
 11. The TUI tips line selects a built-in tip randomly on every TUI startup.
 12. Unenabled service directories are not controllable from the global manager.
+13. The global TUI operation bar reflects whether a service is selected and
+    whether its `tty` setting permits attach.
+14. `served edit` presents `TTY` and `restart` as visible fields in visual order,
+    and popup selection changes are applied only after `Enter`.
+15. `Esc` closes an open editor popup without changing the in-memory value, while
+    `Esc` outside a popup cancels the entire edit.
+16. The editor focus wraps through `name`, `command`, `TTY`, `restart`, and `.env`
+    in both Tab directions.

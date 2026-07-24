@@ -106,6 +106,20 @@ served-linux-amd64-v0.1.0-full.tar.gz.sha256
 manager 启动时记录自己的环境快照；服务启动时再用 `.env` 值覆盖它。修改
 `/etc/profile` 等 shell 启动文件不会自动更新已经运行的 manager。
 
+## TUI 操作
+
+全局 TUI 底部会同时显示随机 `tips:` 和上下文操作栏。没有服务时，操作栏显示
+`up/down/j/k move` 与退出；选中服务后会显示 `r restart`、`d disable`，TTY
+服务显示 `a attach`，`tty: false` 服务显示 `a attach unavailable`。操作栏在窄
+终端中自动换行到两行。
+
+`served edit` 的字段从上到下依次是 `name`、`command`、`TTY`、`restart` 和
+`.env`。使用 `Tab` 前进、`Shift-Tab` 后退；TTY 字段显示 `Enabled/Disabled`，
+restart 字段显示 `never/on-failure/always`。焦点在这两个选择字段时按 `Enter`
+打开菜单，用上下方向键或 `j/k` 移动，`Enter` 应用选择，`Esc` 关闭菜单且不应用
+暂存值。普通编辑状态下底部会显示当前可用按键；`Ctrl-S` 保存，`Esc` 或
+`Ctrl-C` 取消整个编辑。编辑器也会在启动时显示一条随机 `tips:`。
+
 ## 命令
 
 ```text

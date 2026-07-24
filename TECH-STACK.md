@@ -52,7 +52,15 @@ container runtime, namespace manager, or resource policy engine.
   `.env` buffer.
 - `rand` supplies a non-cryptographic random tip selection on each TUI start.
 - The first TUI screen is the global enabled-service list. It exposes status,
-  recent output, restart, disable, attach, and the single `tips:` line.
+  recent output, restart, disable, attach, and the single `tips:` line. A
+  contextual two-line operation bar stays visible below the tip and indicates
+  which actions are available for the current selection; pipe services expose
+  attach as unavailable.
+- `served edit` keeps the JSON and fixed `.env` buffers in `tui-textarea` fields
+  and renders `TTY` and `restart` as ordinary visible choice rows. The visual
+  order is also the keyboard focus order. Enter opens an in-memory popup for a
+  choice; Enter applies it and Esc discards it. Tab and Shift-Tab move through
+  all five fields.
 
 ## Errors, Logging, and Tests
 

@@ -23,7 +23,9 @@ The manager runs as the fixed `served.service` system unit with `User=` and
 `Group=` set to the installation user's identity. Managed children remain in that
 unit's cgroup. `served` does not become a root daemon, container runtime,
 namespace manager, or resource policy engine. The unit loads the installation
-user's profile through `/bin/sh -lc` and sets `HOME` explicitly.
+user's profile through `/bin/sh -lc`, uses `SetLoginEnvironment=yes`, and sets
+`WorkingDirectory=~` so the system manager resolves the installation user's home.
+It does not use the system manager's `%h` specifier.
 
 ## Configuration and State
 
@@ -101,6 +103,8 @@ user's profile through `/bin/sh -lc` and sets `HOME` explicitly.
   and the systemd journal.
 - Unit tests cover configuration, dotenv overlay, registry behavior, protocol
   framing, log rotation, history pagination, and restart backoff.
+- A Linux shell check renders the service template with the current user and runs
+  `systemd-analyze verify`; it also guards against reintroducing `%h` for home paths.
 - Integration tests use `tempfile` and `assert_cmd`; Linux release smoke tests
   additionally exercise a real system-service installation when available.
 - TUI rendering tests use Ratatui's `TestBackend`; snapshots are optional and

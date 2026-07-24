@@ -5,10 +5,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 service_name="served.service"
 binary_target="/usr/local/bin/served"
 unit_target="/etc/systemd/system/${service_name}"
-legacy_binary_target="$HOME/.local/bin/served"
-legacy_unit_target="$HOME/.config/systemd/user/${service_name}"
 user_name="$(id -un)"
 group_name="$(id -gn)"
+user_home=""
+legacy_binary_target=""
+legacy_unit_target=""
 
 upgrade=0
 upgrade_was_active=0
@@ -81,8 +82,18 @@ require_target_user() {
     if ((EUID == 0)); then
         fatal "run install.sh as the installation user, not root; it uses sudo internally"
     fi
-    [[ -n "${HOME:-}" && "$HOME" = /* ]] || fatal "HOME must be an absolute path"
-    [[ -d "$HOME" ]] || fatal "installation user home does not exist: $HOME"
+    command -v getent >/dev/null 2>&1 || fatal "getent is required to resolve the installation user home"
+    if ! user_home="$(getent passwd "$user_name" 2>/dev/null | awk -F: 'NR == 1 { print $6; exit }')"; then
+        fatal "could not resolve the installation user home from passwd"
+    fi
+    [[ -n "$user_home" && "$user_home" = /* ]] ||
+        fatal "installation user home from passwd is not an absolute path"
+    [[ -d "$user_home" ]] || fatal "installation user home does not exist: $user_home"
+    if [[ "${HOME:-}" != "$user_home" ]]; then
+        printf 'warning: HOME does not match the passwd home; using %s for installation paths\n' "$user_home" >&2
+    fi
+    legacy_binary_target="$user_home/.local/bin/served"
+    legacy_unit_target="$user_home/.config/systemd/user/${service_name}"
     command -v sudo >/dev/null 2>&1 || fatal "sudo is required for system installation"
 }
 
@@ -273,16 +284,16 @@ check_system_user_conflict() {
 warn_about_custom_xdg() {
     local warned=0
 
-    if [[ -n "${XDG_CONFIG_HOME:-}" && "$XDG_CONFIG_HOME" != "$HOME/.config" ]]; then
+    if [[ -n "${XDG_CONFIG_HOME:-}" && "$XDG_CONFIG_HOME" != "$user_home/.config" ]]; then
         printf 'warning: XDG_CONFIG_HOME is ignored by served; existing data under %s is not migrated\n' "$XDG_CONFIG_HOME" >&2
         warned=1
     fi
-    if [[ -n "${XDG_STATE_HOME:-}" && "$XDG_STATE_HOME" != "$HOME/.local/state" ]]; then
+    if [[ -n "${XDG_STATE_HOME:-}" && "$XDG_STATE_HOME" != "$user_home/.local/state" ]]; then
         printf 'warning: XDG_STATE_HOME is ignored by served; existing data under %s is not migrated\n' "$XDG_STATE_HOME" >&2
         warned=1
     fi
     if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-        printf 'warning: XDG_RUNTIME_DIR is ignored by served; the socket uses %s/.local/state/served/runtime\n' "$HOME" >&2
+        printf 'warning: XDG_RUNTIME_DIR is ignored by served; the socket uses %s/.local/state/served/runtime\n' "$user_home" >&2
         warned=1
     fi
     ((warned == 0)) || printf 'warning: custom XDG data is left in place; move it manually if needed\n' >&2
@@ -417,6 +428,22 @@ print_install_hint() {
     printf 'served is installed at %s and is available from any directory.\n' "$binary_target"
 }
 
+print_start_hint() {
+    local status
+
+    if service_enabled; then
+        printf 'start it with: sudo systemctl start %s\n' "$service_name"
+    else
+        status=$?
+        if ((status == 1)); then
+            printf 'enable and start it with: sudo systemctl enable --now %s\n' "$service_name"
+        else
+            printf 'warning: could not determine whether %s is enabled; check it with sudo systemctl status %s\n' \
+                "$service_name" "$service_name" >&2
+        fi
+    fi
+}
+
 require_target_user
 [[ -f "$script_dir/served" ]] || fatal "served binary is missing from the package"
 [[ -f "$script_dir/served.service" ]] || fatal "served.service template is missing from the package"
@@ -513,7 +540,7 @@ if ((upgrade)); then
             else
                 printf 'upgrade installed; service remains stopped\n'
             fi
-            printf 'start it with: sudo systemctl start %s\n' "$service_name"
+            print_start_hint
         fi
     fi
 
@@ -531,6 +558,7 @@ if ((upgrade)); then
         printf '%s remains stopped\n' "$service_name"
     else
         printf '%s was inactive before the upgrade and remains stopped\n' "$service_name"
+        print_start_hint
     fi
     print_install_hint
     exit 0

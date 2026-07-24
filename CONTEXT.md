@@ -29,6 +29,9 @@ installation behavior.
 - **Fixed HOME paths** means configuration under `$HOME/.config` and state under
   `$HOME/.local/state`; `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and
   `XDG_RUNTIME_DIR` do not select served's paths.
+- **Installation-user home** is the canonical home for the installed system
+  service; a normal direct daemon invocation by that user uses the same
+  `$HOME`-derived paths. Deliberately overriding `HOME` is outside this contract.
 - **Served environment file** means the optional `.env.served` file beside
   `.served.json`; a project `.env` file is outside served's configuration.
 
@@ -69,6 +72,9 @@ installation behavior.
   size immediately, polls for changes, and reconnects with backoff after control
   failures. The last PTY size remains after detach; a newly started PTY uses its
   default size.
+- The system service runs as the installation user and uses that user's canonical
+  home for its login environment and working directory; system-manager home
+  expansion is not part of the service path contract.
 
 ## Compatibility
 

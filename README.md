@@ -54,7 +54,10 @@ uninstall.sh
 `/usr/local/bin/served` 或 `/etc/systemd/system/served.service` 已存在，脚本会进入
 覆盖升级流程：确认覆盖后，只有运行中的服务才会再次询问是否停止；文件安装成功
 后，原本运行中的服务会询问是否重启，原本停止的服务保持停止。升级失败会尝试恢复
-旧文件和旧服务。
+旧文件和旧服务。安装器按 passwd 中的安装用户 home 处理旧 user-service 路径，不依赖
+被覆盖的 `HOME` 环境变量。
+如果升级前服务处于 inactive 或 failed，升级后仍保持停止，但脚本会输出对应的
+`systemctl start` 或 `systemctl enable --now` 恢复命令。
 覆盖升级、停止和重启提示回车默认为同意；卸载提示为 `y/N`，回车取消。卸载
 确认后会先 disable，再停止运行中的服务，成功后才删除文件；卸载不会删除配置和
 状态，也不会修改 shell 配置。非交互环境不会执行需要确认的操作。
@@ -67,14 +70,14 @@ XDG 目录只会收到迁移提示，不会被自动复制或删除。
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并
-构建 Linux amd64/glibc 产物。例如版本 `0.1.6` 使用 tag `v0.1.6`，Release 会
+构建 Linux amd64/glibc 产物。例如版本 `0.1.7` 使用 tag `v0.1.7`，Release 会
 包含：
 
 ```text
-served-linux-amd64-v0.1.6-binary
-served-linux-amd64-v0.1.6-binary.sha256
-served-linux-amd64-v0.1.6-full.tar.gz
-served-linux-amd64-v0.1.6-full.tar.gz.sha256
+served-linux-amd64-v0.1.7-binary
+served-linux-amd64-v0.1.7-binary.sha256
+served-linux-amd64-v0.1.7-full.tar.gz
+served-linux-amd64-v0.1.7-full.tar.gz.sha256
 ```
 
 `binary` 是只包含可执行文件的产物；`full.tar.gz` 是包含 `served`、
@@ -195,8 +198,9 @@ manager 会先完整校验新配置，校验失败时保留旧进程不变。启
 - manager 以普通用户身份运行，socket 设置为用户可读写。
 - systemd system unit 以安装用户身份启动和监督 manager；manager 直接管理服务子进程。
 - manager 或其 system unit 重启后，enabled registry 会被重新扫描。
-- system service 设置 `HOME` 并通过 login shell 启动 manager，因此 `/etc/profile` 等环境
-  在 manager 启动时被读取；manager 运行期间仍使用启动时的环境快照。
+- system service 按安装用户的登录环境设置 `HOME`，并通过 login shell 启动 manager，因此
+  `/etc/profile` 等环境在 manager 启动时被读取；manager 运行期间仍使用启动时的环境快照。
+- system service 的工作目录使用安装用户的 home；不依赖 system manager 的 `%h` 展开。
 - 停止服务先发送 `SIGTERM`，超时后发送 `SIGKILL`。
 - `nohup`、后台化、daemonize 等脱离受管 shell 的子进程不在清理保证内。
 - V1 不提供 root 模式、容器隔离、namespace、资源限制、依赖图或健康检查。

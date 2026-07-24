@@ -4,9 +4,10 @@ set -euo pipefail
 service_name="served.service"
 binary_target="/usr/local/bin/served"
 unit_target="/etc/systemd/system/${service_name}"
-legacy_binary_target="$HOME/.local/bin/served"
-legacy_unit_target="$HOME/.config/systemd/user/${service_name}"
 user_name="$(id -un)"
+user_home=""
+legacy_binary_target=""
+legacy_unit_target=""
 legacy_manager_checked=0
 legacy_was_active=0
 legacy_was_enabled=0
@@ -46,6 +47,18 @@ confirm_no() {
 
 require_target_user() {
     ((EUID != 0)) || fatal "run uninstall.sh as the installation user, not root; it uses sudo internally"
+    command -v getent >/dev/null 2>&1 || fatal "getent is required to resolve the installation user home"
+    if ! user_home="$(getent passwd "$user_name" 2>/dev/null | awk -F: 'NR == 1 { print $6; exit }')"; then
+        fatal "could not resolve the installation user home from passwd"
+    fi
+    [[ -n "$user_home" && "$user_home" = /* ]] ||
+        fatal "installation user home from passwd is not an absolute path"
+    [[ -d "$user_home" ]] || fatal "installation user home does not exist: $user_home"
+    if [[ "${HOME:-}" != "$user_home" ]]; then
+        printf 'warning: HOME does not match the passwd home; using %s for uninstall paths\n' "$user_home" >&2
+    fi
+    legacy_binary_target="$user_home/.local/bin/served"
+    legacy_unit_target="$user_home/.config/systemd/user/${service_name}"
     command -v sudo >/dev/null 2>&1 || fatal "sudo is required for system uninstall"
 }
 

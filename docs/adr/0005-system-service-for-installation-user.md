@@ -18,9 +18,12 @@ differently from the installed manager.
   the manager is never a root daemon.
 - Enable the unit for `multi-user.target`, with `Restart=always`, `RestartSec=1s`,
   and `NoNewPrivileges=yes`.
-- Set `HOME` in the unit and start `/usr/local/bin/served daemon` through
-  `/bin/sh -lc`, so the installation user's profile environment is captured at
-  manager startup.
+- Use the installation user's login environment and home directory as the unit's
+  environment and working directory, then start `/usr/local/bin/served daemon`
+  through `/bin/sh -lc` so the installation user's profile is captured at manager
+  startup. The unit must not use the system manager's `%h` specifier for these
+  paths; in a system instance it can resolve to the manager's home rather than
+  the `User=` home and fail at `CHDIR` before the manager starts.
 - Derive configuration, state, and socket paths from `HOME` only:
   `~/.config`, `~/.local/state`, and
   `~/.local/state/served/runtime/served.sock`. `XDG_*` variables do not select
@@ -41,6 +44,10 @@ differently from the installed manager.
   installation user and one fixed service name.
 - Keep honoring XDG runtime/config/state variables: rejected because direct daemon
   and installed service could resolve different locations.
+- Use the system manager's `%h` for `HOME` and `WorkingDirectory`: rejected because
+  it is not a reliable reference to the `User=` account in a system unit.
+- Render an absolute home path into the unit at install time: rejected because it
+  duplicates the home source and requires reinstalling if the account home moves.
 
 ## Consequences
 
@@ -48,4 +55,6 @@ The manager survives logout and uses one stable socket path in both manual and
 systemd launches. System installation needs `sudo`, and only one installation user
 is supported per host. Existing custom XDG data is not moved automatically. A
 legacy user service needs a reachable user manager during migration so the script
-can stop and disable it safely.
+can stop and disable it safely. An upgrade preserves an inactive or failed service
+as stopped and reports the command needed to start it; it does not silently change
+the service's enabled state.

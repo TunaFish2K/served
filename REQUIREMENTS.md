@@ -261,6 +261,8 @@ operation bar.
 - The manager runs as the fixed `served.service` system unit in the system manager.
 - The unit uses `User=<installation user>` and that user's primary group; the
   manager and all managed children remain unprivileged.
+- The unit uses the installation user's login environment and home as its working
+  directory; it must not depend on the system manager's `%h` expansion.
 - The unit is enabled for `multi-user.target`, so it survives SSH logout without
   user lingering. `loginctl enable-linger` is not used.
 - TUI and commands communicate through
@@ -280,6 +282,8 @@ operation bar.
 - The install script is run by the target user and uses internal `sudo` calls. It
   installs `/usr/local/bin/served` and `/etc/systemd/system/served.service` without
   modifying user shell configuration files.
+- The installer resolves the target user's home from passwd and fails before file
+  changes if that home cannot be resolved or does not exist.
 - A fresh install does not ask for an upgrade confirmation.
 - If either the target binary or the system unit already exists, the install is
   treated as an overwrite upgrade and asks for confirmation before changing
@@ -317,6 +321,8 @@ operation bar.
   upgrades.
 - An overwrite upgrade preserves an inactive service as inactive; it does not
   start a service that was already stopped before the upgrade.
+- When an upgrade leaves the service stopped, the installer prints a recovery
+  command appropriate to the service's enabled state.
 - An overwrite upgrade preserves the service's enabled or disabled state and
   does not call `enable` or `disable`; only a fresh install enables the system
   service.
@@ -385,3 +391,8 @@ operation bar.
     restarts while the manager remains alive, and clears them after manager restart.
 23. History content reads are paginated and strip ANSI/control sequences for display
     without changing the raw persistent file.
+24. A rendered system unit passes `systemd-analyze verify`, uses the installation
+    user's home as `WorkingDirectory`, and contains no system-manager `%h` home
+    dependency.
+25. Upgrading an enabled failed service installs the new files without starting it
+    automatically and prints `sudo systemctl start served.service`.

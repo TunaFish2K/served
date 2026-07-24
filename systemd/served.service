@@ -6,8 +6,8 @@ After=local-fs.target
 Type=simple
 User=@SERVED_USER@
 Group=@SERVED_GROUP@
-Environment=HOME=%h
-WorkingDirectory=%h
+SetLoginEnvironment=yes
+WorkingDirectory=~
 ExecStart=/bin/sh -lc 'exec /usr/local/bin/served daemon'
 Restart=always
 RestartSec=1s

@@ -24,9 +24,11 @@ inspect.
   live output when needed.
 - The snapshot is display-only. It is never sent to a PTY, appended to logs, or
   interpreted as cursor/screen state. Pipe observers each receive their own copy.
-- The worker subscribes to live output before writing the snapshot, preventing a
-  gap between replay and the live broadcast. The raw attach protocol and version
-  remain unchanged.
+- Each worker process owns a bounded attach cache. Publishing output updates the
+  cache and live broadcast under one synchronization boundary; creating an
+  attach subscription takes the snapshot and registers the live receiver under
+  that same boundary. This prevents a gap or duplicate between replay and live
+  output. The raw attach protocol and version remain unchanged.
 - The command editor splits actual LF characters into visible TextArea rows, uses a
   bounded dynamic command area, supports bracketed paste, and normalizes CR/CRLF to
   LF on edit. Actual LF remains `/bin/sh -c` script syntax.

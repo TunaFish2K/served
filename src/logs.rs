@@ -120,19 +120,7 @@ impl LogStore {
 
     pub fn attach_snapshot(&self) -> Vec<u8> {
         let raw: Vec<u8> = self.current.iter().copied().collect();
-        let cleaned = normalize_line_endings(&sanitize_log(&raw));
-        let ended_with_newline = cleaned.ends_with('\n');
-        let mut lines: Vec<&str> = cleaned.split('\n').collect();
-        if ended_with_newline {
-            lines.pop();
-        }
-        let start = lines.len().saturating_sub(ATTACH_CACHE_LINES);
-        let mut snapshot = lines[start..].join("\r\n");
-        snapshot = tail_chars(&snapshot, ATTACH_CACHE_MAX_BYTES);
-        if !snapshot.is_empty() {
-            snapshot.push_str("\r\n");
-        }
-        snapshot.into_bytes()
+        attach_snapshot_from_bytes(&raw)
     }
 
     pub fn records(&self) -> Vec<HistoryRecord> {
@@ -466,6 +454,22 @@ pub fn sanitize_log(bytes: &[u8]) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&clean).into_owned()
+}
+
+pub fn attach_snapshot_from_bytes(bytes: &[u8]) -> Vec<u8> {
+    let cleaned = normalize_line_endings(&sanitize_log(bytes));
+    let ended_with_newline = cleaned.ends_with('\n');
+    let mut lines: Vec<&str> = cleaned.split('\n').collect();
+    if ended_with_newline {
+        lines.pop();
+    }
+    let start = lines.len().saturating_sub(ATTACH_CACHE_LINES);
+    let mut snapshot = lines[start..].join("\r\n");
+    snapshot = tail_chars(&snapshot, ATTACH_CACHE_MAX_BYTES);
+    if !snapshot.is_empty() {
+        snapshot.push_str("\r\n");
+    }
+    snapshot.into_bytes()
 }
 
 fn normalize_line_endings(value: &str) -> String {

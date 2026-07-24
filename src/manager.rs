@@ -311,7 +311,6 @@ impl ManagerState {
             return;
         };
         let tty = service.definition.config.tty;
-        let replay = service.logs.attach_snapshot();
         let Some(worker) = service.worker.clone() else {
             if tty {
                 if let Some(service) = self.services.get_mut(&name) {
@@ -320,12 +319,7 @@ impl ManagerState {
             }
             return;
         };
-        if worker
-            .send(WorkerCommand::Attach { stream, replay })
-            .await
-            .is_err()
-            && tty
-        {
+        if worker.send(WorkerCommand::Attach { stream }).await.is_err() && tty {
             if let Some(service) = self.services.get_mut(&name) {
                 service.attach_active = false;
             }

@@ -1,5 +1,7 @@
 use std::{
+    collections::VecDeque,
     io::{Read, Write},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -18,7 +20,11 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use crate::{config::LoadedService, protocol::Target};
+use crate::{
+    config::LoadedService,
+    logs::{MEMORY_LOG_LIMIT, attach_snapshot_from_bytes},
+    protocol::Target,
+};
 
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
@@ -35,7 +41,6 @@ pub enum WorkerCommand {
     },
     Attach {
         stream: UnixStream,
-        replay: Vec<u8>,
     },
 }
 
@@ -88,6 +93,39 @@ enum BackoffOutcome {
     Timer,
     Stop,
     Restart(LoadedService),
+}
+
+#[derive(Debug)]
+struct OutputHub {
+    history: Mutex<VecDeque<u8>>,
+    output: broadcast::Sender<Vec<u8>>,
+}
+
+impl OutputHub {
+    fn new() -> Self {
+        let (output, _) = broadcast::channel(64);
+        Self {
+            history: Mutex::new(VecDeque::with_capacity(MEMORY_LOG_LIMIT.min(8192))),
+            output,
+        }
+    }
+
+    fn publish(&self, bytes: Vec<u8>) {
+        let mut history = self.history.lock().expect("output cache mutex poisoned");
+        history.extend(bytes.iter().copied());
+        while history.len() > MEMORY_LOG_LIMIT {
+            history.pop_front();
+        }
+        let _ = self.output.send(bytes);
+    }
+
+    fn subscribe_with_snapshot(&self) -> (Vec<u8>, broadcast::Receiver<Vec<u8>>) {
+        let history = self.history.lock().expect("output cache mutex poisoned");
+        let raw: Vec<u8> = history.iter().copied().collect();
+        let replay = attach_snapshot_from_bytes(&raw);
+        let output = self.output.subscribe();
+        (replay, output)
+    }
 }
 
 pub fn spawn_service(
@@ -208,7 +246,7 @@ async fn wait_backoff(
                 let _ = reply.send(Ok(()));
                 BackoffOutcome::Restart(service)
             }
-            Some(WorkerCommand::Attach { stream, .. }) => {
+            Some(WorkerCommand::Attach { stream }) => {
                 drop(stream);
                 BackoffOutcome::Timer
             }
@@ -237,13 +275,13 @@ async fn run_pipe(
     let pid = child
         .id()
         .ok_or_else(|| "managed shell did not expose a pid".to_owned())?;
-    let (output_tx, _) = broadcast::channel::<Vec<u8>>(64);
+    let output_hub = Arc::new(OutputHub::new());
     let stdout_task = child.stdout.take().map(|reader| {
         spawn_pipe_reader(
             reader,
             service.config.name.clone(),
             events.clone(),
-            output_tx.clone(),
+            output_hub.clone(),
         )
     });
     let stderr_task = child.stderr.take().map(|reader| {
@@ -251,7 +289,7 @@ async fn run_pipe(
             reader,
             service.config.name.clone(),
             events.clone(),
-            output_tx.clone(),
+            output_hub.clone(),
         )
     });
     let name = service.config.name.clone();
@@ -310,7 +348,7 @@ async fn run_pipe(
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Restart { service });
                 }
-                Some(WorkerCommand::Attach { stream, replay }) => {
+                Some(WorkerCommand::Attach { stream }) => {
                     if attach_count == 0 {
                         let _ = events.send(WorkerEvent::AttachChanged {
                             name: name.clone(),
@@ -318,7 +356,7 @@ async fn run_pipe(
                         });
                     }
                     attach_count += 1;
-                    let output = output_tx.subscribe();
+                    let (replay, output) = output_hub.subscribe_with_snapshot();
                     let done = attach_done_tx.clone();
                     tokio::spawn(async move {
                         relay_readonly_attach(stream, output, replay).await;
@@ -355,7 +393,7 @@ fn spawn_pipe_reader<R>(
     mut reader: R,
     name: String,
     events: mpsc::UnboundedSender<WorkerEvent>,
-    output: broadcast::Sender<Vec<u8>>,
+    output: Arc<OutputHub>,
 ) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -367,7 +405,7 @@ where
                 Ok(0) | Err(_) => return,
                 Ok(length) => {
                     let bytes = buffer[..length].to_vec();
-                    let _ = output.send(bytes.clone());
+                    output.publish(bytes.clone());
                     let _ = events.send(WorkerEvent::Output {
                         name: name.clone(),
                         bytes,
@@ -387,8 +425,8 @@ async fn run_pty(
     let pid = spawned.pid;
     let name = service.config.name.clone();
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (output_tx, _) = broadcast::channel::<Vec<u8>>(64);
-    let reader_output = output_tx.clone();
+    let output_hub = Arc::new(OutputHub::new());
+    let reader_output = output_hub.clone();
     let reader_events = events.clone();
     let reader_name = name.clone();
     let reader_task = tokio::task::spawn_blocking(move || {
@@ -399,7 +437,7 @@ async fn run_pty(
                 Ok(0) | Err(_) => return,
                 Ok(length) => {
                     let bytes = buffer[..length].to_vec();
-                    let _ = reader_output.send(bytes.clone());
+                    reader_output.publish(bytes.clone());
                     let _ = reader_events.send(WorkerEvent::Output {
                         name: reader_name.clone(),
                         bytes,
@@ -477,7 +515,7 @@ async fn run_pty(
                     let _ = reply.send(Ok(()));
                     return Ok(ProcessOutcome::Restart { service });
                 }
-                Some(WorkerCommand::Attach { stream, replay }) => {
+                Some(WorkerCommand::Attach { stream }) => {
                     if attach_active {
                         drop(stream);
                     } else {
@@ -487,7 +525,7 @@ async fn run_pty(
                             active: true,
                         });
                         let input = input_tx.clone();
-                        let output = output_tx.subscribe();
+                        let (replay, output) = output_hub.subscribe_with_snapshot();
                         let done = attach_done_tx.clone();
                         tokio::spawn(async move {
                             relay_attach(stream, input, output, replay).await;
@@ -690,5 +728,17 @@ mod tests {
         assert_eq!(backoff(2), Duration::from_millis(500));
         assert_eq!(backoff(8), Duration::from_secs(30));
         assert_eq!(backoff(100), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn output_hub_pairs_snapshot_with_the_following_live_output() {
+        let hub = OutputHub::new();
+        hub.publish(b"before\n".to_vec());
+
+        let (snapshot, mut receiver) = hub.subscribe_with_snapshot();
+        hub.publish(b"after\n".to_vec());
+
+        assert_eq!(snapshot, b"before\r\n");
+        assert_eq!(receiver.try_recv().expect("live output"), b"after\n");
     }
 }

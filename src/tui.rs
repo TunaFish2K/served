@@ -8,7 +8,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use crossterm::{
     cursor::{MoveTo, Show},
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    },
     execute,
     terminal::{
         Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
@@ -846,6 +848,12 @@ fn editor_loop(
         }
         let event = event::read()?;
 
+        if let Event::Key(key) = &event {
+            if is_editor_cancel_key(key) {
+                bail!("editor cancelled");
+            }
+        }
+
         if let Some(current_popup) = popup.as_mut() {
             let Event::Key(key) = event else {
                 continue;
@@ -874,10 +882,6 @@ fn editor_loop(
         let Event::Key(key) = event else {
             continue;
         };
-
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            bail!("editor cancelled");
-        }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if key.code == KeyCode::Char('s') {
@@ -908,6 +912,10 @@ fn editor_loop(
             }
         }
     }
+}
+
+fn is_editor_cancel_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
 }
 
 fn draw_editor(
@@ -1270,6 +1278,17 @@ mod tests {
         assert!(input_requests_detach(b"output\x03"));
         assert!(!input_requests_detach(b"output\x1d"));
         assert!(!input_requests_detach(b"output"));
+    }
+
+    #[test]
+    fn editor_ctrl_c_is_cancelled_before_popup_dispatch() {
+        let cancel = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let plain_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        let save = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+        assert!(is_editor_cancel_key(&cancel));
+        assert!(!is_editor_cancel_key(&plain_c));
+        assert!(!is_editor_cancel_key(&save));
     }
 
     #[test]

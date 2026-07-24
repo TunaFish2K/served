@@ -64,14 +64,14 @@ export PATH="$HOME/.local/bin:$PATH"
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并
-构建 Linux amd64/glibc 产物。例如版本 `0.1.3` 使用 tag `v0.1.3`，Release 会
+构建 Linux amd64/glibc 产物。例如版本 `0.1.4` 使用 tag `v0.1.4`，Release 会
 包含：
 
 ```text
-served-linux-amd64-v0.1.3-binary
-served-linux-amd64-v0.1.3-binary.sha256
-served-linux-amd64-v0.1.3-full.tar.gz
-served-linux-amd64-v0.1.3-full.tar.gz.sha256
+served-linux-amd64-v0.1.4-binary
+served-linux-amd64-v0.1.4-binary.sha256
+served-linux-amd64-v0.1.4-full.tar.gz
+served-linux-amd64-v0.1.4-full.tar.gz.sha256
 ```
 
 `binary` 是只包含可执行文件的产物；`full.tar.gz` 是包含 `served`、

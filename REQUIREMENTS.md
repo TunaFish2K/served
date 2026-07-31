@@ -2,8 +2,27 @@
 
 状态：产品需求草案。
 
-`served` 是面向 Linux 本地开发环境的轻量服务管理器。它通过一个以安装用户身份运行
-的 systemd system unit 管理宿主机进程。它不是容器运行时，也不管理任意 root 服务。
+`served` 是基于 systemd 的轻量部署工具。它帮助个人开发者把个人非关键服务部署为长期运行
+的服务。它通过一个以安装用户身份运行的 systemd system unit 管理宿主机进程。
+
+个人非关键服务停止后，不会影响主机的登录和基础维护能力。机器人、Webhook、个人 API
+和 Worker 适合使用 served。`sshd`、登录和网络等基础服务不适合使用 served。
+
+served 只管理已经存在的项目目录。代码上传、构建和依赖安装不属于 served 的职责。本地
+测试可以直接运行项目命令。served 负责部署后的常驻运行、重启、attach 和日志查看。
+
+served 不是容器运行时，也不提供任意 root 服务管理、容器隔离、namespace、资源限制或
+健康检查。
+
+## 部署边界
+
+- 首次安装使用 Release 完整安装包中的 `install.sh`。
+- 安装脚本由目标安装用户运行，并在需要时调用 `sudo`。
+- 安装脚本启用并启动 `served.service`。这个 unit 运行 served 管理器。
+- 项目服务必须先有自己的目录和 `.served.json`，再运行 `served enable`。
+- `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
+- 项目文件或配置更新后，使用 `served restart` 应用变化。
+- 服务异常时，使用 `served attach`、`served history` 或持久化日志排查。
 
 ## 核心模型
 
@@ -291,6 +310,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 
 ## V1 不做的事
 
+- 代码上传、代码构建和依赖发布流程。
+- `sshd`、登录、网络等主机基础服务的可用性保障。
 - 兼容 Docker 的镜像或文件系统隔离。
 - 除 served 自身非特权 unit 以外的任意 root/system 服务管理。
 - 一个目录或一个 JSON 文件中配置多个服务。

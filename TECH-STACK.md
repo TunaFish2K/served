@@ -2,8 +2,12 @@
 
 状态：实现基线。
 
-本文记录 V1 的实现选择。产品优先支持 Linux，并使用一个安装用户。“极简”表示操作
-面和所有权边界简单，不表示依赖数量绝对最少。
+本文记录 V1 的实现选择。产品面向个人开发者在 Linux 主机上部署个人非关键服务，并使用
+一个安装用户。“极简”表示操作面和所有权边界简单，不表示依赖数量绝对最少。
+
+served 管理已经存在的项目目录和启动命令。它不负责代码上传、构建、依赖安装或健康检查。
+它使用 systemd system service 保证管理器在用户退出 SSH 后继续运行。它不替代 systemd，
+也不提供容器隔离、root 服务管理或资源限制。
 
 ## 运行时
 
@@ -105,6 +109,8 @@
 ## 打包
 
 - 推送匹配的 `v<semver>` tag 后，GitHub release workflow 自动运行。
+- Release 完整安装包是个人部署的首选入口。安装用户运行其中的 `install.sh`，脚本在需要时
+  调用 `sudo` 安装 system service。
 - workflow 面向 Linux amd64/glibc，发布只含二进制的产物和完整离线安装包。
 - 每个产物都有自己的 SHA-256 sidecar，命名方式是在原文件名后追加 `.sha256`。
 - 完整安装包包含 glibc 链接的二进制、system unit 模板、`install.sh`、`uninstall.sh` 和

@@ -1,10 +1,21 @@
 # served
 
-`served` 是面向 Linux 本地开发环境的轻量服务管理器。它直接管理宿主机进程，
-由一个 systemd system unit 以安装用户身份启动 manager。它不是 Docker 容器运行时，
-也不提供 root 服务管理、命名空间或资源隔离。
+`served` 是基于 systemd 的轻量部署工具，帮助个人开发者把个人非关键服务部署为长期运行的
+服务。它直接管理宿主机进程，由一个 systemd system unit 以安装用户身份启动 manager。
 
 当前代码是 V1 实现，目标平台是 Linux/glibc。
+
+## 适用范围
+
+个人非关键服务是指停止后不会影响主机基础维护能力的服务。机器人、Webhook、个人 API
+和 Worker 适合使用 served。`sshd`、登录和网络等基础服务不适合使用 served。
+
+## 部署职责
+
+served 只管理已经存在的项目目录。代码上传、构建和依赖安装由用户负责。served 不负责本地
+测试流程。开发者可以直接运行程序进行本地测试，部署后再使用 served 管理常驻服务。
+
+served 不是 Docker 容器运行时，也不提供 root 服务管理、命名空间、资源隔离或健康检查。
 
 ## 特性
 
@@ -24,17 +35,32 @@
 - manager 与 CLI/TUI 通过安装用户 HOME 下的 Unix socket 通信：
   `$HOME/.local/state/served/runtime/served.sock`。
 
-## 快速开始
+## 部署流程
 
-需要 Rust stable、Linux、systemd system manager 和可用的 `sudo`。
+部署需要 Linux/glibc、systemd system manager 和可用的 `sudo`。Release 完整安装包是首选
+入口。安装脚本必须由安装用户运行，脚本会在需要时调用 `sudo`。
+
+1. 从 GitHub Release 下载 `full.tar.gz` 安装包。
+2. 解压安装包，并进入解压目录。
+3. 运行 `./install.sh`。
+4. 进入项目目录。
+5. 运行 `served edit` 创建并编辑 `.served.json`。
+6. 运行 `served enable` 启用项目服务。
+
+安装脚本会安装并启动 `served.service`。这个 unit 只负责启动 served manager。它不会自动
+启用项目服务。`served enable` 会把当前项目目录加入管理器，并立即启动该服务。
+
+安装后可以用以下命令确认服务状态：
 
 ```bash
-cargo build --release
-cargo test
+served list
+served attach <name>
 ```
 
-manager 通常由 `served.service` system unit 启动。离线发布包应包含以下文件，并从包
-目录运行安装脚本：
+项目服务更新后，重新运行 `served restart`。服务异常时，可以使用 `served attach`、
+`served history` 和持久化日志排查。served 不会上传项目文件，也不会替用户执行构建流程。
+
+完整安装包包含以下文件，并从包目录运行安装脚本：
 
 ```text
 served
@@ -46,7 +72,7 @@ uninstall.sh
 仓库中的安装脚本位于 `scripts/`，system unit 模板位于 `systemd/`。安装脚本由普通
 安装用户执行，并在需要时通过 `sudo` 安装 `/usr/local/bin/served` 和
 `/etc/systemd/system/served.service`，然后执行 system scope 的 `daemon-reload`、启用和
-启动服务。Rust 程序不会调用 `systemctl` 或 D-Bus。
+启动管理器。Rust 程序不会调用 `systemctl` 或 D-Bus。
 
 安装脚本把可执行文件安装到 `/usr/local/bin/served`。它不会修改用户 shell 配置文件，
 安装后无需 PATH export，在任意目录都可以运行 `served`。脚本最后会输出安装路径。
@@ -247,7 +273,10 @@ manager 会先完整校验新配置，校验失败时保留旧进程不变。启
 - `nohup`、后台化、daemonize 等脱离受管 shell 的子进程不在清理保证内。
 - V1 不提供 root 模式、容器隔离、namespace、资源限制、依赖图或健康检查。
 
-## 开发
+## 维护者构建
+
+以下命令用于构建和检查 served 本身。部署个人项目时，不需要先安装 Rust 工具链。个人部署
+应优先使用 Release 完整安装包。
 
 ```bash
 cargo fmt --all -- --check

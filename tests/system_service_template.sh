@@ -5,6 +5,7 @@ project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 template_path="$project_dir/systemd/served.service"
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/served-system-service.XXXXXX")"
 rendered_path="$temp_dir/served.service"
+verify_path="$temp_dir/served.verify.service"
 trap 'rm -rf -- "$temp_dir"' EXIT
 
 command -v systemd-analyze >/dev/null 2>&1 || {
@@ -39,5 +40,8 @@ if grep -Fq '@SERVED_' "$rendered_path"; then
     exit 1
 fi
 
-systemd-analyze verify "$rendered_path"
+# Verify the unit syntax without requiring the installed served binary to exist
+# on the machine running this check.
+sed 's|/usr/local/bin/served|/bin/true|g' "$rendered_path" > "$verify_path"
+systemd-analyze verify "$verify_path"
 printf 'system service template is valid\n'

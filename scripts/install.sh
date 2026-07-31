@@ -14,6 +14,7 @@ legacy_unit_target=""
 upgrade=0
 upgrade_was_active=0
 upgrade_restarted=0
+upgrade_handed_off=0
 system_binary_was_present=0
 system_unit_was_present=0
 legacy_present=0
@@ -489,18 +490,6 @@ if ((upgrade)); then
         ((status == 1)) || fatal "could not determine whether ${service_name} is running"
     fi
 
-    if ((upgrade_was_active)); then
-        if confirm_yes "${service_name} is running. Stop it before upgrading?"; then
-            :
-        else
-            status=$?
-            ((status == 2)) && fatal "could not read stop confirmation"
-            printf 'upgrade canceled; no files changed\n'
-            exit 0
-        fi
-        systemctl_root stop "$service_name" || fatal "could not stop ${service_name}; no files changed"
-        require_service_inactive
-    fi
 fi
 
 if ! migrate_legacy_service; then
@@ -526,36 +515,42 @@ fi
 
 if ((upgrade)); then
     if ((upgrade_was_active)); then
-        if confirm_yes "Restart ${service_name} with the upgraded files?"; then
-            if systemctl_root start "$service_name" && service_must_be_active; then
-                upgrade_restarted=1
-                :
+        if confirm_yes "Apply the upgraded ${service_name} without stopping managed services?"; then
+            if systemctl_root reload "$service_name" && service_must_be_active; then
+                upgrade_handed_off=1
             else
-                abort_upgrade_after_start_failure "the upgraded ${service_name} failed to start"
+                printf 'warning: manager handoff is unavailable; performing a controlled restart\n' >&2
+                if systemctl_root restart "$service_name" && service_must_be_active; then
+                    upgrade_restarted=1
+                else
+                    abort_upgrade_after_start_failure "the upgraded ${service_name} failed to start"
+                fi
             fi
         else
             status=$?
             if ((status == 2)); then
-                printf 'restart confirmation could not be read; leaving the upgraded service stopped\n' >&2
+                printf 'handoff confirmation could not be read; leaving the existing manager running\n' >&2
             else
-                printf 'upgrade installed; service remains stopped\n'
+                printf 'upgrade installed; existing manager remains running\n'
             fi
-            print_start_hint
         fi
     fi
 
     if ((legacy_present)); then
-        if service_must_be_active; then
+        if service_must_be_active && ((upgrade_handed_off || upgrade_restarted)); then
             remove_legacy_files
         else
             abort_upgrade "new system service is not active; legacy migration was not completed"
         fi
     fi
     printf 'served upgraded at %s\n' "$binary_target"
-    if ((upgrade_restarted)); then
-        printf '%s restarted\n' "$service_name"
+    if ((upgrade_handed_off)); then
+        printf '%s manager handed off with runners preserved\n' "$service_name"
+    elif ((upgrade_restarted)); then
+        printf '%s restarted with a controlled service restart\n' "$service_name"
     elif ((upgrade_was_active)); then
-        printf '%s remains stopped\n' "$service_name"
+        printf '%s remains on the previous manager process\n' "$service_name"
+        printf 'apply it later with: sudo systemctl reload %s\n' "$service_name"
     else
         printf '%s was inactive before the upgrade and remains stopped\n' "$service_name"
         print_start_hint

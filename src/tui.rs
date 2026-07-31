@@ -1,16 +1,21 @@
 use std::{
-    fs,
-    io::{self, stdout},
-    path::Path,
+    io::{self, IsTerminal, Write, stdout},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
+use crate::{
+    client,
+    config::CONFIG_FILE,
+    editor,
+    logs::DEFAULT_CHUNK_LIMIT,
+    paths::ServedPaths,
+    protocol::{HistoryRecord, Request, Response, ServiceInfo, ServiceState, Target},
+};
 use anyhow::{Context, Result, bail};
 use crossterm::{
     cursor::{MoveTo, Show},
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-    },
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{
         Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
@@ -21,23 +26,14 @@ use rand::{seq::SliceRandom, thread_rng};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    text::Line,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::interval,
-};
-use tui_textarea::{Input, TextArea};
-
-use crate::{
-    client,
-    config::{CONFIG_FILE, ENV_FILE, RestartPolicy, ServiceConfig},
-    logs::DEFAULT_CHUNK_LIMIT,
-    paths::ServedPaths,
-    protocol::{HistoryRecord, Request, Response, ServiceInfo, ServiceState, Target},
 };
 
 const TIPS: &[&str] = &[
@@ -49,204 +45,73 @@ const TIPS: &[&str] = &[
     "persistent logs live below the XDG state directory",
 ];
 
-const EDITOR_FIXED_HEIGHT: u16 = 25;
-const EDITOR_COMMAND_MIN_HEIGHT: u16 = 3;
-const EDITOR_COMMAND_MAX_HEIGHT: u16 = 8;
-
 pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
-    let (service_name, session) = match name {
-        Some(name) => {
-            let session = client::attach(&paths, name.clone()).await?;
-            (name, session)
-        }
+    let result = match name {
+        Some(name) => client::attach(&paths, name.clone())
+            .await
+            .map(|session| (name, session)),
         None => {
-            client::attach_current(
-                &paths,
-                std::env::current_dir().context("read current directory")?,
-            )
-            .await?
+            let directory = std::env::current_dir().context("read current directory")?;
+            client::attach_current(&paths, directory).await
         }
+    };
+    let (service_name, session) = match result {
+        Ok(session) => session,
+        Err(error) => return handle_direct_attach_error(error).await,
     };
     let _screen = AttachScreen::enter()?;
     attach_session(&paths, service_name, session).await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditorField {
-    Name,
-    Command,
-    Tty,
-    SyncRowsCols,
-    Restart,
-    PersistLogs,
-    Env,
+async fn handle_direct_attach_error(error: anyhow::Error) -> Result<()> {
+    let Some(unavailable) = error.downcast_ref::<client::AttachUnavailable>() else {
+        return Err(error);
+    };
+    let warning = crash_warning(unavailable);
+    let latest_log = unavailable.latest_log.clone();
+    eprintln!("{warning}");
+    let Some(path) = latest_log else {
+        eprintln!("latest.log is unavailable; enable persist_logs or use the TUI history browser");
+        return Err(error);
+    };
+    eprintln!("latest log: {}", path.display());
+
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        eprint!("Open latest.log? [y/N] ");
+        if let Err(prompt_error) = io::stderr().flush() {
+            eprintln!("cannot show latest.log prompt: {prompt_error}");
+            return Err(error);
+        }
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer).is_ok() && is_affirmative(&answer) {
+            if let Err(editor_error) = open_default_editor(&path).await {
+                eprintln!("cannot open latest.log: {editor_error}");
+            }
+        }
+    }
+
+    Err(error)
 }
 
-impl EditorField {
-    fn next(self) -> Self {
-        match self {
-            Self::Name => Self::Command,
-            Self::Command => Self::Tty,
-            Self::Tty => Self::SyncRowsCols,
-            Self::SyncRowsCols => Self::Restart,
-            Self::Restart => Self::PersistLogs,
-            Self::PersistLogs => Self::Env,
-            Self::Env => Self::Name,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::Name => Self::Env,
-            Self::Command => Self::Name,
-            Self::Tty => Self::Command,
-            Self::SyncRowsCols => Self::Tty,
-            Self::Restart => Self::SyncRowsCols,
-            Self::PersistLogs => Self::Restart,
-            Self::Env => Self::PersistLogs,
-        }
-    }
-
-    fn text_index(self) -> Option<usize> {
-        match self {
-            Self::Name => Some(0),
-            Self::Command => Some(1),
-            Self::Env => Some(2),
-            Self::Tty | Self::SyncRowsCols | Self::Restart | Self::PersistLogs => None,
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::Command => "command",
-            Self::Tty => "TTY",
-            Self::SyncRowsCols => "sync rows/cols",
-            Self::Restart => "restart",
-            Self::PersistLogs => "persist logs",
-            Self::Env => ENV_FILE,
-        }
-    }
+fn crash_warning(unavailable: &client::AttachUnavailable) -> String {
+    format!(
+        "warning: service {:?} is not running after {} failures in {} seconds",
+        unavailable.name, unavailable.recent_failures, unavailable.window_seconds
+    )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditorPopup {
-    Tty { selected: bool },
-    SyncRowsCols { selected: bool },
-    Restart { selected: RestartPolicy },
-    PersistLogs { selected: bool },
+fn is_affirmative(answer: &str) -> bool {
+    matches!(answer.trim(), "y" | "Y")
 }
 
-impl EditorPopup {
-    fn open(
-        field: EditorField,
-        tty: bool,
-        sync_rows_cols: bool,
-        restart: RestartPolicy,
-        persist_logs: bool,
-    ) -> Option<Self> {
-        match field {
-            EditorField::Tty => Some(Self::Tty { selected: tty }),
-            EditorField::SyncRowsCols => Some(Self::SyncRowsCols {
-                selected: sync_rows_cols,
-            }),
-            EditorField::Restart => Some(Self::Restart { selected: restart }),
-            EditorField::PersistLogs => Some(Self::PersistLogs {
-                selected: persist_logs,
-            }),
-            EditorField::Name | EditorField::Command | EditorField::Env => None,
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Tty { .. } => "select TTY",
-            Self::SyncRowsCols { .. } => "sync rows/cols",
-            Self::Restart { .. } => "select restart policy",
-            Self::PersistLogs { .. } => "persist logs",
-        }
-    }
-
-    fn option_count(self) -> usize {
-        match self {
-            Self::Tty { .. } => 2,
-            Self::SyncRowsCols { .. } => 2,
-            Self::Restart { .. } => 3,
-            Self::PersistLogs { .. } => 2,
-        }
-    }
-
-    fn option_label(self, index: usize) -> &'static str {
-        match self {
-            Self::Tty { .. } => match index {
-                0 => "Enabled",
-                _ => "Disabled",
-            },
-            Self::SyncRowsCols { .. } => match index {
-                0 => "Enabled",
-                _ => "Disabled",
-            },
-            Self::Restart { .. } => restart_name(restart_from_index(index)),
-            Self::PersistLogs { .. } => match index {
-                0 => "Enabled",
-                _ => "Disabled",
-            },
-        }
-    }
-
-    fn selected_index(self) -> usize {
-        match self {
-            Self::Tty { selected } => usize::from(!selected),
-            Self::SyncRowsCols { selected } => usize::from(!selected),
-            Self::Restart { selected } => restart_index(selected),
-            Self::PersistLogs { selected } => usize::from(!selected),
-        }
-    }
-
-    fn move_up(&mut self) {
-        match self {
-            Self::Tty { selected } => *selected = !*selected,
-            Self::SyncRowsCols { selected } => *selected = !*selected,
-            Self::Restart { selected } => *selected = previous_restart(*selected),
-            Self::PersistLogs { selected } => *selected = !*selected,
-        }
-    }
-
-    fn move_down(&mut self) {
-        match self {
-            Self::Tty { selected } => *selected = !*selected,
-            Self::SyncRowsCols { selected } => *selected = !*selected,
-            Self::Restart { selected } => *selected = next_restart(*selected),
-            Self::PersistLogs { selected } => *selected = !*selected,
-        }
-    }
-
-    fn apply(
-        self,
-        tty: &mut bool,
-        sync_rows_cols: &mut bool,
-        restart: &mut RestartPolicy,
-        persist_logs: &mut bool,
-    ) {
-        match self {
-            Self::Tty { selected } => *tty = selected,
-            Self::SyncRowsCols { selected } => *sync_rows_cols = selected,
-            Self::Restart { selected } => *restart = selected,
-            Self::PersistLogs { selected } => *persist_logs = selected,
-        }
-    }
+async fn open_default_editor(path: &Path) -> Result<()> {
+    let editor = editor::resolve(None)?;
+    let status = editor::run(&editor, path).await?;
+    editor::require_success(status)
 }
 
 fn random_tip() -> &'static str {
     TIPS.choose(&mut thread_rng()).copied().unwrap_or(TIPS[0])
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EditorChoices {
-    tty: bool,
-    sync_rows_cols: bool,
-    restart: RestartPolicy,
-    persist_logs: bool,
 }
 
 struct AttachScreen;
@@ -295,6 +160,7 @@ async fn run_loop(
     let mut selected = 0_usize;
     let mut services = Vec::new();
     let mut notice = String::new();
+    let mut crash_prompt: Option<CrashLogPrompt> = None;
     let tip = random_tip();
     let current_directory = std::env::current_dir().ok();
 
@@ -316,10 +182,14 @@ async fn run_loop(
                 }
             }
             Err(error) => {
-                notice = format!("manager unavailable: {error}");
+                if crash_prompt.is_none() {
+                    notice = format!("manager unavailable: {error}");
+                }
             }
             Ok(response) => {
-                notice = format!("unexpected manager response: {response:?}");
+                if crash_prompt.is_none() {
+                    notice = format!("unexpected manager response: {response:?}");
+                }
             }
         }
 
@@ -330,9 +200,28 @@ async fn run_loop(
         let Event::Key(key) = event::read().context("read terminal event")? else {
             continue;
         };
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(());
+        }
+        if let Some(prompt) = crash_prompt.take() {
+            match crash_prompt_action(&key.code) {
+                CrashPromptAction::Open => {
+                    notice = match open_editor_in_tui(terminal, &prompt.path).await {
+                        Ok(()) => prompt.warning,
+                        Err(error) => {
+                            format!("{}; cannot open latest.log: {error}", prompt.warning)
+                        }
+                    };
+                }
+                CrashPromptAction::Cancel => {
+                    notice = prompt.warning;
+                }
+                CrashPromptAction::Ignore => crash_prompt = Some(prompt),
+            }
+            continue;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
             KeyCode::Down | KeyCode::Char('j') => {
                 if !services.is_empty() {
                     selected = (selected + 1).min(services.len() - 1);
@@ -376,7 +265,23 @@ async fn run_loop(
                             notice = "".to_owned();
                             attach_in_tui(terminal, &paths, service.name.clone(), session).await?;
                         }
-                        Err(error) => notice = format!("attach: {error}"),
+                        Err(error) => {
+                            if let Some(unavailable) =
+                                error.downcast_ref::<client::AttachUnavailable>()
+                            {
+                                let warning = crash_warning(unavailable);
+                                if let Some(path) = unavailable.latest_log.clone() {
+                                    notice = format!("{warning}; open latest.log? [Y/n]");
+                                    crash_prompt = Some(CrashLogPrompt { warning, path });
+                                } else {
+                                    notice = format!(
+                                        "{warning}; latest.log unavailable, use h history or enable persist_logs"
+                                    );
+                                }
+                            } else {
+                                notice = format!("attach: {error}");
+                            }
+                        }
                     }
                 }
             }
@@ -390,6 +295,26 @@ async fn run_loop(
             }
             _ => {}
         }
+    }
+}
+
+struct CrashLogPrompt {
+    warning: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrashPromptAction {
+    Open,
+    Cancel,
+    Ignore,
+}
+
+fn crash_prompt_action(code: &KeyCode) -> CrashPromptAction {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => CrashPromptAction::Open,
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => CrashPromptAction::Cancel,
+        _ => CrashPromptAction::Ignore,
     }
 }
 
@@ -444,7 +369,7 @@ fn draw(frame: &mut Frame<'_>, services: &[ServiceInfo], selected: usize, tip: &
     }
     frame.render_stateful_widget(list, areas[1], &mut list_state);
 
-    frame.render_widget(Paragraph::new(notice), areas[2]);
+    frame.render_widget(Paragraph::new(notice).wrap(Wrap { trim: false }), areas[2]);
     frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[3]);
     frame.render_widget(
         Paragraph::new(main_footer(services, selected)).wrap(Wrap { trim: false }),
@@ -475,7 +400,8 @@ struct HistoryView {
     content: String,
     offset: u64,
     eof: bool,
-    scroll: u16,
+    total_lines: u64,
+    scroll: u64,
 }
 
 impl HistoryView {
@@ -485,6 +411,7 @@ impl HistoryView {
             content: String::new(),
             offset: 0,
             eof: false,
+            total_lines: 0,
             scroll: 0,
         }
     }
@@ -531,6 +458,7 @@ async fn history_in_tui(
                 KeyCode::Down | KeyCode::Char('j') => {
                     history_view.scroll = history_view.scroll.saturating_add(1);
                     load_history_if_needed(paths, name, history_view).await?;
+                    clamp_history_scroll(history_view);
                 }
                 KeyCode::PageUp => {
                     history_view.scroll = history_view.scroll.saturating_sub(10);
@@ -538,18 +466,14 @@ async fn history_in_tui(
                 KeyCode::PageDown => {
                     history_view.scroll = history_view.scroll.saturating_add(10);
                     load_history_if_needed(paths, name, history_view).await?;
+                    clamp_history_scroll(history_view);
                 }
                 KeyCode::Home | KeyCode::Char('g') => history_view.scroll = 0,
                 KeyCode::End | KeyCode::Char('G') => {
                     while !history_view.eof {
                         load_history_chunk(paths, name, history_view).await?;
                     }
-                    history_view.scroll = history_view
-                        .content
-                        .lines()
-                        .count()
-                        .saturating_sub(1)
-                        .min(u16::MAX as usize) as u16;
+                    history_view.scroll = history_view.total_lines.saturating_sub(1);
                 }
                 _ => {}
             }
@@ -581,8 +505,8 @@ async fn load_history_if_needed(
     name: &str,
     view: &mut HistoryView,
 ) -> Result<()> {
-    let loaded_lines = view.content.lines().count();
-    if !view.eof && usize::from(view.scroll).saturating_add(12) >= loaded_lines {
+    let loaded_lines = view.content.lines().count() as u64;
+    if !view.eof && view.scroll.saturating_add(12) >= loaded_lines {
         load_history_chunk(paths, name, view).await?;
     }
     Ok(())
@@ -604,6 +528,7 @@ async fn load_history_chunk(paths: &ServedPaths, name: &str, view: &mut HistoryV
     .await?;
     let Response::HistoryChunk {
         next_offset,
+        total_lines,
         eof,
         content,
         ..
@@ -616,8 +541,26 @@ async fn load_history_chunk(paths: &ServedPaths, name: &str, view: &mut HistoryV
     }
     view.content.push_str(&content);
     view.offset = next_offset;
+    view.total_lines = total_lines;
     view.eof = eof;
+    clamp_history_scroll(view);
     Ok(())
+}
+
+fn clamp_history_scroll(view: &mut HistoryView) {
+    if view.total_lines == 0 {
+        view.scroll = 0;
+    } else {
+        view.scroll = view.scroll.min(view.total_lines.saturating_sub(1));
+    }
+}
+
+fn history_position(scroll: u64, total_lines: u64) -> (u64, u64) {
+    if total_lines == 0 {
+        (0, 0)
+    } else {
+        (scroll.min(total_lines.saturating_sub(1)) + 1, total_lines)
+    }
 }
 
 fn draw_history_list(
@@ -674,6 +617,7 @@ fn draw_history_content(frame: &mut Frame<'_>, name: &str, view: &HistoryView, t
             Constraint::Length(3),
             Constraint::Min(4),
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(2),
         ])
         .split(frame.area());
@@ -685,15 +629,20 @@ fn draw_history_content(frame: &mut Frame<'_>, name: &str, view: &HistoryView, t
     frame.render_widget(
         Paragraph::new(view.content.as_str())
             .block(Block::default().borders(Borders::ALL).title("output"))
-            .scroll((view.scroll, 0))
+            .scroll((view.scroll.min(u16::MAX as u64) as u16, 0))
             .wrap(Wrap { trim: false }),
         areas[1],
     );
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[2]);
+    let (position, total_lines) = history_position(view.scroll, view.total_lines);
+    frame.render_widget(
+        Paragraph::new(format!("{position}/{total_lines}")),
+        areas[2],
+    );
+    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[3]);
     frame.render_widget(
         Paragraph::new("up/down/j/k scroll   PgUp/PgDn page   g/G top/end   Esc/q back")
             .wrap(Wrap { trim: false }),
-        areas[3],
+        areas[4],
     );
 }
 
@@ -711,6 +660,37 @@ async fn attach_in_tui(
         return Err(error);
     }
     restore_result
+}
+
+async fn open_editor_in_tui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    path: &Path,
+) -> Result<()> {
+    let editor = editor::resolve(None)?;
+    disable_raw_mode().context("disable terminal raw mode for editor")?;
+    if let Err(error) = execute!(terminal.backend_mut(), LeaveAlternateScreen, Show) {
+        enable_raw_mode().ok();
+        return Err(error).context("leave alternate screen for editor");
+    }
+
+    let editor_result = editor::run(&editor, path).await;
+    let restore_result = restore_tui_after_editor(terminal);
+    restore_result?;
+    editor::require_success(editor_result?)
+}
+
+fn restore_tui_after_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        TerminalClear(ClearType::All),
+        MoveTo(0, 0),
+        Show
+    )
+    .context("re-enter alternate screen after editor")?;
+    enable_raw_mode().context("restore terminal raw mode after editor")?;
+    terminal.clear().context("redraw TUI after editor")?;
+    Ok(())
 }
 
 fn clear_attach_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -839,471 +819,6 @@ fn input_requests_detach(input: &[u8]) -> bool {
     input.contains(&0x03)
 }
 
-pub fn edit_current(directory: &Path) -> Result<()> {
-    let config_path = directory.join(CONFIG_FILE);
-    let env_path = directory.join(ENV_FILE);
-    let config = if config_path.is_file() {
-        serde_json::from_slice::<ServiceConfig>(&fs::read(&config_path)?)
-            .context("parse existing .served.json")?
-    } else {
-        ServiceConfig::template(directory)
-    };
-    let env = if env_path.is_file() {
-        fs::read_to_string(&env_path).context("read .env.served")?
-    } else {
-        String::new()
-    };
-    let mut fields = vec![
-        TextArea::new(vec![config.name]),
-        TextArea::new(command_lines(&config.command)),
-        TextArea::new(if env.is_empty() {
-            vec![String::new()]
-        } else {
-            env.lines().map(ToOwned::to_owned).collect()
-        }),
-    ];
-    for (index, field) in fields.iter_mut().enumerate() {
-        field.set_block(Block::default().borders(Borders::ALL).title(match index {
-            0 => "name",
-            1 => "command",
-            _ => ENV_FILE,
-        }));
-    }
-
-    let mut terminal =
-        Terminal::new(CrosstermBackend::new(stdout())).context("create editor terminal")?;
-    enable_raw_mode().context("enable editor raw mode")?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableBracketedPaste
-    )
-    .context("enter editor screen")?;
-    let result = editor_loop(
-        &mut terminal,
-        &mut fields,
-        config.tty,
-        config.sync_rows_cols,
-        config.restart,
-        config.persist_logs,
-        random_tip(),
-    );
-    disable_raw_mode().ok();
-    execute!(
-        terminal.backend_mut(),
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    )
-    .ok();
-    let (tty, sync_rows_cols, restart, persist_logs) = match result {
-        Ok(value) => value,
-        Err(error) if error.to_string() == "editor cancelled" => return Ok(()),
-        Err(error) => return Err(error),
-    };
-
-    let config = ServiceConfig {
-        name: fields[0].lines().join("\n").trim().to_owned(),
-        command: fields[1].lines().join("\n"),
-        tty,
-        sync_rows_cols,
-        restart,
-        persist_logs,
-    };
-    config.validate().map_err(|error| anyhow::anyhow!(error))?;
-    fs::create_dir_all(directory).context("create service directory")?;
-    fs::write(
-        config_path,
-        format!("{}\n", serde_json::to_string_pretty(&config)?),
-    )?;
-    fs::write(env_path, format!("{}\n", fields[2].lines().join("\n")))?;
-    Ok(())
-}
-
-fn normalize_editor_line_endings(value: &str) -> String {
-    value.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-fn command_lines(value: &str) -> Vec<String> {
-    normalize_editor_line_endings(value)
-        .split('\n')
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn editor_command_height(line_count: usize, terminal_height: u16) -> u16 {
-    let desired = line_count.saturating_add(2).min(u16::MAX as usize) as u16;
-    let desired = desired.clamp(EDITOR_COMMAND_MIN_HEIGHT, EDITOR_COMMAND_MAX_HEIGHT);
-    desired.min(
-        terminal_height
-            .saturating_sub(EDITOR_FIXED_HEIGHT)
-            .max(EDITOR_COMMAND_MIN_HEIGHT),
-    )
-}
-
-fn editor_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    fields: &mut [TextArea<'static>],
-    mut tty: bool,
-    mut sync_rows_cols: bool,
-    mut restart: RestartPolicy,
-    mut persist_logs: bool,
-    tip: &str,
-) -> Result<(bool, bool, RestartPolicy, bool)> {
-    let mut selected = EditorField::Name;
-    let mut popup = None;
-    loop {
-        terminal.draw(|frame| {
-            draw_editor(
-                frame,
-                fields,
-                EditorChoices {
-                    tty,
-                    sync_rows_cols,
-                    restart,
-                    persist_logs,
-                },
-                selected,
-                popup,
-                tip,
-            )
-        })?;
-        if !event::poll(Duration::from_millis(100))? {
-            continue;
-        }
-        let event = event::read()?;
-
-        if let Event::Key(key) = &event {
-            if is_editor_cancel_key(key) {
-                bail!("editor cancelled");
-            }
-        }
-
-        if let Some(current_popup) = popup.as_mut() {
-            let Event::Key(key) = event else {
-                continue;
-            };
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => current_popup.move_up(),
-                KeyCode::Down | KeyCode::Char('j') => current_popup.move_down(),
-                KeyCode::Enter => {
-                    if let Some(current_popup) = popup.take() {
-                        current_popup.apply(
-                            &mut tty,
-                            &mut sync_rows_cols,
-                            &mut restart,
-                            &mut persist_logs,
-                        );
-                    }
-                }
-                KeyCode::Esc => popup = None,
-                _ => {}
-            }
-            continue;
-        }
-
-        if let Event::Paste(text) = event {
-            if let Some(index) = selected.text_index() {
-                fields[index].insert_str(normalize_editor_line_endings(&text));
-            }
-            continue;
-        }
-
-        let Event::Key(key) = event else {
-            continue;
-        };
-
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if key.code == KeyCode::Char('s') {
-                return Ok((tty, sync_rows_cols, restart, persist_logs));
-            }
-            continue;
-        }
-
-        match key.code {
-            KeyCode::Esc => bail!("editor cancelled"),
-            KeyCode::BackTab => selected = selected.previous(),
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                selected = selected.previous();
-            }
-            KeyCode::Tab => selected = selected.next(),
-            KeyCode::Enter => {
-                if let Some(current_popup) =
-                    EditorPopup::open(selected, tty, sync_rows_cols, restart, persist_logs)
-                {
-                    popup = Some(current_popup);
-                } else if let Some(index) = selected.text_index() {
-                    fields[index].input(Input::from(key));
-                }
-            }
-            _ => {
-                if let Some(index) = selected.text_index() {
-                    fields[index].input(Input::from(key));
-                }
-            }
-        }
-    }
-}
-
-fn is_editor_cancel_key(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
-}
-
-fn draw_editor(
-    frame: &mut Frame<'_>,
-    fields: &[TextArea<'static>],
-    choices: EditorChoices,
-    selected: EditorField,
-    popup: Option<EditorPopup>,
-    tip: &str,
-) {
-    let command_line_count = fields.get(1).map(|field| field.lines().len()).unwrap_or(1);
-    let command_height = editor_command_height(command_line_count, frame.area().height);
-    let areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(command_height),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(4),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
-        .split(frame.area());
-
-    frame.render_widget(
-        Paragraph::new("edit .served.json and .env.served").block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(".served editor"),
-        ),
-        areas[0],
-    );
-
-    for (index, field) in fields.iter().enumerate().take(2) {
-        let field_kind = if index == 0 {
-            EditorField::Name
-        } else {
-            EditorField::Command
-        };
-        let mut field = field.clone();
-        let block_style = if selected == field_kind {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        };
-        field.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(block_style)
-                .title(if field_kind == EditorField::Command {
-                    format!("command ({} lines)", command_line_count)
-                } else {
-                    field_kind.title().to_owned()
-                }),
-        );
-        if selected == field_kind {
-            field.set_cursor_line_style(Style::default().bg(Color::DarkGray));
-        }
-        frame.render_widget(&field, areas[index + 1]);
-    }
-
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            tty_name(choices.tty),
-            option_style(selected == EditorField::Tty),
-        )))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(choice_border_style(selected == EditorField::Tty))
-                .title(EditorField::Tty.title()),
-        ),
-        areas[3],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            tty_name(choices.sync_rows_cols),
-            option_style(selected == EditorField::SyncRowsCols),
-        )))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(choice_border_style(selected == EditorField::SyncRowsCols))
-                .title(EditorField::SyncRowsCols.title()),
-        ),
-        areas[4],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            restart_name(choices.restart),
-            option_style(selected == EditorField::Restart),
-        )))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(choice_border_style(selected == EditorField::Restart))
-                .title(EditorField::Restart.title()),
-        ),
-        areas[5],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            tty_name(choices.persist_logs),
-            option_style(selected == EditorField::PersistLogs),
-        )))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(choice_border_style(selected == EditorField::PersistLogs))
-                .title(EditorField::PersistLogs.title()),
-        ),
-        areas[6],
-    );
-
-    if let Some(field) = fields.get(2) {
-        let mut field = field.clone();
-        let block_style = if selected == EditorField::Env {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        };
-        field.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(block_style)
-                .title(EditorField::Env.title()),
-        );
-        if selected == EditorField::Env {
-            field.set_cursor_line_style(Style::default().bg(Color::DarkGray));
-        }
-        frame.render_widget(&field, areas[7]);
-    }
-
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[8]);
-    frame.render_widget(
-        Paragraph::new(editor_footer(selected, popup.is_some())).wrap(Wrap { trim: false }),
-        areas[9],
-    );
-
-    if let Some(popup) = popup {
-        draw_popup(frame, popup);
-    }
-}
-
-fn draw_popup(frame: &mut Frame<'_>, popup: EditorPopup) {
-    let area = centered_rect(frame.area(), 34, popup.option_count() as u16 + 2);
-    frame.render_widget(Clear, area);
-    let items: Vec<ListItem> = (0..popup.option_count())
-        .map(|index| ListItem::new(popup.option_label(index)))
-        .collect();
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(popup.title()))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    let mut state = ListState::default();
-    state.select(Some(popup.selected_index()));
-    frame.render_stateful_widget(list, area, &mut state);
-}
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width.saturating_sub(2));
-    let height = height.min(area.height.saturating_sub(2));
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-}
-
-fn option_style(selected: bool) -> Style {
-    if selected {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    }
-}
-
-fn choice_border_style(selected: bool) -> Style {
-    if selected {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    }
-}
-
-fn tty_name(tty: bool) -> &'static str {
-    if tty { "Enabled" } else { "Disabled" }
-}
-
-fn editor_footer(selected: EditorField, popup_open: bool) -> String {
-    if popup_open {
-        "up/down/j/k choose   Enter apply   Esc close".to_owned()
-    } else if matches!(
-        selected,
-        EditorField::Tty
-            | EditorField::SyncRowsCols
-            | EditorField::Restart
-            | EditorField::PersistLogs
-    ) {
-        "Tab next   Shift-Tab previous   Enter choose   Ctrl-S save   Esc/Ctrl-C cancel".to_owned()
-    } else if selected == EditorField::Command {
-        "Tab next   Shift-Tab previous   Enter new line   Ctrl-S save   Esc/Ctrl-C cancel"
-            .to_owned()
-    } else {
-        "Tab next   Shift-Tab previous   Ctrl-S save   Esc/Ctrl-C cancel".to_owned()
-    }
-}
-
-fn next_restart(policy: RestartPolicy) -> RestartPolicy {
-    match policy {
-        RestartPolicy::Never => RestartPolicy::OnFailure,
-        RestartPolicy::OnFailure => RestartPolicy::Always,
-        RestartPolicy::Always => RestartPolicy::Never,
-    }
-}
-
-fn previous_restart(policy: RestartPolicy) -> RestartPolicy {
-    match policy {
-        RestartPolicy::Never => RestartPolicy::Always,
-        RestartPolicy::OnFailure => RestartPolicy::Never,
-        RestartPolicy::Always => RestartPolicy::OnFailure,
-    }
-}
-
-fn restart_index(policy: RestartPolicy) -> usize {
-    match policy {
-        RestartPolicy::Never => 0,
-        RestartPolicy::OnFailure => 1,
-        RestartPolicy::Always => 2,
-    }
-}
-
-fn restart_from_index(index: usize) -> RestartPolicy {
-    match index % 3 {
-        0 => RestartPolicy::Never,
-        1 => RestartPolicy::OnFailure,
-        _ => RestartPolicy::Always,
-    }
-}
-
-fn restart_name(policy: RestartPolicy) -> &'static str {
-    match policy {
-        RestartPolicy::Never => "never",
-        RestartPolicy::OnFailure => "on-failure",
-        RestartPolicy::Always => "always",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1316,7 +831,7 @@ mod tests {
             state: ServiceState::Running,
             pid: Some(42),
             tty,
-            restart: restart_name(RestartPolicy::Never).to_owned(),
+            restart: "never".to_owned(),
             persist_logs: false,
             attach_active: false,
             output_tail: "ready".to_owned(),
@@ -1333,117 +848,12 @@ mod tests {
             .collect()
     }
 
-    fn editor_fields() -> Vec<TextArea<'static>> {
-        vec![
-            TextArea::new(vec!["api".to_owned()]),
-            TextArea::new(vec!["echo first".to_owned(), "echo second".to_owned()]),
-            TextArea::new(vec!["PORT=8080".to_owned()]),
-        ]
-    }
-
     #[test]
-    fn command_lines_expose_json_newlines_and_normalize_carriage_returns() {
-        assert_eq!(
-            command_lines("echo first\r\necho second\recho third"),
-            ["echo first", "echo second", "echo third"]
-        );
-        assert_eq!(command_lines(r"printf '\n'"), [r"printf '\n'"]);
-    }
-
-    #[test]
-    fn editor_command_height_grows_and_stays_bounded() {
-        assert_eq!(editor_command_height(1, 30), 3);
-        assert_eq!(editor_command_height(4, 30), 5);
-        assert_eq!(editor_command_height(20, 40), EDITOR_COMMAND_MAX_HEIGHT);
-    }
-
-    #[test]
-    fn editor_focus_follows_visual_order_and_wraps() {
-        assert_eq!(EditorField::Name.next(), EditorField::Command);
-        assert_eq!(EditorField::Command.next(), EditorField::Tty);
-        assert_eq!(EditorField::Tty.next(), EditorField::SyncRowsCols);
-        assert_eq!(EditorField::SyncRowsCols.next(), EditorField::Restart);
-        assert_eq!(EditorField::Restart.next(), EditorField::PersistLogs);
-        assert_eq!(EditorField::PersistLogs.next(), EditorField::Env);
-        assert_eq!(EditorField::Env.next(), EditorField::Name);
-
-        assert_eq!(EditorField::Name.previous(), EditorField::Env);
-        assert_eq!(EditorField::Env.previous(), EditorField::PersistLogs);
-        assert_eq!(EditorField::Restart.previous(), EditorField::SyncRowsCols);
-        assert_eq!(EditorField::SyncRowsCols.previous(), EditorField::Tty);
-        assert_eq!(EditorField::PersistLogs.previous(), EditorField::Restart);
-    }
-
-    #[test]
-    fn popup_selection_is_staged_until_apply() {
-        let mut tty = true;
-        let mut sync_rows_cols = true;
-        let mut restart = RestartPolicy::Never;
-        let mut persist_logs = false;
-        let mut tty_popup =
-            EditorPopup::open(EditorField::Tty, tty, sync_rows_cols, restart, persist_logs)
-                .expect("TTY popup");
-        tty_popup.move_down();
-        assert_eq!(
-            tty_popup.option_label(tty_popup.selected_index()),
-            "Disabled"
-        );
-        assert!(tty);
-
-        let mut sync_popup = EditorPopup::open(
-            EditorField::SyncRowsCols,
-            tty,
-            sync_rows_cols,
-            restart,
-            persist_logs,
-        )
-        .expect("sync rows/cols popup");
-        sync_popup.move_down();
-        sync_popup.apply(
-            &mut tty,
-            &mut sync_rows_cols,
-            &mut restart,
-            &mut persist_logs,
-        );
-        assert!(!sync_rows_cols);
-
-        let mut restart_popup = EditorPopup::open(
-            EditorField::Restart,
-            tty,
-            sync_rows_cols,
-            restart,
-            persist_logs,
-        )
-        .expect("restart popup");
-        restart_popup.move_down();
-        restart_popup.move_down();
-        assert_eq!(restart_popup.selected_index(), 2);
-        restart_popup.move_up();
-        restart_popup.apply(
-            &mut tty,
-            &mut sync_rows_cols,
-            &mut restart,
-            &mut persist_logs,
-        );
-        assert!(tty);
-        assert_eq!(restart, RestartPolicy::OnFailure);
-
-        let mut persist_popup = EditorPopup::open(
-            EditorField::PersistLogs,
-            tty,
-            sync_rows_cols,
-            restart,
-            persist_logs,
-        )
-        .expect("persist popup");
-        persist_popup.move_down();
-        persist_popup.apply(
-            &mut tty,
-            &mut sync_rows_cols,
-            &mut restart,
-            &mut persist_logs,
-        );
-        assert!(persist_logs);
+    fn history_position_is_one_based_and_clamped() {
+        assert_eq!(history_position(0, 0), (0, 0));
+        assert_eq!(history_position(0, 3), (1, 3));
+        assert_eq!(history_position(1, 3), (2, 3));
+        assert_eq!(history_position(99, 3), (3, 3));
     }
 
     #[test]
@@ -1470,14 +880,32 @@ mod tests {
     }
 
     #[test]
-    fn editor_ctrl_c_is_cancelled_before_popup_dispatch() {
-        let cancel = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let plain_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
-        let save = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    fn attach_log_prompt_accepts_only_explicit_yes() {
+        assert!(is_affirmative("y\n"));
+        assert!(is_affirmative("Y"));
+        assert!(!is_affirmative(""));
+        assert!(!is_affirmative("n\n"));
+        assert!(!is_affirmative("yes"));
+    }
 
-        assert!(is_editor_cancel_key(&cancel));
-        assert!(!is_editor_cancel_key(&plain_c));
-        assert!(!is_editor_cancel_key(&save));
+    #[test]
+    fn tui_crash_prompt_uses_enter_as_yes_and_escape_as_no() {
+        assert_eq!(
+            crash_prompt_action(&KeyCode::Enter),
+            CrashPromptAction::Open
+        );
+        assert_eq!(
+            crash_prompt_action(&KeyCode::Char('y')),
+            CrashPromptAction::Open
+        );
+        assert_eq!(
+            crash_prompt_action(&KeyCode::Esc),
+            CrashPromptAction::Cancel
+        );
+        assert_eq!(
+            crash_prompt_action(&KeyCode::Char('j')),
+            CrashPromptAction::Ignore
+        );
     }
 
     #[test]
@@ -1499,43 +927,20 @@ mod tests {
     }
 
     #[test]
-    fn editor_render_shows_fields_and_popup_options() {
-        let backend = TestBackend::new(100, 30);
+    fn history_render_shows_position_tip_and_footer() {
+        let backend = TestBackend::new(100, 16);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        let fields = editor_fields();
+        let mut view = HistoryView::new("latest".to_owned());
+        view.content = "first\nsecond\nthird".to_owned();
+        view.total_lines = 3;
+        view.scroll = 1;
         terminal
-            .draw(|frame| {
-                draw_editor(
-                    frame,
-                    &fields,
-                    EditorChoices {
-                        tty: false,
-                        sync_rows_cols: true,
-                        restart: RestartPolicy::OnFailure,
-                        persist_logs: false,
-                    },
-                    EditorField::Restart,
-                    Some(EditorPopup::Restart {
-                        selected: RestartPolicy::OnFailure,
-                    }),
-                    "editor tip",
-                )
-            })
+            .draw(|frame| draw_history_content(frame, "api", &view, "history tip"))
             .expect("draw");
 
         let text = buffer_text(&terminal);
-        assert!(text.contains("name"));
-        assert!(text.contains("command (2 lines)"));
-        assert!(text.contains("echo first"));
-        assert!(text.contains("echo second"));
-        assert!(text.contains("TTY"));
-        assert!(text.contains("Disabled"));
-        assert!(text.contains("sync rows/cols"));
-        assert!(text.contains("restart"));
-        assert!(text.contains("on-failure"));
-        assert!(text.contains("always"));
-        assert!(text.contains(".env.served"));
-        assert!(text.contains("tips: editor tip"));
-        assert!(text.contains("Enter apply"));
+        assert!(text.contains("2/3"));
+        assert!(text.contains("tips: history tip"));
+        assert!(text.contains("Esc/q back"));
     }
 }

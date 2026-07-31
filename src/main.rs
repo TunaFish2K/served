@@ -1,10 +1,14 @@
+use std::{path::Path, process};
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use served::{
-    client, manager,
+    client,
+    config::{CONFIG_FILE, write_template},
+    editor, manager,
     paths::ServedPaths,
     protocol::{Request, Response, Target},
-    tui,
+    runner, tui,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -22,9 +26,28 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the manager. Normally started by the served system service.
-    Daemon,
-    /// Edit .served.json and .env.served in the current directory.
-    Edit,
+    Daemon {
+        #[arg(long, hide = true)]
+        handoff: bool,
+    },
+    /// Stop the manager and all runners. Used by the system service.
+    #[command(hide = true)]
+    Shutdown,
+    /// Replace the manager process while keeping runners alive.
+    #[command(hide = true)]
+    Runner {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        socket: std::path::PathBuf,
+    },
+    /// Open .served.json in an external editor.
+    Edit {
+        #[arg(short = 'e', long, value_name = "COMMAND", conflicts_with = "path")]
+        editor: Option<String>,
+        #[arg(long, conflicts_with = "editor")]
+        path: bool,
+    },
     /// Enable the current service directory and start it.
     Enable,
     /// Disable the current service, or an enabled service by name.
@@ -33,11 +56,15 @@ enum Command {
     Restart { name: Option<String> },
     /// Attach directly to the current service, or an enabled service by name.
     Attach { name: Option<String> },
-    /// List or print service output history.
+    /// Open service output history in an editor, or print its path.
     History {
         name: Option<String>,
         #[arg(long)]
         run: Option<String>,
+        #[arg(short = 'e', long, value_name = "COMMAND", conflicts_with = "path")]
+        editor: Option<String>,
+        #[arg(long, conflicts_with = "editor")]
+        path: bool,
     },
     /// Print enabled services known to the manager.
     List,
@@ -53,14 +80,23 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Edit) => {
-            tui::edit_current(&std::env::current_dir().context("read current directory")?)
+        Some(Command::Edit { editor, path }) => {
+            let directory = std::env::current_dir().context("read current directory")?;
+            edit_config(&directory, editor, path).await
         }
         command => {
             let paths = ServedPaths::from_environment().context("served requires HOME")?;
             match command {
                 None => tui::run(paths).await,
-                Some(Command::Daemon) => manager::run_daemon(paths).await,
+                Some(Command::Daemon { handoff }) => {
+                    if handoff {
+                        manager::request_handoff(paths).await
+                    } else {
+                        manager::run_daemon(paths).await
+                    }
+                }
+                Some(Command::Shutdown) => manager::request_shutdown(paths).await,
+                Some(Command::Runner { name, socket }) => runner::run(name, socket).await,
                 Some(Command::Enable) => {
                     let directory = std::env::current_dir().context("read current directory")?;
                     client::expect_ok(
@@ -80,12 +116,17 @@ async fn main() -> Result<()> {
                     client::expect_ok(&paths, Request::Restart { target }).await
                 }
                 Some(Command::Attach { name }) => tui::attach(paths, name).await,
-                Some(Command::History { name, run }) => {
+                Some(Command::History {
+                    name,
+                    run,
+                    editor,
+                    path,
+                }) => {
                     let target = client::target(name, std::env::current_dir()?);
-                    print_history(&paths, target, run).await
+                    print_history(&paths, target, run, editor, path).await
                 }
                 Some(Command::List) => print_list(&paths).await,
-                Some(Command::Edit) => unreachable!("edit is handled above"),
+                Some(Command::Edit { .. }) => unreachable!("edit is handled above"),
             }
         }
     }
@@ -113,51 +154,64 @@ async fn print_list(paths: &ServedPaths) -> Result<()> {
     Ok(())
 }
 
-async fn print_history(paths: &ServedPaths, target: Target, run: Option<String>) -> Result<()> {
-    if let Some(id) = run {
-        let mut offset = 0_u64;
-        loop {
-            let response = client::request(
-                paths,
-                Request::HistoryChunk {
-                    target: target.clone(),
-                    id: id.clone(),
-                    offset,
-                    limit: served::logs::DEFAULT_CHUNK_LIMIT,
-                },
-            )
-            .await?;
-            let Response::HistoryChunk {
-                next_offset,
-                eof,
-                content,
-                ..
-            } = response
-            else {
-                bail!("unexpected manager response")
-            };
-            print!("{content}");
-            if eof || next_offset <= offset {
-                break;
-            }
-            offset = next_offset;
-        }
+async fn print_history(
+    paths: &ServedPaths,
+    target: Target,
+    run: Option<String>,
+    editor: Option<String>,
+    path_only: bool,
+) -> Result<()> {
+    let response = client::request(paths, Request::HistoryList { target }).await?;
+    let Response::HistoryList { service, records } = response else {
+        bail!("unexpected manager response")
+    };
+    let id = run.unwrap_or_else(|| "latest".to_owned());
+    let record = records
+        .iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| anyhow::anyhow!("history record {id:?} was not found"))?;
+    if !record.persisted {
+        bail!(
+            "history record {id:?} is memory-only and has no path; enable persist_logs or use the TUI history browser"
+        );
+    }
+
+    let file_name = if id == "latest" {
+        "latest.log"
+    } else {
+        id.as_str()
+    };
+    let path = paths.logs_dir().join(service).join(file_name);
+    if path_only {
+        println!("{}", path.display());
         return Ok(());
     }
 
-    let response = client::request(paths, Request::HistoryList { target }).await?;
-    let Response::HistoryList { records, .. } = response else {
-        bail!("unexpected manager response")
-    };
-    for record in records {
-        println!(
-            "{:<28} {:>10} bytes  {}",
-            record.id,
-            record.bytes,
-            if record.persisted { "disk" } else { "memory" }
-        );
+    let editor = editor::resolve(editor)?;
+    open_editor_or_exit(&editor, &path).await
+}
+
+async fn edit_config(directory: &Path, editor: Option<String>, path_only: bool) -> Result<()> {
+    write_template(directory).context("create .served.json template")?;
+    let path = directory.join(CONFIG_FILE);
+    if path_only {
+        println!("{}", path.display());
+        return Ok(());
     }
-    Ok(())
+
+    let editor = editor::resolve(editor)?;
+    open_editor_or_exit(&editor, &path).await
+}
+
+async fn open_editor_or_exit(editor_command: &str, path: &Path) -> Result<()> {
+    let status = editor::run(editor_command, path).await?;
+    if status.success() {
+        return Ok(());
+    }
+    if let Some(code) = status.code() {
+        process::exit(code);
+    }
+    bail!("external editor terminated by signal")
 }
 
 fn format_state(state: &served::protocol::ServiceState) -> &'static str {
@@ -173,6 +227,7 @@ fn format_state(state: &served::protocol::ServiceState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn attach_accepts_an_optional_name() {
@@ -191,16 +246,77 @@ mod tests {
     }
 
     #[test]
-    fn history_accepts_optional_name_and_run_selector() {
+    fn edit_accepts_editor_and_path_options() {
         let command =
-            Cli::try_parse_from(["served", "history", "api", "--run", "20260724-233045.log"])
-                .expect("parse history");
+            Cli::try_parse_from(["served", "edit", "-e", "nvim -f"]).expect("parse edit editor");
+        assert!(matches!(
+            command.command,
+            Some(Command::Edit {
+                editor: Some(editor),
+                path: false,
+            }) if editor == "nvim -f"
+        ));
+
+        let path = Cli::try_parse_from(["served", "edit", "--path"]).expect("parse edit path");
+        assert!(matches!(
+            path.command,
+            Some(Command::Edit {
+                editor: None,
+                path: true,
+            })
+        ));
+        assert!(Cli::try_parse_from(["served", "edit", "--path", "-e", "nvim"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn edit_path_creates_template_without_editor() {
+        let directory = tempdir().expect("tempdir");
+
+        edit_config(directory.path(), None, true)
+            .await
+            .expect("create config path");
+
+        let path = directory.path().join(CONFIG_FILE);
+        assert!(path.is_file());
+        assert!(
+            std::fs::read_to_string(path)
+                .expect("read config")
+                .contains("// Globally unique service name")
+        );
+    }
+
+    #[test]
+    fn history_accepts_optional_name_and_run_selector() {
+        let command = Cli::try_parse_from([
+            "served",
+            "history",
+            "api",
+            "--run",
+            "20260724-233045.log",
+            "-e",
+            "nvim -f",
+        ])
+        .expect("parse history");
         assert!(matches!(
             command.command,
             Some(Command::History {
                 name: Some(name),
                 run: Some(run),
-            }) if name == "api" && run == "20260724-233045.log"
+                editor: Some(editor),
+                path: false,
+            }) if name == "api" && run == "20260724-233045.log" && editor == "nvim -f"
         ));
+
+        let path = Cli::try_parse_from(["served", "history", "api", "--path"])
+            .expect("parse history path");
+        assert!(matches!(
+            path.command,
+            Some(Command::History {
+                path: true,
+                editor: None,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["served", "history", "api", "--path", "-e", "nvim"]).is_err());
     }
 }

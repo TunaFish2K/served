@@ -1,398 +1,352 @@
-# served Requirements
+# served 需求
 
-Status: product requirements draft
+状态：产品需求草案。
 
-`served` is a lightweight Linux-first service manager for local development. It
-manages host processes through one systemd system unit running as the installation
-user. It is not a container runtime and does not manage arbitrary root services.
+`served` 是面向 Linux 本地开发环境的轻量服务管理器。它通过一个以安装用户身份运行
+的 systemd system unit 管理宿主机进程。它不是容器运行时，也不管理任意 root 服务。
 
-## Core Model
+## 核心模型
 
-- One service is represented by one directory.
-- The directory contains the service definition `.served.json`.
-- The optional served environment file is `.env.served` in the same directory.
-- A project `.env` file is unrelated and is never read by served.
-- The service working directory is always its configuration directory.
-- The manager discovers services through user-owned enable links.
-- A service name is defined by the JSON `name` field and must be globally unique
-  among enabled services.
-- Renaming an enabled service requires `disable`, editing the name, and then
-  `enable` again.
+- 一个服务对应一个目录。
+- 目录包含 JSON5 服务定义文件 `.served.json`。
+- 服务定义可以用 `env` 对象设置服务专用的字面量环境变量。
+- 同一目录中的 `.env.served` 只作为旧版 dotenv 回退输入；新模板不会创建它。
+- 项目 `.env` 与 served 无关，served 永远不会读取它。
+- 服务工作目录始终是配置目录。
+- 管理器通过用户拥有的启用链接发现服务。
+- 服务名来自 JSON 的 `name` 字段，且在所有启用服务中必须全局唯一。
+- 已启用服务需要改名时，先 `disable`，再修改名称，最后重新 `enable`。
 
-The enable registry is:
+启用注册表为：
 
 ```text
 ~/.config/served/enabled/<name> -> /path/to/service-directory
 ```
 
-The link points to the service directory, not directly to the JSON file, so the
-manager can consistently load `.served.json`, `.env.served`, and the working directory.
+链接指向服务目录，而不是直接指向 JSON 文件。这样管理器可以用统一方式加载
+`.served.json`、旧版 `.env.served` 回退文件和工作目录。
 
-## Configuration
+## 配置
 
-`.served.json` is a direct JSON object for one service. The minimum shape is:
+`.served.json` 是一个服务对应的 JSON5 对象。它支持注释、不加引号的字段名、单引号、
+双引号和尾逗号。最小结构如下：
 
-```json
+```json5
 {
-  "name": "api",
-  "command": "python app.py",
-  "tty": true,
-  "syncRowsCols": true,
-  "restart": "never"
+  name: "api",
+  command: "python app.py",
+  tty: true,
+  syncRowsCols: true,
+  restart: "never",
+  persist_logs: false,
+  env: {},
 }
 ```
 
-Fields:
+字段说明：
 
-- `name`: required, globally unique among enabled services.
-- `command`: required shell command string. It may contain multiple lines and is
-  executed as a multi-line `/bin/sh -c` script.
-- `tty`: optional boolean, default `true`.
-- `syncRowsCols`: optional boolean, default `true`; for TTY attach, synchronize
-  the managed PTY size to the attaching terminal. It is stored but has no effect
-  when `tty` is `false`.
-- `restart`: optional policy, default `never`.
-- Supported restart policies: `never`, `on-failure`, and `always`.
+- `name`：必填。在所有启用服务中全局唯一。
+- `command`：必填的 shell 命令字符串。可以包含多行，并作为多行 `/bin/sh -c` 脚本执行。
+- `tty`：可选布尔值，默认 `true`。
+- `syncRowsCols`：可选布尔值，默认 `true`。TTY attach 时，将服务 PTY 尺寸同步为
+  attach 终端尺寸。`tty` 为 `false` 时仍保存该字段，但不生效。
+- `restart`：可选重启策略，默认 `never`。
+- 支持的重启策略为 `never`、`on-failure` 和 `always`。
+- `persist_logs`：可选布尔值，默认 `false`。设置为 `true` 后，将完整 raw 输出保存到
+  served 固定状态目录。
+- `env`：可选的字面量字符串对象。值不会进行 shell 展开。JSON5 `env` 的同名值覆盖
+  旧版 dotenv 值。
 
-Commands are executed through `/bin/sh -c`. Inline shell assignments such as
-`FOO=bar command` require no special configuration support.
-The editor shows actual command newlines as separate rows. JSON `\n` is decoded as
-an actual newline; a literal backslash-n argument must be written as `\\n` in JSON.
+命令通过 `/bin/sh -c` 执行。`FOO=bar command` 这样的内联 shell 赋值不需要额外配置。
+外部编辑器会直接打开源文件。JSON5 字符串中的 `\n` 会解码为实际换行；如果参数需要
+字面量反斜杠-n，必须写成 `\\n`。
 
-The service environment starts with the environment captured by the system unit's
-login shell. If `.env.served` exists, it overlays that environment. `.env.served` is parsed using
-standard dotenv semantics; it is not sourced as a shell script and does not
-support arbitrary file paths or `env_file` configuration.
+服务环境首先来自 system unit 的 login shell 环境。如果存在旧版 `.env.served`，它会
+覆盖该环境；JSON5 的 `env` 对象再覆盖前两者。`.env.served` 使用标准 dotenv 规则解析，
+不会作为 shell 脚本执行，也不支持任意文件路径或 `env_file` 配置。
 
-The manager environment is a startup snapshot. Changes to `/etc/profile` or
-other shell startup files are not expected to update running services until the
-user manager is restarted or its environment is explicitly refreshed. `.env.served`
-uses standard dotenv parsing (including comments, quoting, and supported
-variable expansion), but it is still data and is never shell-sourced.
+管理器环境是启动时的快照。修改 `/etc/profile` 或其他 shell 启动文件后，运行中的服务
+不会自动更新；需要重启管理器，或显式刷新其环境。JSON5 `env` 的值是字面量，旧版 dotenv
+文件始终作为数据读取，不会被 shell source。
 
-## Commands
+## 命令
 
 ### `served`
 
-Opens the global service-management TUI. It lists enabled services known to the
-manager, regardless of the current working directory.
+打开全局服务管理 TUI。它列出管理器已知的所有启用服务，与当前工作目录无关。
 
-If the current directory contains a service configuration that has not been
-enabled, the TUI may show a hint such as:
+如果当前目录包含尚未启用的服务配置，TUI 可以显示如下提示：
 
 ```text
 enable your service to manage it here!
 ```
 
-An unenabled service is not manageable by the manager.
+未启用的服务不能由管理器控制。
 
 ### `served edit`
 
-Opens the structured TUI editor for the current directory's `.served.json` and
-`.env.served`. If the files do not exist, the editor can create templates. Editing
-changes files only; it does not apply a running-service change automatically.
+用外部编辑器打开当前目录的 `.served.json`。如果文件不存在，served 会先创建带注释的
+JSON5 模板。已有文件会原样打开，served 不会重新格式化或重写它。编辑只会修改文件，
+不会自动应用到运行中的服务。
 
-The JSON editor is form-based. The `.env.served` editor manages the fixed same-directory
-file. The fields are rendered from top to bottom in this order: `name`, `command`,
-`TTY`, `sync rows/cols`, `restart`, `persist logs`, and `.env.served`. The command area grows with its line
-count up to a bounded height and then scrolls. `Tab` moves forward and `Shift-Tab`
-moves backward.
-The `TTY` field displays `Enabled` or `Disabled`; the `restart` field displays
-`never`, `on-failure`, or `always`.
-
-When `TTY`, `sync rows/cols`, `restart`, or `persist logs` has focus, `Enter` opens a selection popup. Up/down arrow
-keys or `j`/`k` move its temporary highlight. `Enter` applies the highlighted
-value, while `Esc` closes the popup without applying it. In the normal editor,
-`Enter` inserts a command line break when `command` has focus. Bracketed paste
-preserves pasted line breaks, and CRLF/CR are normalized to LF. `Ctrl-S` saves and
-`Esc` or `Ctrl-C` cancels the edit. The bottom operation bar shows the controls
-available for the current focus.
+`-e/--editor COMMAND` 覆盖 `$EDITOR`。命令可以包含参数，配置路径会作为最后一个参数
+追加。`--path` 会创建缺失模板，并只打印配置的绝对路径；它与 `--editor` 互斥。没有
+可用编辑器时，命令返回错误。
 
 ### `served enable`
 
-Only valid in a service directory.
+只在服务目录中有效。
 
-1. Read and validate `.served.json` and `.env.served`.
-2. Reject missing or invalid configuration.
-3. Reject a duplicate global service name.
-4. Create the user-level enable link.
-5. Start the service under the manager.
+1. 读取并校验 JSON5 `.served.json`，包括可选的 `env` 对象和旧版 `.env.served` 回退。
+2. 拒绝缺失或无效的配置。
+3. 拒绝重复的全局服务名。
+4. 创建用户级启用链接。
+5. 在管理器中启动服务。
 
-There is no separate `start` command.
+没有独立的 `start` 命令。
 
 ### `served disable [name]`
 
-Removes the enable link and stops the service. With no name, the current
-directory is used. With a name, the enabled service can be controlled from any
-directory.
+删除启用链接并停止服务。不带名称时使用当前目录；提供名称后，可以从任意目录控制该
+启用服务。
 
-There is no separate `stop` command.
+没有独立的 `stop` 命令。
 
 ### `served restart [name]`
 
-With no name, operates on the current service directory. With a name, operates
-on an enabled service from any directory.
+不带名称时操作当前服务目录。提供名称后，可以从任意目录操作对应的启用服务。
 
-Restart always reads the current `.served.json` and `.env.served`, validates them, then
-stops and starts the service. There is no separate `reload` operation.
+重启总是重新读取当前 `.served.json` 和旧版环境回退文件，完成校验后再停止并启动服务。
+没有独立的 `reload` 操作。
 
-Validation must complete before the old process is stopped. Invalid JSON or
-`.env.served` leaves the currently running service unchanged and reports the error.
+校验必须在停止旧进程前完成。JSON5、`env` 或旧版 `.env.served` 无效时，保持当前运行的
+服务不变，并报告错误。
 
 ### `served attach [name]`
 
-Attaches directly to a running PTY or pipe service without opening the
-service-management TUI. With no name, the current directory is canonicalized and
-matched against an enabled service directory. With a name, the enabled service can
-be attached from any directory.
+直接连接运行中的 PTY 或管道服务，不打开服务管理 TUI。不带名称时，先规范化当前目录，
+再匹配对应的启用服务。提供名称后，可以从任意目录连接启用服务。
 
-The target must be running. The command uses the current terminal in raw mode and
-enters the terminal alternate screen, showing a sanitized 48-line current-run
-snapshot before streaming live output.
-The original shell screen and terminal mode are restored when the session ends.
-For `tty: true`, the session forwards input to the PTY and only one client may
-attach. For `tty: false`, the session is read-only: stdout and stderr are forwarded
-as raw bytes after the snapshot, input is ignored, and multiple observers are allowed. `Ctrl+C`
-detaches from either session and is not forwarded to the service. Detaching does
-not stop or disable the service.
-For a TTY service, the client immediately sends its terminal size and polls for
-changes about every 250ms. When `syncRowsCols` is true, the manager applies those
-dimensions to the active PTY. Resize-control failures are recoverable and do not
-terminate raw attach; `syncRowsCols: false` makes valid resize requests no-ops.
+目标服务必须正在运行。命令使用当前终端的 raw mode，并进入终端备用屏幕。进入后先显示
+当前运行的 48 行清理快照，再流式显示实时输出。会话结束后恢复原来的 shell 屏幕和终端
+模式。
+
+对于 `tty: true`，会话向 PTY 转发输入，同时只允许一个客户端写入。对于 `tty: false`，
+会话只读：在快照后转发 stdout 和 stderr raw 字节，忽略输入，并允许多个观察者。两种
+会话中的 `Ctrl+C` 都只执行 detach，不会转发给服务。detach 不会停止或禁用服务。
+
+对于 TTY 服务，客户端立即发送终端尺寸，并约每 250ms 轮询尺寸变化。`syncRowsCols` 为
+`true` 时，运行器通过管理器控制 IPC 将尺寸应用到活动 PTY。尺寸控制连接失败可以恢复，
+不会终止 raw attach；`syncRowsCols: false` 会让有效的尺寸请求不产生作用。
+
+运行器在每个服务内维护最近 60 秒的失败窗口。至少 3 次非成功退出或 worker 启动、运行
+错误会触发近期崩溃循环状态。手动 stop 和 restart 控制路径不计为失败。
+
+如果 attach 发现服务未运行，且该状态达到阈值，运行器会通过管理器返回结构化的
+attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录已持久化时询问
+`Open latest.log? [y/N]`。TUI 会在提示区询问，`y` 或 `Enter` 打开，`n` 或 `Esc` 取消。
+两者都使用 `$EDITOR`，不会为内存历史创建临时文件，编辑器退出后也不会重试 attach。
+非交互式 CLI 调用永远不会等待输入。
 
 ### `served list`
 
-Lists services currently running under the manager.
+列出当前由管理器运行的服务。
 
-## Process Lifecycle
+## 进程生命周期
 
-- A service is represented by the shell process started for its command.
-- Descendants created through `nohup`, `&`, daemonization, or similar behavior
-  are outside the service guarantee and are not promised to be cleaned up.
-- Stop operations first send `SIGTERM` to the managed shell.
-- If it does not exit before the termination timeout, the manager sends
-  `SIGKILL`.
-- `restart=never` leaves an exited service stopped until an explicit restart.
-- `restart=on-failure` restarts non-successful exits.
-- `restart=always` restarts every exit.
-- Automatic restarts use exponential backoff with a maximum delay and continue
-  retrying.
-- A manual restart resets the service's restart attempt state.
+- 服务由执行其命令的 shell 进程表示。
+- `nohup`、`&`、daemonize 或类似方式创建的后代进程不在服务保证范围内，也不保证会被
+  清理。
+- 停止操作要求服务运行器向受管 shell 发送 `SIGTERM`。
+- 如果进程在终止超时前没有退出，运行器发送 `SIGKILL`。
+- `restart=never` 在服务退出后保持停止，直到显式 restart。
+- `restart=on-failure` 在非成功退出后重启。
+- `restart=always` 在每次退出后重启。
+- 自动重启使用带最大延迟的指数退避，并持续重试。
+- 手动 restart 会重置服务的重启尝试状态。
+- 崩溃循环诊断独立于重启退避，保留 60 秒内的失败时间戳。该窗口由每个服务的运行器
+  持有，因此普通管理器重启不会清除它。
 
-## PTY and Attach
+## PTY 与 Attach
 
-- Services use a PTY by default.
-- A service may opt out with `tty: false`.
-- A TTY attach synchronizes rows/cols by default; a service may opt out with
-  `syncRowsCols: false`. The last attached size remains after detach, while a
-  newly started PTY begins at its default size.
-- TUI attach takes over the TUI-owned alternate screen, clears it, and redraws the
-  service manager after detach; it does not nest another alternate-screen owner.
-- Direct CLI attach enters its own alternate screen and returns to the shell after
-  detach.
-- PTY attach forwards input and permits one write client. Pipe attach forwards raw
-  stdout/stderr only, ignores input, and permits multiple observers.
-- Attach starts with a sanitized display-only tail of the current run, aggregated
-  across output events, then receives live bytes. It is not a terminal-state replay
-  and is not sent to the service.
-- `Ctrl+C` in an attach session detaches instead of being sent to the service.
-- `Ctrl+C` in the service-management TUI outside an attach session exits the TUI
-  client; it does not stop managed services.
-- The manager IPC protocol is versioned; attach resize control uses the current
-  protocol and does not share frames with the raw PTY stream.
+- 服务默认使用 PTY。
+- 设置 `tty: false` 后可以关闭 PTY。
+- TTY attach 默认同步 rows/cols。设置 `syncRowsCols: false` 后可以关闭。detach 后
+  保留最后一次 attach 的尺寸；新建 PTY 从默认尺寸开始。
+- TUI attach 接管 TUI 已持有的备用屏幕，清屏后显示服务；detach 后重绘服务管理器，
+  不再嵌套另一个备用屏幕所有者。
+- CLI 直接 attach 进入自己的备用屏幕，detach 后返回 shell。
+- PTY attach 转发输入，并允许一个写入客户端。管道 attach 只转发 stdout/stderr raw
+  字节，忽略输入，并允许多个观察者。
+- Attach 先显示当前运行的清理后输出尾部。尾部可以跨多个输出事件聚合，然后接收实时
+  字节。它不是终端状态回放，也不会发送给服务。
+- Attach 中的 `Ctrl+C` 执行 detach，不会发送给服务。
+- 服务管理 TUI 中、非 attach 会话里的 `Ctrl+C` 退出 TUI 客户端，不停止受管服务。
+- 管理器 IPC 协议有版本号。Attach 尺寸控制使用当前协议，不与 raw PTY 流共享 frame。
+- 协议版本 5 增加结构化 attach-unavailable 响应，包括服务名、近期失败次数、窗口长度
+  和可选的持久化 `latest.log` 路径。
 
-## Output History
+## 输出历史
 
-- `.served.json` has an optional `persist_logs` boolean, defaulting to `false`.
-- Every process start creates a separate output record, including automatic and
-  manual restarts.
-- TTY and pipe services both produce history. TTY output is raw PTY bytes; pipe
-  stdout/stderr are merged in manager event order.
-- With `persist_logs: true`, complete records are stored under
-  `$HOME/.local/state/served/logs/<name>/`.
-- The current record is `latest.log`; old records use the previous run's start
-  time in `YYYYMMDD-HHMMSS.log` format, with numeric suffixes on collisions.
-- Persistent storage keeps 100 archives plus `latest.log`. Directories are `0700`
-  and files are `0600`.
-- With `persist_logs: false`, the current record and 100 archives remain in memory;
-  manager restart clears those records. Existing disk records remain viewable.
-- Persistent write failures warn and fall back to memory without stopping the service.
-- History is accessed through a separate TUI list/content page and
-  `served history [name]`; attach only adds a sanitized current-run prelude and
-  does not replay archived history or terminal state.
-- History content is read through paginated manager IPC and displayed after ANSI and
-  unsafe control-sequence cleanup.
+- `.served.json` 有可选的 `persist_logs` 布尔值，默认 `false`。
+- 每次进程启动创建一条独立输出记录，包括自动重启和手动重启。
+- TTY 和管道服务都会产生历史。TTY 输出是 raw PTY 字节；管道 stdout/stderr 按运行器
+  收到的事件顺序合并。
+- `persist_logs: true` 时，完整记录保存到 `$HOME/.local/state/served/logs/<name>/`。
+- 当前记录为 `latest.log`；旧记录使用上一次运行的开始时间，格式为
+  `YYYYMMDD-HHMMSS.log`，冲突时追加数字后缀。
+- 持久化存储保留 100 个归档和一个 `latest.log`。目录权限为 `0700`，文件权限为 `0600`。
+- `persist_logs: false` 时，当前记录和 100 个归档保存在运行器内存中。普通管理器重启
+  后仍可查看；显式停止服务或终止运行器会清除它们。已有磁盘记录仍可查看。
+- 持久化写入失败时记录 warning，并回退到内存，不停止服务。
+- TUI 保留独立的历史列表和内容页。内容页按清理后的逻辑行显示 `current/total`；
+  视觉换行不会改变总数。Attach 只增加当前运行的清理快照，不回放归档历史或终端状态。
+- `served history [name]` 使用 `$EDITOR` 打开持久化 `latest.log`；`--run <id>` 选择
+  归档，`-e/--editor COMMAND` 优先于 `$EDITOR`，`--path` 只打印选中日志的路径。
+  `--path` 与 `--editor` 互斥。内存记录没有 CLI 路径，会提示使用 TUI 浏览器或开启
+  持久化。
+- 历史内容通过分页的管理器 IPC 读取，显示前会清理 ANSI 和不安全控制序列。
 
 ## TUI
 
-The global TUI provides:
+全局 TUI 提供：
 
-- enabled-service list and current status;
-- restart action;
-- disable action;
-- attach action for both PTY and pipe services;
-- history list and scrollable history content pages;
-- structured editing through `served edit`;
-- `.env.served` editing;
-- one rotating tips line:
+- 启用服务列表和当前状态；
+- restart 操作；
+- disable 操作；
+- 面向 PTY 和管道服务的 attach 操作；
+- 历史列表和可滚动的历史内容页，并显示逻辑行位置；
+- 通过外部编辑器命令 `served edit` 编辑配置；
+- 一行轮换显示的 tips：
 
 ```text
 tips: <tip text>
 ```
 
-Tips are built in and a tip is selected randomly on every TUI startup. A tip
-may repeat; no tip position or other manager state is persisted.
+tips 内置。每次启动 TUI 时随机选择一条；允许重复，不保存 tip 位置或其他管理器状态。
 
-The TUI keeps the `tips:` line and the operation bar visible together. The global
-operation bar is contextual: it shows navigation and quit when no service is
-selected; for a selected service it shows restart, disable, attach, and history. The bar
-wraps to two lines in a narrow terminal instead of being truncated.
+TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示导航和退出；选中服务后，
+显示 restart、disable、attach 和 history。窄终端中操作栏换成两行，不会被截断。
 
-The `served edit` screen uses the same rotating tips set and displays its own
-contextual operation bar. Its focus order is the same as the visual field order
-above.
+`served edit` 是 CLI 编辑流程，不是 TUI 页面。生成的 JSON5 模板为每个字段写入行内说明，
+因此外部编辑器是唯一的配置编辑入口。
 
-The editor focus order is `name`, `command`, `TTY`, `sync rows/cols`, `restart`, `persist logs`, and
-`.env.served`. Choice rows use an Enter popup and show their available keys in the bottom
-operation bar.
+## 管理器与安全边界
 
-## Manager and Security Boundary
+- 管理器作为固定的 `served.service` system service 在 system manager 中运行。
+- unit 使用 `User=<installation user>` 和该用户的主组；管理器及其所有受管子进程都保持
+  普通用户权限。
+- unit 使用安装用户的登录环境和 home 作为工作目录；不得依赖 system manager 的 `%h`
+  展开。
+- unit 为 `multi-user.target` 启用，因此 SSH 退出后仍会运行，不使用
+  `loginctl enable-linger`。
+- TUI 和命令通过 `$HOME/.local/state/served/runtime/served.sock` 通信。
+- socket 只允许该用户访问。
+- 所有受管服务使用与管理器相同的用户身份。
+- 不提供 root 模式、提权、容器隔离、namespace 策略、资源限制、依赖图或健康检查协议。
+- 每个启用服务在 system unit 的 cgroup 中拥有独立运行器。`KillMode=process` 和管理器
+  接管机制允许管理器崩溃或 systemd 重启时保留运行器和服务进程。明确的 shutdown、
+  disable 或服务 restart 会停止对应运行器。
+- `served daemon` 与 system service 使用同一组固定的 HOME 路径。第二个 daemon 遇到已
+  占用的 socket 时会拒绝接管。
 
-- The manager runs as the fixed `served.service` system unit in the system manager.
-- The unit uses `User=<installation user>` and that user's primary group; the
-  manager and all managed children remain unprivileged.
-- The unit uses the installation user's login environment and home as its working
-  directory; it must not depend on the system manager's `%h` expansion.
-- The unit is enabled for `multi-user.target`, so it survives SSH logout without
-  user lingering. `loginctl enable-linger` is not used.
-- TUI and commands communicate through
-  `$HOME/.local/state/served/runtime/served.sock`.
-- The socket is user-only.
-- All managed services run with the same user identity as the manager.
-- No root mode, privilege escalation, container isolation, namespace policy,
-  resource limits, dependency graph, or health-check protocol is provided.
-- If the system service is restarted, its child processes are cleaned up with the
-  manager's cgroup. The manager then discovers enabled services again and starts
-  them.
-- `served daemon` uses the same fixed HOME-derived paths as the system service. A
-  second daemon refuses an occupied socket instead of taking over.
+## 安装生命周期
 
-## Installation Lifecycle
+- 安装脚本由目标用户运行，并在内部调用 `sudo`。它安装
+  `/usr/local/bin/served` 和 `/etc/systemd/system/served.service`，不修改用户 shell 配置。
+- 安装器从 passwd 解析目标用户的 home。如果无法解析或目录不存在，会在修改文件前失败。
+- 全新安装不询问升级确认。
+- 只要目标二进制或 system unit 任一已存在，安装就按覆盖升级处理，并在修改文件前询问
+  确认。这也覆盖修复不完整安装的情况。
+- 活动管理器进行覆盖升级时，安装器会询问是否通过 `systemctl reload` 应用新管理器。
+  默认 `Y`，执行 manager handoff，不停止运行器或受管服务。
+- handoff 失败时，安装器执行受控的 `systemctl restart`，并报告受管服务已重启。拒绝
+  handoff 时，新文件仍会安装，但旧管理器继续运行，直到稍后 reload。
+- 安装器不会悄悄留下使用旧可执行文件的活动管理器而不报告状态。
+- 卸载会询问确认。确认后先 disable system service；如果服务仍在运行，再停止它。只有
+  两个操作都成功后，才删除已安装的 unit 和二进制文件。
+- 已经 disable 的服务或不存在的 unit 可以满足卸载的 disable 步骤；只有真正的 systemd
+  失败才会中止清理。
+- 卸载不修改用户 shell 配置，包括旧版本可能写入的 PATH 片段。
+- 确认提示要求交互式终端。非交互执行会中止，且不改变服务状态或文件。
+- 如果 disable 成功但停止活动服务失败，卸载会在删除任何文件前中止。
+- 卸载只有一个确认提示。确认后，disable 和 stop 不再重复询问。
+- 全新安装失败时，脚本会删除本次创建的文件和服务启用状态，然后退出。
+- 升级 handoff 使用 `Y/n`，默认同意。卸载使用 `y/N`，必须明确输入 `y`。
+- 全新安装直接启用并启动 system service，不询问 handoff。安装后的 handoff 提示只适用于
+  正在运行的活动服务覆盖升级。
+- 覆盖升级会保留 inactive 服务的停止状态，不会启动升级前已经停止的服务。
+- 如果升级后服务保持停止，安装器会按 enabled 状态输出对应的恢复命令。
+- 覆盖升级保留服务原有的 enabled 或 disabled 状态，不调用 `enable` 或 `disable`；只有
+  全新安装会启用 system service。
+- 安装或升级成功后，脚本会输出全局二进制路径，不需要 export 命令。
+- 文件替换具有事务性：保存旧文件后，如果安装新二进制或 unit 失败，脚本会恢复两者。
+- 如果升级后的受控重启失败，脚本会恢复旧二进制和 unit，并尝试启动旧管理器。回滚也失败
+  时，会同时报告两个错误。
+- 安装时会检测旧的 `~/.config/systemd/user/served.service` 或 `~/.local/bin/served`。
+  确认迁移后，先 disable 并停止旧 user service，再安装新的 system service；只有新服务
+  active 后才删除旧文件。
+- 如果无法联系旧 user manager，迁移会中止，不删除旧文件。自定义 XDG 目录只报告 warning，
+  不会自动复制或删除。
 
-- The install script is run by the target user and uses internal `sudo` calls. It
-  installs `/usr/local/bin/served` and `/etc/systemd/system/served.service` without
-  modifying user shell configuration files.
-- The installer resolves the target user's home from passwd and fails before file
-  changes if that home cannot be resolved or does not exist.
-- A fresh install does not ask for an upgrade confirmation.
-- If either the target binary or the system unit already exists, the install is
-  treated as an overwrite upgrade and asks for confirmation before changing
-  files. This also covers repairing a partial installation.
-- For an overwrite upgrade of a running manager, the script asks for
-  confirmation before stopping it. The stop operation does not disable the
-  service, so its enabled state is preserved. If stopping is declined, the
-  upgrade makes no file changes.
-- If the confirmed stop fails or the service remains active, the upgrade aborts
-  before changing any installation file.
-- After a confirmed upgrade, the script asks whether to restart the manager,
-  with restart selected by the default `Y` response.
-- If restart is declined, the upgraded manager remains stopped and the script
-  prints the manual `sudo systemctl start served.service` command. The service
-  remains enabled.
-- Uninstallation asks for confirmation. After confirmation it disables the system
-  service, stops it if still active, and removes the installed unit and binary
-  only after both service operations succeed.
-- An already-disabled service or a missing unit satisfies the disable
-  step during uninstall; only an actual systemd failure aborts cleanup.
-- Uninstall never modifies user shell configuration, including PATH blocks that
-  may have been written by an older release.
-- Confirmation prompts require an interactive terminal; in non-interactive
-  execution the script aborts without changing service state or files.
-- If disabling succeeds but stopping an active service fails, uninstall aborts
-  before removing any file.
-- The uninstall confirmation is the only uninstall prompt; after it is
-  accepted, disabling and stopping are performed without a second prompt.
-- If a fresh install fails, the script removes files and service enablement
-  created by that attempt before exiting.
-- Upgrade, stop, and post-install restart prompts use `Y/n` with affirmative
-  default. The uninstall prompt uses `y/N` and requires an explicit `y`.
-- A fresh install enables and starts the system service directly without a
-  restart prompt. The post-install restart prompt applies only to overwrite
-  upgrades.
-- An overwrite upgrade preserves an inactive service as inactive; it does not
-  start a service that was already stopped before the upgrade.
-- When an upgrade leaves the service stopped, the installer prints a recovery
-  command appropriate to the service's enabled state.
-- An overwrite upgrade preserves the service's enabled or disabled state and
-  does not call `enable` or `disable`; only a fresh install enables the system
-  service.
-- After a successful install or upgrade, the script prints the global binary path;
-  no export command is needed.
-- Upgrade file replacement is transactional: if installing the new binary or
-  unit fails after the old files were saved, the script restores both old files
-  and leaves the service stopped.
-- If the confirmed post-upgrade restart fails, the script restores the old
-  binary and unit and attempts to start the old manager. If the rollback start
-  also fails, the service remains stopped and both errors are reported.
-- A legacy `~/.config/systemd/user/served.service` or `~/.local/bin/served` is
-  detected during installation. After migration confirmation, the old user
-  service is disabled and stopped before the new system service is installed;
-  legacy files are removed only after the new service is active.
-- If the legacy user manager cannot be contacted, migration aborts without
-  deleting legacy files. Custom XDG directories are reported as a warning and
-  are never copied or deleted automatically.
+## V1 不做的事
 
-## Non-Goals for V1
+- 兼容 Docker 的镜像或文件系统隔离。
+- 除 served 自身非特权 unit 以外的任意 root/system 服务管理。
+- 一个目录或一个 JSON 文件中配置多个服务。
+- 服务依赖或就绪检查。
+- 公共 `served` CLI 中独立的 `start`、`stop` 或 `reload` 命令。
+- 任意位置的 `.env.served` 文件。
+- 自动发现无关进程或端口。
 
-- Docker-compatible image or filesystem isolation.
-- Arbitrary root/system service management beyond served's own unprivileged unit.
-- Multiple services in one directory or one JSON file.
-- Service dependencies or readiness checks.
-- Independent `start`, `stop`, or `reload` commands.
-- Arbitrary `.env.served` file locations.
-- Automatic discovery of unrelated processes or ports.
+## 验收场景
 
-## Acceptance Scenarios
-
-1. `served edit` creates `.served.json` and `.env.served` in an empty service directory.
-2. `served enable` creates a directory symlink, starts the service, and makes it
-   visible in global `served` and `served list` views.
-3. Enabling a duplicate `name` fails without replacing the existing link.
-4. `served disable` removes the link and stops the service.
-5. `served restart` applies current JSON and `.env.served` changes only after complete
-   validation.
-6. Invalid configuration leaves an already-running service untouched.
-7. `never`, `on-failure`, and `always` have distinct, testable behavior.
-8. A PTY service can be attached, detached, and restarted without losing the
-   manager.
-9. A second attach client cannot write to an active session.
-10. Restarting the user manager restores all enabled services.
-11. The TUI tips line selects a built-in tip randomly on every TUI startup.
-12. Unenabled service directories are not controllable from the global manager.
-13. The global TUI operation bar reflects whether a service is selected and shows
-    attach and history for either `tty` mode.
-14. `served edit` presents `TTY` and `restart` as visible fields in visual order,
-    and popup selection changes are applied only after `Enter`.
-15. `Esc` closes an open editor popup without changing the in-memory value, while
-    `Esc` outside a popup cancels the entire edit.
-16. The editor focus wraps through `name`, `command`, `TTY`, `restart`, `persist logs`,
-    and `.env.served` in both Tab directions.
-17. `served attach <name>` enters a running PTY service without opening the TUI;
-    `Ctrl-C` exits the session while leaving the service running.
-18. `served attach` resolves the current directory to its enabled service, and
-    rejects an unenabled directory while allowing a running pipe service read-only.
-19. Direct attach enters and exits the alternate screen while restoring the shell;
-    TUI attach returns to a fully redrawn manager screen.
-20. Multiple pipe observers receive live raw output, while pipe input does not reach
-    the managed service.
-21. Persistent history writes a `latest.log`, rotates it by the previous run's start
-    time, and exposes both latest and archived records through CLI/manager reads.
-22. Non-persistent history creates no log files, retains records across service
-    restarts while the manager remains alive, and clears them after manager restart.
-23. History content reads are paginated and strip ANSI/control sequences for display
-    without changing the raw persistent file.
-24. A rendered system unit passes `systemd-analyze verify`, uses the installation
-    user's home as `WorkingDirectory`, and contains no system-manager `%h` home
-    dependency.
-25. Upgrading an enabled failed service installs the new files without starting it
-    automatically and prints `sudo systemctl start served.service`.
+1. `served edit` 在空服务目录中创建带注释的 JSON5 `.served.json`，且不创建 `.env.served`。
+2. `served enable` 创建目录符号链接、启动服务，并使服务出现在全局 `served` 和
+   `served list` 视图中。
+3. 启用重复 `name` 时失败，且不替换已有链接。
+4. `served disable` 删除链接并停止服务。
+5. `served restart` 只有在完整校验后才应用当前 JSON5 和环境变化；JSON5 `env` 覆盖旧版
+   `.env.served` 回退值。
+6. 无效配置不会影响已经运行的服务。
+7. `never`、`on-failure` 和 `always` 有可区分且可测试的行为。
+8. PTY 服务可以 attach、detach 和 restart，且不会丢失管理器。
+9. 第二个 attach 客户端不能向活动会话写入。
+10. 替换管理器后，所有启用服务都能通过接管运行器恢复。
+11. TUI 的 tips 行在每次启动时从内置 tips 中随机选择一条。
+12. 未启用的服务目录不能由全局管理器控制。
+13. 全局 TUI 操作栏根据是否选中服务显示不同内容，并为两种 `tty` 模式显示 attach 和
+    history。
+14. `served edit` 使用 `-e/--editor COMMAND` 优先于 `$EDITOR` 打开 `.served.json`，并把
+    配置路径作为最后一个参数追加。
+15. `served edit --path` 创建缺失的带注释模板，并只打印绝对路径；`--path` 与 `--editor`
+    互斥。
+16. `served edit` 打开已有 `.served.json` 时不重写其中的源文本、注释或格式。
+17. `served attach <name>` 进入运行中的 PTY 服务，不打开 TUI；`Ctrl-C` 退出会话但保持
+    服务运行。
+18. `served attach` 根据当前目录解析启用服务；未启用目录会被拒绝，运行中的管道服务
+    可以只读方式 attach。
+19. 直接 attach 进入和退出备用屏幕并恢复 shell；TUI attach 返回完整重绘的管理器页面。
+20. 多个管道观察者都能收到实时 raw 输出，管道输入不会到达受管服务。
+21. 持久化历史写入 `latest.log`，按上一次运行的开始时间归档，并通过 TUI 和管理器读取
+    同时提供 latest 和归档记录。
+22. 非持久化历史不创建日志文件；运行器仍在时，服务重启和普通管理器重启都保留历史。
+23. 历史内容按分页读取，报告准确的清理后逻辑行数；显示会移除 ANSI/控制序列，但不修改
+    持久化 raw 文件。
+24. `served history` 使用 `-e/--editor` 优先于 `$EDITOR` 打开选中的持久化 raw 日志；
+    `--path` 只打印路径，内存记录清晰报告失败原因。
+25. 渲染后的 system unit 通过 `systemd-analyze verify`，使用安装用户 home 作为
+    `WorkingDirectory`，不依赖 system manager 的 `%h` home，并定义 `ExecStop`、
+    `ExecReload` 和 `KillMode=process`。
+26. 终止管理器后，启用服务的运行器和服务 PID 仍存活；新管理器接管运行器，不重复启动
+    服务。
+27. `systemctl reload served` 替换管理器但不改变受管服务 PID；`served shutdown` 在管理器
+    退出前停止运行器。
+28. 活动安装覆盖升级时提供 manager handoff；拒绝时报告状态，handoff 失败时回退到受控
+    重启。
+29. 60 秒内发生三次启动失败或非成功退出时，失败的 attach 返回结构化崩溃循环诊断；窗口
+    外的失败不计入。
+30. `persist_logs: true` 的崩溃循环服务会在 CLI 和 TUI attach 提示中提供当前 `latest.log`；
+    `persist_logs: false` 不创建临时文件，只报告内存历史选项。
+31. 关闭崩溃日志编辑器后，attach 仍然失败，且不会自动重试服务连接；非交互式 CLI attach
+    永远不会等待输入。

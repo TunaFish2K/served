@@ -23,6 +23,9 @@ grep -Fq "User=$user_name" "$rendered_path"
 grep -Fq "Group=$group_name" "$rendered_path"
 grep -Fq 'SetLoginEnvironment=yes' "$rendered_path"
 grep -Fq 'WorkingDirectory=~' "$rendered_path"
+grep -Fq 'ExecStop=/usr/local/bin/served shutdown' "$rendered_path"
+grep -Fq 'ExecReload=/usr/local/bin/served daemon --handoff' "$rendered_path"
+grep -Fq 'KillMode=process' "$rendered_path"
 if grep -Fq '%h' "$rendered_path"; then
     printf 'error: system service template must not use %%h for home paths\n' >&2
     exit 1

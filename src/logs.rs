@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -35,12 +35,14 @@ pub struct LogStore {
     disk_file: Option<File>,
     disk_bytes: u64,
     memory_archives: VecDeque<MemoryLog>,
+    line_counts: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LogChunk {
     pub next_offset: u64,
     pub total: u64,
+    pub total_lines: u64,
     pub eof: bool,
     pub content: String,
 }
@@ -55,6 +57,7 @@ impl LogStore {
             disk_file: None,
             disk_bytes: 0,
             memory_archives: VecDeque::new(),
+            line_counts: HashMap::new(),
         }
     }
 
@@ -65,6 +68,8 @@ impl LogStore {
         self.current.clear();
         self.disk_bytes = 0;
         self.current_persisted = false;
+        self.line_counts.remove("latest");
+        self.line_counts.remove(LATEST_FILE);
         let started = timestamp_label();
         self.current_started = Some(started.clone());
 
@@ -89,6 +94,8 @@ impl LogStore {
     }
 
     pub fn append(&mut self, bytes: &[u8]) -> Option<String> {
+        self.line_counts.remove("latest");
+        self.line_counts.remove(LATEST_FILE);
         for byte in bytes {
             self.current.push_back(*byte);
         }
@@ -121,6 +128,11 @@ impl LogStore {
     pub fn attach_snapshot(&self) -> Vec<u8> {
         let raw: Vec<u8> = self.current.iter().copied().collect();
         attach_snapshot_from_bytes(&raw)
+    }
+
+    pub fn latest_log_path(&self) -> Option<PathBuf> {
+        (self.current_started.is_some() && self.current_persisted)
+            .then(|| self.directory.join(LATEST_FILE))
     }
 
     pub fn records(&self) -> Vec<HistoryRecord> {
@@ -179,17 +191,31 @@ impl LogStore {
         records
     }
 
-    pub fn read_chunk(&self, id: &str, offset: u64, requested_limit: u32) -> io::Result<LogChunk> {
+    pub fn read_chunk(
+        &mut self,
+        id: &str,
+        offset: u64,
+        requested_limit: u32,
+    ) -> io::Result<LogChunk> {
         let limit = requested_limit.clamp(1, DEFAULT_CHUNK_LIMIT) as usize;
         if id == "latest" {
             if self.current_started.is_some() && !self.current_persisted {
-                return memory_chunk(&self.current, offset, limit);
+                let raw: Vec<u8> = self.current.iter().copied().collect();
+                let total_lines = self.cached_line_count("latest", &raw);
+                return memory_chunk(&raw, offset, limit, total_lines);
             }
             return self.read_disk_chunk(LATEST_FILE, offset, limit);
         }
 
-        if let Some(archive) = self.memory_archives.iter().find(|archive| archive.id == id) {
-            return memory_chunk(&archive.bytes, offset, limit);
+        if self.memory_archives.iter().any(|archive| archive.id == id) {
+            let raw: Vec<u8> = self
+                .memory_archives
+                .iter()
+                .find(|archive| archive.id == id)
+                .map(|archive| archive.bytes.iter().copied().collect())
+                .unwrap_or_default();
+            let total_lines = self.cached_line_count(id, &raw);
+            return memory_chunk(&raw, offset, limit, total_lines);
         }
         if !valid_archive_id(id) {
             return Err(io::Error::new(
@@ -294,7 +320,7 @@ impl LogStore {
         Ok(())
     }
 
-    fn read_disk_chunk(&self, id: &str, offset: u64, limit: usize) -> io::Result<LogChunk> {
+    fn read_disk_chunk(&mut self, id: &str, offset: u64, limit: usize) -> io::Result<LogChunk> {
         if id != LATEST_FILE && !valid_archive_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -302,12 +328,14 @@ impl LogStore {
             ));
         }
         let path = self.directory.join(id);
+        let total_lines = self.disk_line_count(id)?;
         let mut file = File::open(&path)?;
         let total = file.metadata()?.len();
         if offset >= total {
             return Ok(LogChunk {
                 next_offset: total,
                 total,
+                total_lines,
                 eof: true,
                 content: String::new(),
             });
@@ -321,9 +349,29 @@ impl LogStore {
         Ok(LogChunk {
             next_offset,
             total,
+            total_lines,
             eof: next_offset >= total,
             content: sanitize_log(&raw),
         })
+    }
+
+    fn disk_line_count(&mut self, id: &str) -> io::Result<u64> {
+        if let Some(count) = self.line_counts.get(id) {
+            return Ok(*count);
+        }
+        let raw = fs::read(self.directory.join(id))?;
+        let count = logical_line_count(&raw);
+        self.line_counts.insert(id.to_owned(), count);
+        Ok(count)
+    }
+
+    fn cached_line_count(&mut self, id: &str, raw: &[u8]) -> u64 {
+        if let Some(count) = self.line_counts.get(id) {
+            return *count;
+        }
+        let count = logical_line_count(raw);
+        self.line_counts.insert(id.to_owned(), count);
+        count
     }
 
     fn unique_archive_id(&self, started: &str) -> String {
@@ -355,12 +403,13 @@ impl LogStore {
     }
 }
 
-fn memory_chunk(bytes: &VecDeque<u8>, offset: u64, limit: usize) -> io::Result<LogChunk> {
+fn memory_chunk(bytes: &[u8], offset: u64, limit: usize, total_lines: u64) -> io::Result<LogChunk> {
     let total = bytes.len() as u64;
     if offset >= total {
         return Ok(LogChunk {
             next_offset: total,
             total,
+            total_lines,
             eof: true,
             content: String::new(),
         });
@@ -375,9 +424,14 @@ fn memory_chunk(bytes: &VecDeque<u8>, offset: u64, limit: usize) -> io::Result<L
     Ok(LogChunk {
         next_offset,
         total,
+        total_lines,
         eof: next_offset >= total,
         content: sanitize_log(&raw),
     })
+}
+
+fn logical_line_count(bytes: &[u8]) -> u64 {
+    sanitize_log(bytes).lines().count() as u64
 }
 
 fn remove_if_exists(path: &Path) -> io::Result<()> {
@@ -532,6 +586,65 @@ mod tests {
         assert!(snapshot.contains("line-10\r\n"));
         assert!(snapshot.contains("line-57\r\n"));
         assert!(snapshot.len() <= ATTACH_CACHE_MAX_BYTES + 2);
+    }
+
+    #[test]
+    fn latest_log_path_exists_only_for_a_persisted_current_run() {
+        let directory = tempdir().expect("tempdir");
+        let mut store = LogStore::new(directory.path().to_path_buf());
+
+        store.begin_run(false);
+        assert_eq!(store.latest_log_path(), None);
+
+        assert!(store.begin_run(true).is_empty());
+        assert_eq!(
+            store.latest_log_path(),
+            Some(directory.path().join(LATEST_FILE))
+        );
+    }
+
+    #[test]
+    fn history_chunks_report_logical_lines_and_invalidate_current_cache() {
+        for persist in [false, true] {
+            let directory = tempdir().expect("tempdir");
+            let mut store = LogStore::new(directory.path().to_path_buf());
+            store.begin_run(persist);
+
+            assert_eq!(
+                store
+                    .read_chunk("latest", 0, 1024)
+                    .expect("empty chunk")
+                    .total_lines,
+                0
+            );
+
+            store.append(b"one\n");
+            assert_eq!(
+                store
+                    .read_chunk("latest", 0, 1024)
+                    .expect("first chunk")
+                    .total_lines,
+                1
+            );
+
+            store.append(b"two\nthree");
+            assert_eq!(
+                store
+                    .read_chunk("latest", 0, 1024)
+                    .expect("second chunk")
+                    .total_lines,
+                3
+            );
+
+            store.append(b"\n");
+            assert_eq!(
+                store
+                    .read_chunk("latest", 0, 1024)
+                    .expect("terminated chunk")
+                    .total_lines,
+                3
+            );
+        }
     }
 
     #[test]

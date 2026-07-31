@@ -42,8 +42,28 @@ impl ServedPaths {
         self.runtime_dir.join("served.sock")
     }
 
+    pub fn manager_generation(&self) -> PathBuf {
+        self.runtime_dir.join("manager.generation")
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.state_home.join("served").join("logs")
+    }
+
+    pub fn runners_dir(&self) -> PathBuf {
+        self.runtime_dir.join("runners")
+    }
+
+    pub fn runner_dir(&self, name: &str) -> PathBuf {
+        self.runners_dir().join(name)
+    }
+
+    pub fn runner_socket(&self, name: &str) -> PathBuf {
+        self.runner_dir(name).join("runner.sock")
+    }
+
+    pub fn runner_metadata(&self, name: &str) -> PathBuf {
+        self.runner_dir(name).join("runner.json")
     }
 }
 
@@ -68,8 +88,20 @@ mod tests {
             Path::new("/tmp/served-home/.local/state/served/runtime/served.sock")
         );
         assert_eq!(
+            paths.manager_generation(),
+            Path::new("/tmp/served-home/.local/state/served/runtime/manager.generation")
+        );
+        assert_eq!(
             paths.logs_dir(),
             Path::new("/tmp/served-home/.local/state/served/logs")
+        );
+        assert_eq!(
+            paths.runners_dir(),
+            Path::new("/tmp/served-home/.local/state/served/runtime/runners")
+        );
+        assert_eq!(
+            paths.runner_socket("api"),
+            Path::new("/tmp/served-home/.local/state/served/runtime/runners/api/runner.sock")
         );
     }
 }

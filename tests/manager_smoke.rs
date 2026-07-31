@@ -247,6 +247,118 @@ async fn persistent_and_memory_history_survive_service_restarts() {
     assert!(!paths.logs_dir().join("memory").exists());
     let memory_output = read_history(&paths, "memory", &memory_archive.id, 4).await;
     assert!(memory_output.contains("memory-output"));
+
+    for name in ["persistent", "memory"] {
+        client::expect_ok(
+            &paths,
+            Request::Disable {
+                target: Target::Name(name.to_owned()),
+            },
+        )
+        .await
+        .expect("disable history service");
+    }
+}
+
+#[tokio::test]
+async fn crash_loop_attach_reports_only_a_persisted_latest_log() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let persistent_dir = root.path().join("persistent-crash");
+    let memory_dir = root.path().join("memory-crash");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+
+    for (directory, name, persist_logs) in [
+        (&persistent_dir, "persistent-crash", true),
+        (&memory_dir, "memory-crash", false),
+    ] {
+        fs::create_dir_all(directory).expect("service directory");
+        fs::write(
+            directory.join(".served.json"),
+            format!(
+                r#"{{
+  name: "{name}",
+  command: "echo {name}-output; exit 1",
+  tty: false,
+  restart: "always",
+  persist_logs: {persist_logs},
+}}
+"#
+            ),
+        )
+        .expect("crash service config");
+    }
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+
+    for directory in [&persistent_dir, &memory_dir] {
+        client::expect_ok(
+            &paths,
+            Request::Enable {
+                directory: directory.display().to_string(),
+            },
+        )
+        .await
+        .expect("enable crash service");
+    }
+
+    let persistent = wait_for_attach_unavailable(&paths, "persistent-crash").await;
+    assert!(persistent.recent_failures >= 3);
+    assert_eq!(persistent.window_seconds, 60);
+    let latest = persistent.latest_log.expect("persistent latest log");
+    assert_eq!(latest, paths.logs_dir().join("persistent-crash/latest.log"));
+    assert!(latest.is_file());
+
+    let mut direct_stderr = None;
+    for _ in 0..50 {
+        let output = Command::new(env!("CARGO_BIN_EXE_served"))
+            .args(["attach", "persistent-crash"])
+            .env("HOME", &home)
+            .output()
+            .expect("run non-interactive direct attach");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if stderr.contains("warning: service \"persistent-crash\"") {
+            assert!(!output.status.success());
+            direct_stderr = Some(stderr);
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    let direct_stderr = direct_stderr.expect("direct attach crash-loop warning");
+    assert!(direct_stderr.contains("latest.log"));
+    assert!(!direct_stderr.contains("Open latest.log?"));
+
+    let memory = wait_for_attach_unavailable(&paths, "memory-crash").await;
+    assert!(memory.recent_failures >= 3);
+    assert_eq!(memory.window_seconds, 60);
+    assert_eq!(memory.latest_log, None);
+    assert!(!paths.logs_dir().join("memory-crash/latest.log").exists());
+
+    for name in ["persistent-crash", "memory-crash"] {
+        client::expect_ok(
+            &paths,
+            Request::Disable {
+                target: Target::Name(name.to_owned()),
+            },
+        )
+        .await
+        .expect("disable crash service");
+    }
 }
 
 #[tokio::test]
@@ -476,6 +588,21 @@ async fn daemon_uses_fixed_home_paths_and_rejects_duplicate_manager() {
     let _guard = DaemonGuard(daemon);
     wait_for_path(&paths.socket_path()).await;
 
+    let stream = tokio::net::UnixStream::connect(paths.socket_path())
+        .await
+        .expect("connect old protocol client");
+    let mut frame = served::protocol::framed(stream);
+    served::protocol::send_json(&mut frame, &Request::Hello { version: 3 })
+        .await
+        .expect("send old protocol hello");
+    let response = served::protocol::receive_json::<Response>(&mut frame)
+        .await
+        .expect("receive protocol rejection");
+    assert!(matches!(
+        response,
+        Response::Error { message } if message.contains("unsupported protocol version 3")
+    ));
+
     let duplicate = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
         .env("HOME", &home)
@@ -485,6 +612,215 @@ async fn daemon_uses_fixed_home_paths_and_rejects_duplicate_manager() {
     let stderr = String::from_utf8_lossy(&duplicate.stderr);
     assert!(stderr.contains("manager already running"), "{stderr}");
     assert!(!root.path().join("wrong-runtime/served.sock").exists());
+}
+
+#[tokio::test]
+async fn manager_crash_keeps_runner_and_service_alive_for_adoption() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  "name": "survivor",
+  "command": "while true; do printf 'survivor-live\\n'; sleep 0.1; done",
+  "tty": false,
+  "restart": "always"
+}
+"#,
+    )
+    .expect("config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let mut first = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn first manager");
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable survivor");
+    wait_for_state(&paths, "survivor", ServiceState::Running).await;
+    wait_for_path(&paths.runner_socket("survivor")).await;
+    let first_pid = service_pid(&paths, "survivor").await;
+
+    first.kill().expect("kill manager");
+    first.wait().expect("reap first manager");
+
+    let second = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn replacement manager");
+    let _guard = DaemonGuard(second);
+    wait_for_path(&paths.socket_path()).await;
+    wait_for_state(&paths, "survivor", ServiceState::Running).await;
+    assert_eq!(service_pid(&paths, "survivor").await, first_pid);
+    wait_for_output_tail(&paths, "survivor", "survivor-live").await;
+
+    let session = client::attach(&paths, "survivor".to_owned())
+        .await
+        .expect("attach after manager recovery");
+    let mut stream = session.stream;
+    let output = read_until(&mut stream, b"survivor-live").await;
+    assert!(
+        output
+            .windows(b"survivor-live".len())
+            .any(|window| window == b"survivor-live")
+    );
+    drop(stream);
+
+    client::expect_ok(
+        &paths,
+        Request::Disable {
+            target: Target::Name("survivor".to_owned()),
+        },
+    )
+    .await
+    .expect("disable survivor");
+}
+
+#[tokio::test]
+async fn shutdown_stops_runners_after_manager_crash() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  name: "fallback-shutdown",
+  command: "sleep 60",
+  tty: false,
+  restart: "never",
+}
+"#,
+    )
+    .expect("config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn manager");
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable fallback service");
+    wait_for_state(&paths, "fallback-shutdown", ServiceState::Running).await;
+    let pid = service_pid(&paths, "fallback-shutdown").await;
+
+    daemon.kill().expect("kill manager");
+    daemon.wait().expect("reap manager");
+    let shutdown = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("shutdown")
+        .env("HOME", &home)
+        .output()
+        .expect("run fallback shutdown");
+    assert!(shutdown.status.success(), "shutdown failed: {shutdown:?}");
+    wait_for_absent(&paths.runner_socket("fallback-shutdown")).await;
+    wait_for_process_exit(pid).await;
+}
+
+#[tokio::test]
+async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  "name": "handoff",
+  "command": "sleep 60",
+  "tty": false,
+  "restart": "never"
+}
+"#,
+    )
+    .expect("config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn manager");
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable handoff service");
+    wait_for_state(&paths, "handoff", ServiceState::Running).await;
+    let pid_before = service_pid(&paths, "handoff").await;
+
+    let handoff = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["daemon", "--handoff"])
+        .env("HOME", &home)
+        .output()
+        .expect("run manager handoff");
+    assert!(handoff.status.success(), "handoff failed: {handoff:?}");
+    wait_for_state(&paths, "handoff", ServiceState::Running).await;
+    assert_eq!(service_pid(&paths, "handoff").await, pid_before);
+
+    let shutdown = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("shutdown")
+        .env("HOME", &home)
+        .output()
+        .expect("run manager shutdown");
+    assert!(shutdown.status.success(), "shutdown failed: {shutdown:?}");
+    for _ in 0..100 {
+        if daemon.try_wait().expect("poll manager").is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert!(daemon.try_wait().expect("recheck manager").is_some());
+    assert!(!paths.runner_socket("handoff").exists());
 }
 
 #[tokio::test]
@@ -698,6 +1034,21 @@ async fn read_history(paths: &ServedPaths, name: &str, id: &str, limit: u32) -> 
     }
 }
 
+async fn wait_for_attach_unavailable(paths: &ServedPaths, name: &str) -> client::AttachUnavailable {
+    for _ in 0..250 {
+        match client::attach(paths, name.to_owned()).await {
+            Ok(session) => drop(session),
+            Err(error) => {
+                if let Some(unavailable) = error.downcast_ref::<client::AttachUnavailable>() {
+                    return unavailable.clone();
+                }
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for crash-loop attach diagnostic for {name}");
+}
+
 async fn wait_for_path(path: &Path) {
     for _ in 0..100 {
         if path.exists() {
@@ -706,6 +1057,27 @@ async fn wait_for_path(path: &Path) {
         sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for {}", path.display());
+}
+
+async fn wait_for_absent(path: &Path) {
+    for _ in 0..100 {
+        if !path.exists() {
+            return;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for {} to disappear", path.display());
+}
+
+async fn wait_for_process_exit(pid: u32) {
+    let path = Path::new("/proc").join(pid.to_string());
+    for _ in 0..100 {
+        if !path.exists() {
+            return;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for process {pid} to exit");
 }
 
 async fn wait_for_state(paths: &ServedPaths, name: &str, expected: ServiceState) {
@@ -736,6 +1108,21 @@ async fn wait_for_output_tail(paths: &ServedPaths, name: &str, needle: &str) {
         sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for output tail");
+}
+
+async fn service_pid(paths: &ServedPaths, name: &str) -> u32 {
+    for _ in 0..100 {
+        if let Ok(Response::Services { services }) = client::request(paths, Request::List).await
+            && let Some(pid) = services
+                .iter()
+                .find(|service| service.name == name)
+                .and_then(|service| service.pid)
+        {
+            return pid;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for service pid");
 }
 
 async fn wait_for_attach_state(paths: &ServedPaths, name: &str, expected: bool) {

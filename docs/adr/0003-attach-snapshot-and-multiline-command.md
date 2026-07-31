@@ -1,41 +1,34 @@
-# ADR 0003: Attach Snapshot and Multiline Command Editing
+# ADR 0003：Attach 快照与源配置编辑
 
-- Status: Accepted
-- Date: 2026-07-24
+- 状态：已接受
+- 日期：2026-07-24
 
-## Context
+## 背景
 
-Attach previously began at the live broadcast boundary, so a user connecting to
-a busy service had no immediate context. The manager already retained a bounded
-current-run output buffer, but replaying raw PTY bytes would not reliably recreate
-a terminal screen.
+以前 attach 从实时广播边界开始，因此用户连接繁忙服务时看不到即时上下文。管理器已经
+保留了有上限的当前运行输出缓冲区，但回放 raw PTY 字节不能可靠地重建终端屏幕。
 
-The structured editor also decoded JSON `\n` escapes into actual newlines while
-placing the whole command into a one-row field. Existing multiline shell scripts
-could therefore contain invisible line breaks and pasted scripts were difficult to
-inspect.
+之前的结构化编辑器会把 JSON `\n` 转成实际换行，再把整个命令放进单行字段。已有的多行
+shell 脚本因此可能包含不可见换行，粘贴脚本也难以检查。后来这个表单编辑器改为外部编辑器
+直接编辑源文件；配置文件现在使用带行内注释的 JSON5。
 
-## Decision
+## 决策
 
-- Direct attach and TUI attach both begin with the current run's latest 48 logical
-  output lines, aggregated across output events and capped at 16 KiB.
-- The snapshot removes ANSI and unsafe control sequences, normalizes CR/CRLF to
-  LF, emits terminal-friendly CRLF separators, and adds a boundary newline before
-  live output when needed.
-- The snapshot is display-only. It is never sent to a PTY, appended to logs, or
-  interpreted as cursor/screen state. Pipe observers each receive their own copy.
-- Each worker process owns a bounded attach cache. Publishing output updates the
-  cache and live broadcast under one synchronization boundary; creating an
-  attach subscription takes the snapshot and registers the live receiver under
-  that same boundary. This prevents a gap or duplicate between replay and live
-  output. The raw attach protocol and version remain unchanged.
-- The command editor splits actual LF characters into visible TextArea rows, uses a
-  bounded dynamic command area, supports bracketed paste, and normalizes CR/CRLF to
-  LF on edit. Actual LF remains `/bin/sh -c` script syntax.
+- 直接 attach 和 TUI attach 都先显示当前运行最新的 48 个逻辑输出行。快照可以聚合多个
+  输出事件，大小上限为 16 KiB。
+- 快照移除 ANSI 和不安全控制序列，将 CR/CRLF 规范化为 LF，输出终端友好的 CRLF 分隔符，
+  并在需要时于实时输出前添加边界换行。
+- 快照只用于显示。它不会发送给 PTY，不会追加到日志，也不会被解释为光标或屏幕状态。
+  管道观察者各自接收一份快照。
+- 每个服务运行器拥有有上限的 attach 缓存。发布输出时，在同一个同步边界内更新缓存并
+  广播实时输出；创建 attach 订阅时，也在同一个边界内取得快照并注册实时接收器。这样
+  可以避免快照与实时输出之间丢失或重复。raw attach 协议和版本不变。
+- 配置编辑移出 TUI：`served edit` 在 `.served.json` 缺失时创建带注释的 JSON5 源文件，
+  然后使用 `-e/--editor COMMAND` 或 `$EDITOR` 打开。已有源文本不重排；`--path` 只在
+  创建缺失模板后报告绝对文件路径。
 
-## Consequences
+## 结果
 
-Attach has useful recent context without becoming a terminal emulator. Colors and
-cursor behavior from the cached output are intentionally not reproduced, while
-live output keeps its existing raw behavior. A literal backslash-n argument remains
-distinct from an actual newline and must use the corresponding JSON escaping.
+Attach 会提供最近上下文，但不会变成终端模拟器。缓存输出中的颜色和光标行为不会复现，
+实时输出仍保持原有 raw 行为。字面量反斜杠-n 参数与实际换行保持区别，后者使用对应的
+JSON5 转义。直接编辑源文件可以让多行 shell 语法和字段注释保留在用户保存的同一文件中。

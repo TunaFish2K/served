@@ -22,12 +22,12 @@ pub enum ConfigError {
     InvalidName(String),
     #[error("service command must not be empty")]
     EmptyCommand,
-    #[error("invalid .env.served key {0:?}")]
+    #[error("invalid environment key {0:?}")]
     InvalidEnvKey(String),
     #[error("I/O error while reading service configuration: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid JSON in {CONFIG_FILE}: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("invalid JSON5 in {CONFIG_FILE}: {0}")]
+    Json5(#[from] json5::Error),
     #[error("invalid dotenv data: {0}")]
     Dotenv(#[from] dotenvy::Error),
 }
@@ -66,6 +66,8 @@ pub struct ServiceConfig {
     pub restart: RestartPolicy,
     #[serde(default)]
     pub persist_logs: bool,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 fn default_tty() -> bool {
@@ -90,6 +92,9 @@ impl ServiceConfig {
         }
         if self.command.trim().is_empty() {
             return Err(ConfigError::EmptyCommand);
+        }
+        for key in self.env.keys() {
+            validate_env_key(key)?;
         }
         Ok(())
     }
@@ -116,6 +121,7 @@ impl ServiceConfig {
             sync_rows_cols: true,
             restart: RestartPolicy::Never,
             persist_logs: false,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -143,7 +149,7 @@ pub fn load_service(
     if !config_path.is_file() {
         return Err(ConfigError::MissingConfig(directory));
     }
-    let config: ServiceConfig = serde_json::from_slice(&fs::read(config_path)?)?;
+    let config: ServiceConfig = json5::from_str(&fs::read_to_string(config_path)?)?;
     config.validate()?;
 
     let mut environment = manager_environment.clone();
@@ -151,11 +157,12 @@ pub fn load_service(
     if env_path.exists() {
         for item in dotenvy::from_path_iter(env_path)? {
             let (key, value) = item?;
-            if key.is_empty() || key.contains('=') || key.contains('\0') {
-                return Err(ConfigError::InvalidEnvKey(key));
-            }
+            validate_env_key(&key)?;
             environment.insert(key, value);
         }
+    }
+    for (key, value) in &config.env {
+        environment.insert(key.clone(), value.clone());
     }
 
     Ok(LoadedService {
@@ -173,15 +180,70 @@ pub fn write_template(directory: &Path) -> Result<(), ConfigError> {
     fs::create_dir_all(directory)?;
     let config_path = directory.join(CONFIG_FILE);
     if !config_path.exists() {
-        let config = ServiceConfig::template(directory);
-        let data = serde_json::to_vec_pretty(&config)?;
-        fs::write(config_path, format!("{}\n", String::from_utf8_lossy(&data)))?;
-    }
-    let env_path = directory.join(ENV_FILE);
-    if !env_path.exists() {
-        fs::write(env_path, "")?;
+        fs::write(config_path, template_source(directory))?;
     }
     Ok(())
+}
+
+fn validate_env_key(key: &str) -> Result<(), ConfigError> {
+    if key.is_empty() || key.contains('=') || key.contains('\0') {
+        return Err(ConfigError::InvalidEnvKey(key.to_owned()));
+    }
+    Ok(())
+}
+
+fn template_source(directory: &Path) -> String {
+    let config = ServiceConfig::template(directory);
+    format!(
+        r#"// served service configuration (JSON5)
+//
+// This file is read by the manager when the service is enabled or restarted.
+// Existing files are never rewritten by `served edit`; keep your own comments.
+{{
+  // Globally unique service name. Use only letters, digits, '.', '_' and '-'.
+  // Renaming an enabled service requires disabling and enabling it again.
+  name: "{name}",
+
+  // Shell script executed with `/bin/sh -c` from this service directory.
+  // Multiple commands may be separated by real newlines or shell operators.
+  command: "{command}",
+
+  // Allocate a runner-owned PTY. When false, stdout/stderr use pipes and
+  // attach is read-only; when true, one attach client may write to the PTY.
+  tty: {tty},
+
+  // When tty is true, attach keeps the PTY rows/columns in sync with the
+  // attaching terminal. Changes apply to the running PTY; false keeps its size.
+  // This setting has no effect for pipe services.
+  syncRowsCols: {sync_rows_cols},
+
+  // Restart policy after the process exits: 'never', 'on-failure', or 'always'.
+  // 'on-failure' restarts only a non-zero exit; 'always' also restarts success.
+  restart: "{restart}",
+
+  // Keep complete raw output on disk under the served state directory when true.
+  // When false, the manager keeps bounded in-memory history only.
+  persist_logs: {persist_logs},
+
+  // Literal environment values layered over the manager environment. These
+  // values are not shell-expanded. A legacy .env.served file is read first
+  // when present, so keys here take precedence over that compatibility source.
+  env: {{
+    // PORT: "8080",
+  }},
+}}
+"#,
+        name = config.name,
+        command = config.command,
+        tty = config.tty,
+        sync_rows_cols = config.sync_rows_cols,
+        restart = match config.restart {
+            RestartPolicy::Never => "never",
+            RestartPolicy::OnFailure => "on-failure",
+            RestartPolicy::Always => "always",
+        },
+        persist_logs = config.persist_logs,
+    )
 }
 
 #[cfg(test)]
@@ -190,7 +252,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn loads_direct_json_and_dotenv_overlay() {
+    fn loads_json5_and_legacy_dotenv_overlay() {
         let directory = tempdir().expect("tempdir");
         fs::write(
             directory.path().join(CONFIG_FILE),
@@ -217,6 +279,36 @@ mod tests {
     }
 
     #[test]
+    fn json5_environment_overrides_legacy_dotenv_without_expansion() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            r#"{
+                // JSON5 comments and trailing commas are accepted.
+                name: 'api',
+                command: 'echo ok',
+                env: {
+                    PORT: 'json5',
+                    BIN: '${HOME}/bin',
+                },
+            }"#,
+        )
+        .expect("config");
+        fs::write(directory.path().join(ENV_FILE), "PORT=dotenv\nLEGACY=yes\n")
+            .expect("env.served");
+        let mut base = BTreeMap::new();
+        base.insert("HOME".to_owned(), "/home/test".to_owned());
+
+        let service = load_service(directory.path(), &base).expect("load");
+        assert_eq!(service.environment.get("PORT"), Some(&"json5".to_owned()));
+        assert_eq!(service.environment.get("LEGACY"), Some(&"yes".to_owned()));
+        assert_eq!(
+            service.environment.get("BIN"),
+            Some(&"${HOME}/bin".to_owned())
+        );
+    }
+
+    #[test]
     fn rejects_unknown_json_fields() {
         let directory = tempdir().expect("tempdir");
         fs::write(
@@ -225,7 +317,7 @@ mod tests {
         )
         .expect("config");
         let error = load_service(directory.path(), &BTreeMap::new()).expect_err("must reject");
-        assert!(error.to_string().contains("invalid JSON"));
+        assert!(error.to_string().contains("invalid JSON5"));
     }
 
     #[test]
@@ -286,13 +378,33 @@ mod tests {
     }
 
     #[test]
-    fn template_creates_only_served_env_file() {
+    fn template_creates_annotated_json5_without_legacy_env_file() {
         let directory = tempdir().expect("tempdir");
 
         write_template(directory.path()).expect("write template");
 
+        let source = fs::read_to_string(directory.path().join(CONFIG_FILE)).expect("template");
+        assert!(source.contains("// Globally unique service name"));
+        assert!(source.contains("env: {"));
         assert!(directory.path().join(CONFIG_FILE).is_file());
-        assert!(directory.path().join(ENV_FILE).is_file());
+        assert!(!directory.path().join(ENV_FILE).exists());
         assert!(!directory.path().join(".env").exists());
+
+        let service = load_service(directory.path(), &BTreeMap::new()).expect("load template");
+        assert_eq!(service.config.env, BTreeMap::new());
+    }
+
+    #[test]
+    fn template_does_not_rewrite_existing_source() {
+        let directory = tempdir().expect("tempdir");
+        let original = "// keep this broken source available for repair\n{name: 'custom',\n";
+        fs::write(directory.path().join(CONFIG_FILE), original).expect("config");
+
+        write_template(directory.path()).expect("write template");
+
+        assert_eq!(
+            fs::read_to_string(directory.path().join(CONFIG_FILE)).expect("read config"),
+            original
+        );
     }
 }

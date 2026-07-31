@@ -1,41 +1,39 @@
-# ADR 0002: Per-Run Output History and Optional Persistence
+# ADR 0002：按运行记录输出历史，并可选持久化
 
-- Status: Accepted
-- Date: 2026-07-24
+- 状态：已接受
+- 日期：2026-07-24
 
-## Context
+## 背景
 
-served needs useful output history without turning attach into a terminal replay
-engine. A service may run with a PTY or with stdout/stderr pipes, and users may
-want either temporary history or complete records across manager restarts.
+served 需要有用的输出历史，但不应把 attach 变成终端回放引擎。服务可以使用 PTY，也可以
+使用 stdout/stderr 管道。用户可能只需要临时历史，也可能需要在管理器重启后保留完整记录。
 
-## Decision
+## 决策
 
-- `persist_logs` is a per-service boolean in `.served.json`, defaulting to `false`.
-- Every process start creates a new run record, including automatic and manual
-  restarts.
-- Persistent records live under `$HOME/.local/state/served/logs/<service>/`.
-- The active persistent record is `latest.log`. On the next process start it is
-  renamed using the previous run's `.latest.started` timestamp in local
-  `YYYYMMDD-HHMMSS.log` format. Name collisions receive numeric suffixes.
-- Persistent files contain complete raw output. In-memory records retain a 64 KiB
-  tail per run and the most recent 100 archives. Persistent storage retains 100
-  archives plus `latest.log`.
-- TTY output is recorded as PTY bytes. Pipe stdout and stderr are merged in manager
-  event order. Display code removes ANSI and unsafe control sequences; stored bytes
-  are unchanged.
-- Persistence failures produce a warning and fall back to memory for that run; they
-  do not stop the service.
-- History is served through manager IPC, with paginated content reads. TUI `h` and
-  `served history [name]` use the same records. Attach may begin with ADR 0003's
-  small sanitized current-run snapshot but does not replay history records or
-  terminal state.
+- `.served.json` 中的 `persist_logs` 是每个服务独立的布尔值，默认 `false`。
+- 每次进程启动都会创建一条新的运行记录，包括自动重启和手动重启。
+- 持久化记录位于 `$HOME/.local/state/served/logs/<service>/`。
+- 活动持久化记录为 `latest.log`。下一次进程启动时，按上一次运行的
+  `.latest.started` 时间戳重命名，格式为本地 `YYYYMMDD-HHMMSS.log`。名称冲突时追加数字
+  后缀。
+- 持久化文件保存完整 raw 输出。内存记录每次保留 64 KiB 尾部和最近 100 个归档。持久化
+  存储保留 100 个归档及 `latest.log`。
+- TTY 输出按 PTY 字节记录。管道 stdout 和 stderr 按运行器收到的事件顺序合并。显示代码
+  移除 ANSI 和不安全控制序列；保存的字节不变。
+- 持久化失败时记录 warning，并为本次运行回退到内存；不会停止服务。
+- 历史通过管理器 IPC 提供，并按分页读取。TUI 的 `h` 流程仍然是记录列表，然后进入清理
+  后的内容浏览器；页面显示从 1 开始的逻辑行位置和准确总数。视觉换行不影响计数。Attach
+  可以使用 ADR 0003 的当前运行清理快照开头，但不会回放历史记录或终端状态。
+- CLI `served history [name]` 是文件定位和编辑命令，不是内容转储命令。未提供 `--run <id>`
+  时选择 `latest`，使用 `-e/--editor COMMAND` 优先于 `$EDITOR`，并支持 `--path` 只打印
+  持久化日志路径。命令打开 raw 文件；内存记录只能在 TUI 中查看。
 
-## Consequences
+## 结果
 
-The manager owns both disk and memory history, so clients do not need access to the
-state directory and both storage modes have one API. Turning persistence off stops
-new disk writes but does not delete old files. A manager restart clears memory-only
-history while persistent files remain available. History display is safe for a
-terminal but intentionally does not reproduce terminal state, colors, or cursor
-behavior from a PTY session.
+运行器同时负责磁盘和内存历史。客户端不需要直接访问状态目录，两种存储方式共用一套 API。
+关闭持久化后只停止新增磁盘写入，不删除旧文件。普通管理器重启不会丢失内存历史，因为运行器
+仍然存活；明确终止运行器会清除它。运行器会缓存不可变记录的行数，收到新输出时使当前
+记录的缓存失效。
+
+历史显示适合终端查看，但不会复现 PTY 的终端状态、颜色或光标行为。CLI 编辑器流程使用
+持久化 raw 文件，因此用户可以查看准确的字节和终端控制数据。

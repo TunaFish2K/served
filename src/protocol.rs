@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const MAX_FRAME_LENGTH: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +48,12 @@ pub enum Request {
         offset: u64,
         limit: u32,
     },
+    /// Stop the manager and all managed runners. Used by systemd ExecStop.
+    #[serde(rename = "ManagerShutdown")]
+    ManagerShutdown,
+    /// Replace the manager process without stopping runners.
+    #[serde(rename = "ManagerHandoff")]
+    ManagerHandoff,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +95,12 @@ pub enum Response {
     Attach {
         token: String,
     },
+    AttachUnavailable {
+        name: String,
+        recent_failures: u32,
+        window_seconds: u64,
+        latest_log: Option<String>,
+    },
     Ok,
     Services {
         services: Vec<ServiceInfo>,
@@ -103,6 +115,7 @@ pub enum Response {
         offset: u64,
         next_offset: u64,
         total: u64,
+        total_lines: u64,
         eof: bool,
         content: String,
     },
@@ -198,6 +211,26 @@ mod tests {
     }
 
     #[test]
+    fn history_response_round_trips_logical_line_count() {
+        let response = Response::HistoryChunk {
+            service: "api".to_owned(),
+            id: "latest".to_owned(),
+            offset: 0,
+            next_offset: 12,
+            total: 12,
+            total_lines: 3,
+            eof: true,
+            content: "one\ntwo\nthree".to_owned(),
+        };
+        let value = serde_json::to_value(&response).expect("serialize");
+        let decoded: Response = serde_json::from_value(value).expect("decode");
+        assert!(matches!(
+            decoded,
+            Response::HistoryChunk { total_lines: 3, .. }
+        ));
+    }
+
+    #[test]
     fn resize_request_round_trips_as_json() {
         let request = Request::Resize {
             name: "vim".to_owned(),
@@ -215,5 +248,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn attach_unavailable_round_trips_crash_diagnostics() {
+        let response = Response::AttachUnavailable {
+            name: "api".to_owned(),
+            recent_failures: 3,
+            window_seconds: 60,
+            latest_log: Some("/tmp/api/latest.log".to_owned()),
+        };
+        let value = serde_json::to_value(&response).expect("serialize");
+        let decoded: Response = serde_json::from_value(value).expect("decode");
+        assert!(matches!(
+            decoded,
+            Response::AttachUnavailable {
+                recent_failures: 3,
+                window_seconds: 60,
+                latest_log: Some(path),
+                ..
+            } if path == "/tmp/api/latest.log"
+        ));
+    }
+
+    #[test]
+    fn manager_lifecycle_requests_round_trip_as_json() {
+        for request in [Request::ManagerShutdown, Request::ManagerHandoff] {
+            let value = serde_json::to_value(&request).expect("serialize");
+            let decoded: Request = serde_json::from_value(value).expect("decode");
+            assert!(matches!(
+                decoded,
+                Request::ManagerShutdown | Request::ManagerHandoff
+            ));
+        }
     }
 }

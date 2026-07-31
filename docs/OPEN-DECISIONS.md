@@ -1,7 +1,8 @@
-# Open Decisions
+# 待定决策
 
-There are currently no open decisions for the attach or output-history design.
+Attach 和输出历史设计目前没有待定决策。
 
-The former attach-history decision is resolved by ADR 0002: history is a separate
-record list and content view. ADR 0003 adds a small sanitized current-run snapshot
-before live attach output without turning attach into terminal replay.
+之前关于 attach 与历史记录关系的决策已由 ADR 0002 解决：历史使用独立的记录列表和
+内容视图。ADR 0003 在实时 attach 输出前增加当前运行的清理快照，但不把 attach 变成
+终端回放。ADR 0007 定义 attach 时的崩溃循环诊断和可选持久化日志提示。ADR 0008 定义
+独立运行器、管理器接管和 systemd handoff。

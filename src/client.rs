@@ -1,6 +1,10 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
+use thiserror::Error;
 use tokio::net::UnixStream;
 
 use crate::{
@@ -13,6 +17,17 @@ pub struct AttachSession {
     pub token: String,
 }
 
+#[derive(Debug, Clone, Error)]
+#[error(
+    "attach: service {name:?} is not running after {recent_failures} failures in {window_seconds} seconds"
+)]
+pub struct AttachUnavailable {
+    pub name: String,
+    pub recent_failures: u32,
+    pub window_seconds: u64,
+    pub latest_log: Option<PathBuf>,
+}
+
 pub async fn request(paths: &ServedPaths, request: Request) -> Result<Response> {
     crate::protocol::request(&paths.socket_path(), request).await
 }
@@ -22,6 +37,20 @@ pub async fn attach(paths: &ServedPaths, name: String) -> Result<AttachSession> 
     send_json(&mut frame, &Request::Attach { name }).await?;
     let token = match receive_json::<Response>(&mut frame).await? {
         Response::Attach { token } => token,
+        Response::AttachUnavailable {
+            name,
+            recent_failures,
+            window_seconds,
+            latest_log,
+        } => {
+            return Err(AttachUnavailable {
+                name,
+                recent_failures,
+                window_seconds,
+                latest_log: latest_log.map(PathBuf::from),
+            }
+            .into());
+        }
         Response::Error { message } => anyhow::bail!("attach: {message}"),
         response => anyhow::bail!("unexpected attach response: {response:?}"),
     };

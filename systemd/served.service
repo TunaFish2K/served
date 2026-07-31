@@ -9,8 +9,12 @@ Group=@SERVED_GROUP@
 SetLoginEnvironment=yes
 WorkingDirectory=~
 ExecStart=/bin/sh -lc 'exec /usr/local/bin/served daemon'
+ExecStop=/usr/local/bin/served shutdown
+ExecReload=/usr/local/bin/served daemon --handoff
 Restart=always
 RestartSec=1s
+KillMode=process
+TimeoutStopSec=30s
 NoNewPrivileges=yes
 
 [Install]

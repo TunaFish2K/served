@@ -1,37 +1,29 @@
-# ADR 0001: Attach Alternate Screen and Pipe Observers
+# ADR 0001：Attach 使用备用屏幕并支持管道观察者
 
-- Status: Accepted
-- Date: 2026-07-24
+- 状态：已接受
+- 日期：2026-07-24
 
-## Context
+## 背景
 
-served has two attach entry points: the global TUI and the direct
-`served attach [name]` command. PTY services already expose a bidirectional raw
-socket relay. Pipe services expose read-only live output, while both service types
-may also produce output history.
+served 有两个 attach 入口：全局 TUI 和直接命令 `served attach [name]`。PTY 服务已经
+提供双向 raw socket relay。管道服务提供只读实时输出；两种服务都可能产生输出历史。
 
-The product needs attach sessions to use a terminal second buffer while keeping
-the manager TUI recoverable. It also needs a useful read-only attach path for
-services that intentionally do not allocate a PTY.
+产品需要让 attach 会话使用终端第二屏，同时保证 manager TUI 在返回后可恢复。对于明确
+不分配 PTY 的服务，也需要一个有用的只读 attach 入口。
 
-## Decision
+## 决策
 
-- The second buffer is the terminal alternate screen.
-- Direct attach owns and restores its alternate screen.
-- TUI attach reuses the TUI-owned alternate screen, clears it for the session, and
-  redraws the TUI after detach. Nested alternate-screen ownership is not used.
-- `tty: true` remains the only mode that accepts service input and remains limited
-  to one attach writer.
-- `tty: false` gets a raw stdout/stderr broadcast with ignored input. Multiple
-  read-only observers are allowed.
-- Attach begins with a sanitized display-only snapshot of the current run's most
-  recent 48 logical lines, then continues with live output. The snapshot is not
-  interpreted as terminal state and is not sent to the service.
+- 第二屏就是终端备用屏幕。
+- 直接 attach 负责进入和恢复自己的备用屏幕。
+- TUI attach 复用 TUI 已持有的备用屏幕，为会话清屏，并在 detach 后重绘 TUI。不嵌套
+  备用屏幕所有权。
+- 只有 `tty: true` 模式接受服务输入，并且仍然只允许一个 attach writer。
+- `tty: false` 模式广播 raw stdout/stderr，并忽略输入。允许多个只读观察者。
+- Attach 先显示当前运行最近 48 个逻辑行的清理快照，再继续显示实时输出。快照不会被
+  解释为终端状态，也不会发送给服务。
 
-## Consequences
+## 结果
 
-The terminal cleanup path is explicit for both direct and TUI attach. Pipe attach
-does not require a fake PTY or a new protocol message, and each observer receives
-its own snapshot before the shared live broadcast. The snapshot is a cleaned output
-prelude rather than a reconstructed terminal screen. History is accessed through a
-separate list/content view and does not alter attach terminal state.
+直接 attach 和 TUI attach 都有明确的终端清理路径。管道 attach 不需要伪造 PTY，也不需要
+新增协议消息；每个观察者先收到自己的快照，再收到共享的实时广播。快照是清理后的输出
+前缀，不是重建的终端屏幕。历史通过独立的列表和内容视图访问，不改变 attach 的终端状态。

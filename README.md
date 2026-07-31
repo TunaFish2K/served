@@ -112,6 +112,8 @@ file.
   syncRowsCols: true,
   restart: "never",
   persist_logs: false,
+  log_max_bytes: 10485760,
+  log_max_files: 3,
   env: {
     // PORT: "8080",
   },
@@ -134,6 +136,11 @@ The template explains every supported field.
 - `persist_logs` is optional and defaults to `false`. Set it to `true` to save the
   complete output for each run under `$HOME/.local/state/served/logs/<name>/`. The setting takes
   effect after the next start or restart.
+- `log_max_bytes` is optional and defaults to `10485760` bytes (`10 MiB`). When a persistent
+  segment reaches this size, served archives it and continues with a new `latest.log`.
+- `log_max_files` is optional and defaults to `3`. It is the number of archived persistent
+  segments to keep. `latest.log` is kept in addition to these archives. Older or oversized
+  archives are removed when the service starts or rotates its logs.
 - `env` is an optional object of literal string values. served does not expand shell variables
   in these values. JSON5 `env` values override the manager environment and old `.env.served`
   values with the same key.
@@ -215,10 +222,12 @@ The runner owns the history, so a manager restart does not remove it. Persistent
 $HOME/.local/state/served/logs/<name>/
 ```
 
-The current run writes to `latest.log`. At the next start, served archives the old run by its
-start time as `YYYYMMDD-HHMMSS.log`. If names conflict, served adds `-1`, `-2`,
-and so on. `.latest.started` stores the current start time. Each service keeps up to 100
-archives and one latest file. The log directory uses mode `0700`. Log files use mode `0600`.
+The current run writes to `latest.log`. When it reaches `log_max_bytes`, served archives the
+current segment by its run start time as `YYYYMMDD-HHMMSS.log` and continues with a new
+`latest.log`. If names conflict, served adds `-1`, `-2`, and so on. `.latest.started` stores the
+run start time. Each service keeps `log_max_files` archives and one latest file. The default is
+`10 MiB` per segment and `3` archives. The log directory uses mode `0700`. Log files use mode
+`0600`.
 
 With `persist_logs: false`, served does not add disk logs. The runner keeps the current record
 and the latest 100 memory archives during its lifetime. A manager restart keeps these records. A
@@ -270,13 +279,13 @@ exits unexpectedly, systemd starts it again and the runners continue. The new ma
 Push a `v<semver>` tag that matches the version in `Cargo.toml` to create a GitHub
 Release. The current workflow builds Linux amd64 with glibc.
 
-For version `0.1.8`, the release contains:
+For version `0.2.0`, the release contains:
 
 ```text
-served-linux-amd64-v0.1.8-binary
-served-linux-amd64-v0.1.8-binary.sha256
-served-linux-amd64-v0.1.8-full.tar.gz
-served-linux-amd64-v0.1.8-full.tar.gz.sha256
+served-linux-amd64-v0.2.0-binary
+served-linux-amd64-v0.2.0-binary.sha256
+served-linux-amd64-v0.2.0-full.tar.gz
+served-linux-amd64-v0.2.0-full.tar.gz.sha256
 ```
 
 The `binary` asset contains only the executable. The `full.tar.gz` asset contains the
@@ -304,9 +313,9 @@ The workflow does not build ARM, musl, or other operating systems.
   The manager keeps that environment snapshot until it restarts.
 - The system service uses the installation user's home as its working directory. It does not use the
   system manager's `%h` expansion.
-- The runner sends `SIGTERM` first. It sends `SIGKILL` after the timeout. A manager
-  crash does not run this cleanup path. The runner ends managed shells only for explicit shutdown,
-  disable, or restart actions.
+- The runner creates one process group for each pipe or PTY service. It sends `SIGTERM` to the
+  group first, then `SIGKILL` after the timeout, and confirms that the service leader was reaped.
+  A failed stop or restart is returned as an error. A manager crash does not run this cleanup path.
 - Detached child processes created with `nohup`, background commands, or daemonization are
   outside the cleanup guarantee.
 - V1 does not provide root mode, container isolation, namespaces, resource limits, dependency graphs,

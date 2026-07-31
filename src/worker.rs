@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use nix::{
+    errno::Errno,
     sys::signal::{Signal, kill},
     unistd::Pid,
 };
@@ -29,6 +30,7 @@ use crate::{
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+pub const WORKER_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug)]
 pub enum WorkerCommand {
@@ -136,7 +138,7 @@ impl OutputHub {
 pub fn spawn_service(
     service: LoadedService,
     manager_environment: std::collections::BTreeMap<String, String>,
-    events: mpsc::UnboundedSender<WorkerEvent>,
+    events: mpsc::Sender<WorkerEvent>,
 ) -> mpsc::Sender<WorkerCommand> {
     let (commands, receiver) = mpsc::channel(16);
     tokio::spawn(run_service(service, manager_environment, events, receiver));
@@ -146,17 +148,19 @@ pub fn spawn_service(
 async fn run_service(
     mut service: LoadedService,
     manager_environment: std::collections::BTreeMap<String, String>,
-    events: mpsc::UnboundedSender<WorkerEvent>,
+    events: mpsc::Sender<WorkerEvent>,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
     let mut attempt = 0_u32;
 
     loop {
         let name = service.config.name.clone();
-        let _ = events.send(WorkerEvent::Starting {
-            name: name.clone(),
-            persist_logs: service.config.persist_logs,
-        });
+        let _ = events
+            .send(WorkerEvent::Starting {
+                name: name.clone(),
+                persist_logs: service.config.persist_logs,
+            })
+            .await;
         let process = if service.config.tty {
             run_pty(service.clone(), events.clone(), &mut commands).await
         } else {
@@ -172,20 +176,24 @@ async fn run_service(
         let outcome = match process {
             Ok(outcome) => outcome,
             Err(error) => {
-                let _ = events.send(WorkerEvent::Failed {
-                    name: name.clone(),
-                    error,
-                });
+                let _ = events
+                    .send(WorkerEvent::Failed {
+                        name: name.clone(),
+                        error,
+                    })
+                    .await;
                 if !service.config.restart.should_restart(false) {
-                    let _ = events.send(WorkerEvent::Stopped { name });
+                    let _ = events.send(WorkerEvent::Stopped { name }).await;
                     return;
                 }
                 attempt = attempt.saturating_add(1);
                 let delay = backoff(attempt);
-                let _ = events.send(WorkerEvent::Restarting {
-                    name: service.config.name.clone(),
-                    delay,
-                });
+                let _ = events
+                    .send(WorkerEvent::Restarting {
+                        name: service.config.name.clone(),
+                        delay,
+                    })
+                    .await;
                 match wait_backoff(delay, &mut commands).await {
                     BackoffOutcome::Timer => continue,
                     BackoffOutcome::Stop => return,
@@ -200,7 +208,7 @@ async fn run_service(
 
         match outcome {
             ProcessOutcome::Stopped => {
-                let _ = events.send(WorkerEvent::Stopped { name });
+                let _ = events.send(WorkerEvent::Stopped { name }).await;
                 return;
             }
             ProcessOutcome::Restart { service: next } => {
@@ -208,21 +216,25 @@ async fn run_service(
                 service = next;
             }
             ProcessOutcome::Exited { code, success } => {
-                let _ = events.send(WorkerEvent::Exited {
-                    name: name.clone(),
-                    code,
-                    success,
-                });
+                let _ = events
+                    .send(WorkerEvent::Exited {
+                        name: name.clone(),
+                        code,
+                        success,
+                    })
+                    .await;
                 if !service.config.restart.should_restart(success) {
-                    let _ = events.send(WorkerEvent::Stopped { name });
+                    let _ = events.send(WorkerEvent::Stopped { name }).await;
                     return;
                 }
                 attempt = attempt.saturating_add(1);
                 let delay = backoff(attempt);
-                let _ = events.send(WorkerEvent::Restarting {
-                    name: name.clone(),
-                    delay,
-                });
+                let _ = events
+                    .send(WorkerEvent::Restarting {
+                        name: name.clone(),
+                        delay,
+                    })
+                    .await;
                 match wait_backoff(delay, &mut commands).await {
                     BackoffOutcome::Timer => {}
                     BackoffOutcome::Stop => return,
@@ -267,7 +279,7 @@ async fn wait_backoff(
 async fn run_pipe(
     service: LoadedService,
     manager_environment: std::collections::BTreeMap<String, String>,
-    events: mpsc::UnboundedSender<WorkerEvent>,
+    events: mpsc::Sender<WorkerEvent>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) -> Result<ProcessOutcome, String> {
     let mut command = Command::new("/bin/sh");
@@ -280,6 +292,7 @@ async fn run_pipe(
         .envs(service.environment.clone())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    command.process_group(0);
     let mut child = command.spawn().map_err(|error| error.to_string())?;
     let pid = child
         .id()
@@ -302,11 +315,13 @@ async fn run_pipe(
         )
     });
     let name = service.config.name.clone();
-    let _ = events.send(WorkerEvent::Started {
-        name: name.clone(),
-        pid,
-        tty: false,
-    });
+    let _ = events
+        .send(WorkerEvent::Started {
+            name: name.clone(),
+            pid,
+            tty: false,
+        })
+        .await;
     let mut wait_task = tokio::spawn(async move { child.wait().await });
     let mut attach_count = 0_usize;
     let (attach_done_tx, mut attach_done_rx) = mpsc::unbounded_channel::<()>();
@@ -320,7 +335,7 @@ async fn run_pipe(
                     let _ = events.send(WorkerEvent::AttachChanged {
                         name: name.clone(),
                         active: false,
-                    });
+                    }).await;
                 }
                 let status = result
                     .map_err(|error| error.to_string())?
@@ -332,37 +347,49 @@ async fn run_pipe(
             }
             command = commands.recv() => match command {
                 Some(WorkerCommand::Stop { reply }) => {
-                    terminate_and_reap(pid, &mut wait_task).await;
-                    abort_reader(stdout_task);
-                    abort_reader(stderr_task);
-                    if attach_count > 0 {
-                        let _ = events.send(WorkerEvent::AttachChanged {
-                            name: name.clone(),
-                            active: false,
-                        });
+                    match terminate_process_group(pid, &mut wait_task).await {
+                        Ok(()) => {
+                            abort_reader(stdout_task);
+                            abort_reader(stderr_task);
+                            if attach_count > 0 {
+                                let _ = events.send(WorkerEvent::AttachChanged {
+                                    name: name.clone(),
+                                    active: false,
+                                }).await;
+                            }
+                            let _ = reply.send(Ok(()));
+                            return Ok(ProcessOutcome::Stopped);
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
                     }
-                    let _ = reply.send(Ok(()));
-                    return Ok(ProcessOutcome::Stopped);
                 }
                 Some(WorkerCommand::Restart { service, reply }) => {
-                    terminate_and_reap(pid, &mut wait_task).await;
-                    abort_reader(stdout_task);
-                    abort_reader(stderr_task);
-                    if attach_count > 0 {
-                        let _ = events.send(WorkerEvent::AttachChanged {
-                            name: name.clone(),
-                            active: false,
-                        });
+                    match terminate_process_group(pid, &mut wait_task).await {
+                        Ok(()) => {
+                            abort_reader(stdout_task);
+                            abort_reader(stderr_task);
+                            if attach_count > 0 {
+                                let _ = events.send(WorkerEvent::AttachChanged {
+                                    name: name.clone(),
+                                    active: false,
+                                }).await;
+                            }
+                            let _ = reply.send(Ok(()));
+                            return Ok(ProcessOutcome::Restart { service });
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
                     }
-                    let _ = reply.send(Ok(()));
-                    return Ok(ProcessOutcome::Restart { service });
                 }
                 Some(WorkerCommand::Attach { stream }) => {
                     if attach_count == 0 {
                         let _ = events.send(WorkerEvent::AttachChanged {
                             name: name.clone(),
                             active: true,
-                        });
+                        }).await;
                     }
                     attach_count += 1;
                     let (replay, output) = output_hub.subscribe_with_snapshot();
@@ -376,14 +403,14 @@ async fn run_pipe(
                     let _ = reply.send(Ok(()));
                 }
                 None => {
-                    terminate_and_reap(pid, &mut wait_task).await;
+                    terminate_process_group(pid, &mut wait_task).await?;
                     abort_reader(stdout_task);
                     abort_reader(stderr_task);
                     if attach_count > 0 {
                         let _ = events.send(WorkerEvent::AttachChanged {
                             name: name.clone(),
                             active: false,
-                        });
+                        }).await;
                     }
                     return Ok(ProcessOutcome::Stopped);
                 }
@@ -394,7 +421,7 @@ async fn run_pipe(
                     let _ = events.send(WorkerEvent::AttachChanged {
                         name: name.clone(),
                         active: false,
-                    });
+                    }).await;
                 }
             }
         }
@@ -404,7 +431,7 @@ async fn run_pipe(
 fn spawn_pipe_reader<R>(
     mut reader: R,
     name: String,
-    events: mpsc::UnboundedSender<WorkerEvent>,
+    events: mpsc::Sender<WorkerEvent>,
     output: Arc<OutputHub>,
 ) -> JoinHandle<()>
 where
@@ -418,10 +445,16 @@ where
                 Ok(length) => {
                     let bytes = buffer[..length].to_vec();
                     output.publish(bytes.clone());
-                    let _ = events.send(WorkerEvent::Output {
-                        name: name.clone(),
-                        bytes,
-                    });
+                    if events
+                        .send(WorkerEvent::Output {
+                            name: name.clone(),
+                            bytes,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
         }
@@ -430,11 +463,12 @@ where
 
 async fn run_pty(
     service: LoadedService,
-    events: mpsc::UnboundedSender<WorkerEvent>,
+    events: mpsc::Sender<WorkerEvent>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) -> Result<ProcessOutcome, String> {
     let spawned = spawn_pty_process(&service).await?;
     let pid = spawned.pid;
+    let pgid = spawned.pgid;
     let name = service.config.name.clone();
     let master = spawned.master;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -451,10 +485,15 @@ async fn run_pty(
                 Ok(length) => {
                     let bytes = buffer[..length].to_vec();
                     reader_output.publish(bytes.clone());
-                    let _ = reader_events.send(WorkerEvent::Output {
-                        name: reader_name.clone(),
-                        bytes,
-                    });
+                    if reader_events
+                        .blocking_send(WorkerEvent::Output {
+                            name: reader_name.clone(),
+                            bytes,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
         }
@@ -468,11 +507,13 @@ async fn run_pty(
             let _ = writer.flush();
         }
     });
-    let _ = events.send(WorkerEvent::Started {
-        name: name.clone(),
-        pid,
-        tty: true,
-    });
+    let _ = events
+        .send(WorkerEvent::Started {
+            name: name.clone(),
+            pid,
+            tty: true,
+        })
+        .await;
     let mut status = spawned.status;
     let mut attach_active = false;
     let (attach_done_tx, mut attach_done_rx) = mpsc::unbounded_channel::<()>();
@@ -486,7 +527,7 @@ async fn run_pty(
                     let _ = events.send(WorkerEvent::AttachChanged {
                         name: name.clone(),
                         active: false,
-                    });
+                    }).await;
                 }
                 let (code, success) = result
                     .map_err(|error| error.to_string())?
@@ -499,34 +540,46 @@ async fn run_pty(
                 let _ = events.send(WorkerEvent::AttachChanged {
                     name: name.clone(),
                     active: false,
-                });
+                }).await;
             }
             command = commands.recv() => match command {
                 Some(WorkerCommand::Stop { reply }) => {
-                    terminate_pty(pid, &mut status).await;
-                    reader_task.abort();
-                    writer_task.abort();
-                    if attach_active {
-                        let _ = events.send(WorkerEvent::AttachChanged {
-                            name: name.clone(),
-                            active: false,
-                        });
+                    match terminate_process_group(pgid, &mut status).await {
+                        Ok(()) => {
+                            reader_task.abort();
+                            writer_task.abort();
+                            if attach_active {
+                                let _ = events.send(WorkerEvent::AttachChanged {
+                                    name: name.clone(),
+                                    active: false,
+                                }).await;
+                            }
+                            let _ = reply.send(Ok(()));
+                            return Ok(ProcessOutcome::Stopped);
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
                     }
-                    let _ = reply.send(Ok(()));
-                    return Ok(ProcessOutcome::Stopped);
                 }
                 Some(WorkerCommand::Restart { service, reply }) => {
-                    terminate_pty(pid, &mut status).await;
-                    reader_task.abort();
-                    writer_task.abort();
-                    if attach_active {
-                        let _ = events.send(WorkerEvent::AttachChanged {
-                            name: name.clone(),
-                            active: false,
-                        });
+                    match terminate_process_group(pgid, &mut status).await {
+                        Ok(()) => {
+                            reader_task.abort();
+                            writer_task.abort();
+                            if attach_active {
+                                let _ = events.send(WorkerEvent::AttachChanged {
+                                    name: name.clone(),
+                                    active: false,
+                                }).await;
+                            }
+                            let _ = reply.send(Ok(()));
+                            return Ok(ProcessOutcome::Restart { service });
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
                     }
-                    let _ = reply.send(Ok(()));
-                    return Ok(ProcessOutcome::Restart { service });
                 }
                 Some(WorkerCommand::Attach { stream }) => {
                     if attach_active {
@@ -536,7 +589,7 @@ async fn run_pty(
                         let _ = events.send(WorkerEvent::AttachChanged {
                             name: name.clone(),
                             active: true,
-                        });
+                        }).await;
                         let input = input_tx.clone();
                         let (replay, output) = output_hub.subscribe_with_snapshot();
                         let done = attach_done_tx.clone();
@@ -559,14 +612,14 @@ async fn run_pty(
                     let _ = reply.send(result);
                 }
                 None => {
-                    terminate_pty(pid, &mut status).await;
+                    terminate_process_group(pgid, &mut status).await?;
                     reader_task.abort();
                     writer_task.abort();
                     if attach_active {
                         let _ = events.send(WorkerEvent::AttachChanged {
                             name: name.clone(),
                             active: false,
-                        });
+                        }).await;
                     }
                     return Ok(ProcessOutcome::Stopped);
                 }
@@ -577,6 +630,7 @@ async fn run_pty(
 
 struct PtySpawn {
     pid: u32,
+    pgid: u32,
     master: Box<dyn MasterPty + Send>,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
@@ -609,6 +663,11 @@ async fn spawn_pty_process(service: &LoadedService) -> Result<PtySpawn, String> 
         let pid = child
             .process_id()
             .ok_or_else(|| "PTY child did not expose a pid".to_owned())?;
+        let pgid = pair
+            .master
+            .process_group_leader()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "PTY child did not expose a process group".to_owned())?;
         let reader = pair
             .master
             .try_clone_reader()
@@ -627,6 +686,7 @@ async fn spawn_pty_process(service: &LoadedService) -> Result<PtySpawn, String> 
         });
         Ok(PtySpawn {
             pid,
+            pgid,
             master: pair.master,
             reader,
             writer,
@@ -700,27 +760,72 @@ async fn relay_readonly_attach(
     }
 }
 
-async fn terminate_and_reap(
-    pid: u32,
-    wait_task: &mut JoinHandle<std::io::Result<std::process::ExitStatus>>,
-) {
-    signal_pid(pid, Signal::SIGTERM);
-    if timeout(TERMINATION_TIMEOUT, &mut *wait_task).await.is_err() {
-        signal_pid(pid, Signal::SIGKILL);
-        let _ = timeout(TERMINATION_TIMEOUT, &mut *wait_task).await;
+async fn terminate_process_group<W>(pgid: u32, wait: &mut W) -> Result<(), String>
+where
+    W: TerminationWait,
+{
+    signal_process_group(pgid, Signal::SIGTERM)?;
+    if wait.wait_for_exit(TERMINATION_TIMEOUT).await? {
+        return Ok(());
+    }
+
+    signal_process_group(pgid, Signal::SIGKILL)?;
+    if wait.wait_for_exit(TERMINATION_TIMEOUT).await? {
+        return Ok(());
+    }
+    Err(format!("process group {pgid} did not exit after SIGKILL"))
+}
+
+trait TerminationWait {
+    fn wait_for_exit(
+        &mut self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>;
+}
+
+impl TerminationWait for JoinHandle<std::io::Result<std::process::ExitStatus>> {
+    fn wait_for_exit(
+        &mut self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            match timeout(duration, &mut *self).await {
+                Ok(result) => {
+                    let result =
+                        result.map_err(|error| format!("wait for service process: {error}"))?;
+                    result.map_err(|error| format!("wait for service process: {error}"))?;
+                    Ok(true)
+                }
+                Err(_) => Ok(false),
+            }
+        })
     }
 }
 
-async fn terminate_pty(pid: u32, status: &mut oneshot::Receiver<Result<u32, String>>) {
-    signal_pid(pid, Signal::SIGTERM);
-    if timeout(TERMINATION_TIMEOUT, &mut *status).await.is_err() {
-        signal_pid(pid, Signal::SIGKILL);
-        let _ = timeout(TERMINATION_TIMEOUT, &mut *status).await;
+impl TerminationWait for oneshot::Receiver<Result<u32, String>> {
+    fn wait_for_exit(
+        &mut self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            match timeout(duration, &mut *self).await {
+                Ok(Ok(Ok(_))) => Ok(true),
+                Ok(Ok(Err(error))) => Err(format!("wait for PTY process: {error}")),
+                Ok(Err(error)) => Err(format!("wait for PTY process: {error}")),
+                Err(_) => Ok(false),
+            }
+        })
     }
 }
 
-fn signal_pid(pid: u32, signal: Signal) {
-    let _ = kill(Pid::from_raw(pid as i32), signal);
+fn signal_process_group(pgid: u32, signal: Signal) -> Result<(), String> {
+    let pgid = i32::try_from(pgid).map_err(|_| format!("process group id is too large: {pgid}"))?;
+    match kill(Pid::from_raw(-pgid), signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(format!("send {signal} to process group {pgid}: {error}")),
+    }
 }
 
 fn abort_reader(task: Option<JoinHandle<()>>) {

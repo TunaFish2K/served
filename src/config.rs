@@ -9,6 +9,8 @@ use thiserror::Error;
 
 pub const CONFIG_FILE: &str = ".served.json";
 pub const ENV_FILE: &str = ".env.served";
+pub const DEFAULT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_LOG_MAX_FILES: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -24,6 +26,10 @@ pub enum ConfigError {
     EmptyCommand,
     #[error("invalid environment key {0:?}")]
     InvalidEnvKey(String),
+    #[error("log_max_bytes must be greater than zero")]
+    InvalidLogMaxBytes,
+    #[error("log_max_files must be greater than zero")]
+    InvalidLogMaxFiles,
     #[error("I/O error while reading service configuration: {0}")]
     Io(#[from] std::io::Error),
     #[error("invalid JSON5 in {CONFIG_FILE}: {0}")]
@@ -66,6 +72,10 @@ pub struct ServiceConfig {
     pub restart: RestartPolicy,
     #[serde(default)]
     pub persist_logs: bool,
+    #[serde(default = "default_log_max_bytes")]
+    pub log_max_bytes: u64,
+    #[serde(default = "default_log_max_files")]
+    pub log_max_files: u32,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
@@ -76,6 +86,14 @@ fn default_tty() -> bool {
 
 fn default_sync_rows_cols() -> bool {
     true
+}
+
+fn default_log_max_bytes() -> u64 {
+    DEFAULT_LOG_MAX_BYTES
+}
+
+fn default_log_max_files() -> u32 {
+    DEFAULT_LOG_MAX_FILES
 }
 
 impl ServiceConfig {
@@ -92,6 +110,12 @@ impl ServiceConfig {
         }
         if self.command.trim().is_empty() {
             return Err(ConfigError::EmptyCommand);
+        }
+        if self.log_max_bytes == 0 {
+            return Err(ConfigError::InvalidLogMaxBytes);
+        }
+        if self.log_max_files == 0 {
+            return Err(ConfigError::InvalidLogMaxFiles);
         }
         for key in self.env.keys() {
             validate_env_key(key)?;
@@ -121,6 +145,8 @@ impl ServiceConfig {
             sync_rows_cols: true,
             restart: RestartPolicy::Never,
             persist_logs: false,
+            log_max_bytes: DEFAULT_LOG_MAX_BYTES,
+            log_max_files: DEFAULT_LOG_MAX_FILES,
             env: BTreeMap::new(),
         }
     }
@@ -225,6 +251,14 @@ fn template_source(directory: &Path) -> String {
   // When false, the manager keeps bounded in-memory history only.
   persist_logs: {persist_logs},
 
+  // Maximum bytes in one persistent log segment. When this limit is reached,
+  // served rotates the segment and keeps writing to latest.log.
+  log_max_bytes: {log_max_bytes},
+
+  // Number of archived persistent segments to keep. latest.log is kept in
+  // addition to these archives. Older segments are removed first.
+  log_max_files: {log_max_files},
+
   // Literal environment values layered over the manager environment. These
   // values are not shell-expanded. A legacy .env.served file is read first
   // when present, so keys here take precedence over that compatibility source.
@@ -243,6 +277,8 @@ fn template_source(directory: &Path) -> String {
             RestartPolicy::Always => "always",
         },
         persist_logs = config.persist_logs,
+        log_max_bytes = config.log_max_bytes,
+        log_max_files = config.log_max_files,
     )
 }
 
@@ -271,6 +307,8 @@ mod tests {
         assert!(service.config.tty);
         assert!(service.config.sync_rows_cols);
         assert!(!service.config.persist_logs);
+        assert_eq!(service.config.log_max_bytes, DEFAULT_LOG_MAX_BYTES);
+        assert_eq!(service.config.log_max_files, DEFAULT_LOG_MAX_FILES);
         assert_eq!(service.environment.get("PORT"), Some(&"8080".to_owned()));
         assert_eq!(
             service.environment.get("QUOTED"),
@@ -341,6 +379,29 @@ mod tests {
     }
 
     #[test]
+    fn log_limits_round_trip_and_reject_zero() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            r#"{"name":"api","command":"echo ok","log_max_bytes":128,"log_max_files":4}"#,
+        )
+        .expect("config");
+        let service = load_service(directory.path(), &BTreeMap::new()).expect("load");
+        assert_eq!(service.config.log_max_bytes, 128);
+        assert_eq!(service.config.log_max_files, 4);
+
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            r#"{"name":"api","command":"echo ok","log_max_bytes":0}"#,
+        )
+        .expect("invalid config");
+        assert!(matches!(
+            load_service(directory.path(), &BTreeMap::new()),
+            Err(ConfigError::InvalidLogMaxBytes)
+        ));
+    }
+
+    #[test]
     fn sync_rows_cols_can_be_disabled_with_camel_case_json_key() {
         let directory = tempdir().expect("tempdir");
         fs::write(
@@ -386,6 +447,8 @@ mod tests {
         let source = fs::read_to_string(directory.path().join(CONFIG_FILE)).expect("template");
         assert!(source.contains("// Globally unique service name"));
         assert!(source.contains("env: {"));
+        assert!(source.contains("log_max_bytes:"));
+        assert!(source.contains("log_max_files:"));
         assert!(directory.path().join(CONFIG_FILE).is_file());
         assert!(!directory.path().join(ENV_FILE).exists());
         assert!(!directory.path().join(".env").exists());

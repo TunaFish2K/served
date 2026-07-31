@@ -21,7 +21,7 @@ use crate::{
         LaunchSpec, RUNNER_PROTOCOL_VERSION, RunnerMetadata, RunnerRequest, RunnerResponse,
         RunnerStatus,
     },
-    worker::{WorkerCommand, WorkerEvent, spawn_service},
+    worker::{WORKER_EVENT_CAPACITY, WorkerCommand, WorkerEvent, spawn_service},
 };
 
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -91,11 +91,11 @@ struct RunnerState {
     attach_active: bool,
     attach_token: Option<String>,
     failures: FailureTracker,
-    events: mpsc::UnboundedSender<WorkerEvent>,
+    events: mpsc::Sender<WorkerEvent>,
 }
 
 impl RunnerState {
-    fn new(name: String, socket_path: PathBuf, events: mpsc::UnboundedSender<WorkerEvent>) -> Self {
+    fn new(name: String, socket_path: PathBuf, events: mpsc::Sender<WorkerEvent>) -> Self {
         let metadata_path = socket_path.with_file_name("runner.json");
         Self {
             name,
@@ -185,7 +185,11 @@ impl RunnerState {
             return Ok(());
         }
         self.spec = Some(spec.clone());
-        self.logs = Some(LogStore::new(log_directory));
+        self.logs = Some(LogStore::with_limits(
+            log_directory,
+            spec.config.log_max_bytes,
+            spec.config.log_max_files,
+        ));
         self.spawn(spec)?;
         Ok(())
     }
@@ -210,8 +214,14 @@ impl RunnerState {
         }
 
         self.spec = Some(spec.clone());
-        if self.logs.is_none() {
-            self.logs = Some(LogStore::new(log_directory));
+        if let Some(logs) = self.logs.as_mut() {
+            logs.set_limits(spec.config.log_max_bytes, spec.config.log_max_files);
+        } else {
+            self.logs = Some(LogStore::with_limits(
+                log_directory,
+                spec.config.log_max_bytes,
+                spec.config.log_max_files,
+            ));
         }
         if self.worker.is_none() {
             self.spawn(spec)?;
@@ -482,7 +492,7 @@ pub async fn run(name: String, socket_path: PathBuf) -> Result<()> {
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
         .context("set runner socket permissions")?;
 
-    let (events, mut event_receiver) = mpsc::unbounded_channel();
+    let (events, mut event_receiver) = mpsc::channel(WORKER_EVENT_CAPACITY);
     let (commands, mut command_receiver) = mpsc::channel(64);
     let mut state = RunnerState::new(name.clone(), socket_path.clone(), events);
     info!(service = %name, "served runner is ready");

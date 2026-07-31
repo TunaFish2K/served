@@ -8,7 +8,10 @@ use std::{
 
 use chrono::Local;
 
-use crate::protocol::HistoryRecord;
+use crate::{
+    config::{DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES},
+    protocol::HistoryRecord,
+};
 
 pub const MEMORY_LOG_LIMIT: usize = 64 * 1024;
 pub const MAX_ARCHIVED_LOGS: usize = 100;
@@ -19,6 +22,8 @@ const ATTACH_CACHE_MAX_BYTES: usize = 16 * 1024;
 
 const LATEST_FILE: &str = "latest.log";
 const STARTED_FILE: &str = ".latest.started";
+const LATEST_LINES_FILE: &str = ".latest.lines";
+const LINE_COUNT_SUFFIX: &str = ".lines";
 
 #[derive(Debug)]
 struct MemoryLog {
@@ -29,11 +34,15 @@ struct MemoryLog {
 #[derive(Debug)]
 pub struct LogStore {
     directory: PathBuf,
+    max_bytes: u64,
+    max_files: usize,
     current: VecDeque<u8>,
     current_started: Option<String>,
     current_persisted: bool,
     disk_file: Option<File>,
     disk_bytes: u64,
+    current_line_count: u64,
+    line_counter: LineCounter,
     memory_archives: VecDeque<MemoryLog>,
     line_counts: HashMap<String, u64>,
 }
@@ -49,16 +58,29 @@ pub struct LogChunk {
 
 impl LogStore {
     pub fn new(directory: PathBuf) -> Self {
+        Self::with_limits(directory, DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES)
+    }
+
+    pub fn with_limits(directory: PathBuf, max_bytes: u64, max_files: u32) -> Self {
         Self {
             directory,
+            max_bytes: max_bytes.max(1),
+            max_files: max_files.max(1) as usize,
             current: VecDeque::with_capacity(MEMORY_LOG_LIMIT.min(8192)),
             current_started: None,
             current_persisted: false,
             disk_file: None,
             disk_bytes: 0,
+            current_line_count: 0,
+            line_counter: LineCounter::default(),
             memory_archives: VecDeque::new(),
             line_counts: HashMap::new(),
         }
+    }
+
+    pub fn set_limits(&mut self, max_bytes: u64, max_files: u32) {
+        self.max_bytes = max_bytes.max(1);
+        self.max_files = max_files.max(1) as usize;
     }
 
     pub fn begin_run(&mut self, persist: bool) -> Vec<String> {
@@ -67,6 +89,8 @@ impl LogStore {
         self.close_disk_file();
         self.current.clear();
         self.disk_bytes = 0;
+        self.current_line_count = 0;
+        self.line_counter = LineCounter::default();
         self.current_persisted = false;
         self.line_counts.remove("latest");
         self.line_counts.remove(LATEST_FILE);
@@ -103,13 +127,34 @@ impl LogStore {
             self.current.pop_front();
         }
 
-        let file = self.disk_file.as_mut()?;
-        if let Err(error) = file.write_all(bytes) {
-            self.close_disk_file();
-            self.current_persisted = false;
-            return Some(format!("persistent log write failed: {error}"));
+        self.disk_file.as_ref()?;
+
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let available = self.max_bytes.saturating_sub(self.disk_bytes);
+            if available == 0 {
+                if let Err(error) = self.rotate_active_segment() {
+                    return self.disable_persistence(format!("rotate persistent log: {error}"));
+                }
+                continue;
+            }
+
+            let length = available.min((bytes.len() - offset) as u64) as usize;
+            let write_result = self
+                .disk_file
+                .as_mut()
+                .expect("persistent log file exists while appending")
+                .write_all(&bytes[offset..offset + length]);
+            if let Err(error) = write_result {
+                return self.disable_persistence(format!("persistent log write failed: {error}"));
+            }
+            self.disk_bytes = self.disk_bytes.saturating_add(length as u64);
+            if self.current_persisted {
+                self.line_counter.feed(&bytes[offset..offset + length]);
+                self.current_line_count = self.line_counter.total_lines();
+            }
+            offset += length;
         }
-        self.disk_bytes = self.disk_bytes.saturating_add(bytes.len() as u64);
         None
     }
 
@@ -204,7 +249,12 @@ impl LogStore {
                 let total_lines = self.cached_line_count("latest", &raw);
                 return memory_chunk(&raw, offset, limit, total_lines);
             }
-            return self.read_disk_chunk(LATEST_FILE, offset, limit);
+            return self.read_disk_chunk_with_lines(
+                LATEST_FILE,
+                offset,
+                limit,
+                Some(self.current_line_count),
+            );
         }
 
         if self.memory_archives.iter().any(|archive| archive.id == id) {
@@ -249,7 +299,7 @@ impl LogStore {
         self.memory_archives.truncate(MAX_ARCHIVED_LOGS);
     }
 
-    fn rotate_latest(&self, fallback_started: &str) -> io::Result<()> {
+    fn rotate_latest(&mut self, fallback_started: &str) -> io::Result<()> {
         let latest = self.directory.join(LATEST_FILE);
         let sidecar = self.directory.join(STARTED_FILE);
         let metadata = match fs::symlink_metadata(&latest) {
@@ -272,8 +322,13 @@ impl LogStore {
             .map(|value| value.trim().to_owned())
             .filter(|value| valid_archive_stem(value))
             .unwrap_or_else(|| fallback_started.to_owned());
-        let archive = self.directory.join(self.unique_archive_id(&started));
+        let id = self.unique_archive_id(&started);
+        let archive = self.directory.join(&id);
         fs::rename(&latest, archive)?;
+        let latest_lines = self.directory.join(LATEST_LINES_FILE);
+        if latest_lines.exists() {
+            fs::rename(latest_lines, self.line_count_path(&id))?;
+        }
         remove_if_exists(&sidecar)?;
         Ok(())
     }
@@ -282,6 +337,7 @@ impl LogStore {
         fs::create_dir_all(&self.directory)?;
         fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
         let latest = self.directory.join(LATEST_FILE);
+        remove_if_exists(&self.directory.join(LATEST_LINES_FILE))?;
         let mut options = OpenOptions::new();
         options.write(true).create_new(true).mode(0o600);
         let file = options.open(&latest)?;
@@ -295,32 +351,58 @@ impl LogStore {
     }
 
     fn prune_disk_archives(&self) -> io::Result<()> {
-        let mut archives = fs::read_dir(&self.directory)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter_map(|entry| {
-                        let path = entry.path();
-                        let name = path.file_name()?.to_str()?.to_owned();
-                        let file_type = entry.file_type().ok()?;
-                        if file_type.is_file() && valid_archive_id(&name) {
-                            Some(name)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        archives.sort();
-        while archives.len() > MAX_ARCHIVED_LOGS {
-            let oldest = archives.remove(0);
-            fs::remove_file(self.directory.join(oldest))?;
+        let mut archives = match fs::read_dir(&self.directory) {
+            Ok(entries) => entries
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let name = path.file_name()?.to_str()?.to_owned();
+                    let file_type = entry.file_type().ok()?;
+                    if file_type.is_file() && valid_archive_id(&name) {
+                        Some((name, entry.metadata().ok()?.len()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+
+        let mut first_error = None;
+        archives.retain(|(name, bytes)| {
+            if *bytes <= self.max_bytes {
+                return true;
+            }
+            if let Err(error) = self.remove_archive(name) {
+                first_error.get_or_insert(error);
+                return true;
+            }
+            false
+        });
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        archives.sort_by(|left, right| left.0.cmp(&right.0));
+        while archives.len() > self.max_files {
+            let oldest = archives.remove(0).0;
+            self.remove_archive(&oldest)?;
         }
         Ok(())
     }
 
     fn read_disk_chunk(&mut self, id: &str, offset: u64, limit: usize) -> io::Result<LogChunk> {
+        self.read_disk_chunk_with_lines(id, offset, limit, None)
+    }
+
+    fn read_disk_chunk_with_lines(
+        &mut self,
+        id: &str,
+        offset: u64,
+        limit: usize,
+        known_lines: Option<u64>,
+    ) -> io::Result<LogChunk> {
         if id != LATEST_FILE && !valid_archive_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -328,7 +410,10 @@ impl LogStore {
             ));
         }
         let path = self.directory.join(id);
-        let total_lines = self.disk_line_count(id)?;
+        let total_lines = match known_lines {
+            Some(lines) => lines,
+            None => self.disk_line_count(id)?,
+        };
         let mut file = File::open(&path)?;
         let total = file.metadata()?.len();
         if offset >= total {
@@ -359,8 +444,18 @@ impl LogStore {
         if let Some(count) = self.line_counts.get(id) {
             return Ok(*count);
         }
-        let raw = fs::read(self.directory.join(id))?;
-        let count = logical_line_count(&raw);
+        let sidecar = self.line_count_path(id);
+        let count = match fs::read_to_string(&sidecar)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+        {
+            Some(count) => count,
+            None => {
+                let count = count_file_lines(&self.directory.join(id))?;
+                let _ = write_line_count(&sidecar, count);
+                count
+            }
+        };
         self.line_counts.insert(id.to_owned(), count);
         Ok(count)
     }
@@ -398,6 +493,40 @@ impl LogStore {
             || self.memory_archives.iter().any(|archive| archive.id == id)
     }
 
+    fn line_count_path(&self, id: &str) -> PathBuf {
+        if id == LATEST_FILE {
+            self.directory.join(LATEST_LINES_FILE)
+        } else {
+            self.directory.join(format!("{id}{LINE_COUNT_SUFFIX}"))
+        }
+    }
+
+    fn rotate_active_segment(&mut self) -> io::Result<()> {
+        let started = self.current_started.clone().unwrap_or_else(timestamp_label);
+        let id = self.unique_archive_id(&started);
+        let latest = self.directory.join(LATEST_FILE);
+        self.close_disk_file();
+        fs::rename(&latest, self.directory.join(&id))?;
+        write_line_count(&self.line_count_path(&id), self.current_line_count)?;
+        remove_if_exists(&self.directory.join(STARTED_FILE))?;
+        self.line_counter = LineCounter::default();
+        self.current_line_count = 0;
+        self.disk_bytes = 0;
+        self.disk_file = Some(self.open_persistent_run(&started)?);
+        self.prune_disk_archives()
+    }
+
+    fn remove_archive(&self, id: &str) -> io::Result<()> {
+        remove_if_exists(&self.directory.join(id))?;
+        remove_if_exists(&self.line_count_path(id))
+    }
+
+    fn disable_persistence(&mut self, message: String) -> Option<String> {
+        self.close_disk_file();
+        self.current_persisted = false;
+        Some(message)
+    }
+
     fn close_disk_file(&mut self) {
         self.disk_file = None;
     }
@@ -431,7 +560,118 @@ fn memory_chunk(bytes: &[u8], offset: u64, limit: usize, total_lines: u64) -> io
 }
 
 fn logical_line_count(bytes: &[u8]) -> u64 {
-    sanitize_log(bytes).lines().count() as u64
+    let mut counter = LineCounter::default();
+    counter.feed(bytes);
+    counter.total_lines()
+}
+
+fn count_file_lines(path: &Path) -> io::Result<u64> {
+    let mut file = File::open(path)?;
+    let mut counter = LineCounter::default();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            return Ok(counter.total_lines());
+        }
+        counter.feed(&buffer[..length]);
+    }
+}
+
+fn write_line_count(path: &Path, count: u64) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = options.open(path)?;
+    writeln!(file, "{count}")
+}
+
+#[derive(Debug, Default)]
+struct LineCounter {
+    lines: u64,
+    has_content: bool,
+    pending_cr: bool,
+    escape: EscapeState,
+}
+
+#[derive(Debug, Default)]
+enum EscapeState {
+    #[default]
+    None,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+impl LineCounter {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.feed_byte(byte);
+        }
+    }
+
+    fn feed_byte(&mut self, byte: u8) {
+        match self.escape {
+            EscapeState::None => match byte {
+                0x1b => self.escape = EscapeState::Escape,
+                0x9b => self.escape = EscapeState::Csi,
+                _ => self.feed_clean_byte(byte),
+            },
+            EscapeState::Escape => {
+                self.escape = match byte {
+                    b'[' => EscapeState::Csi,
+                    b']' => EscapeState::Osc,
+                    _ => EscapeState::None,
+                };
+            }
+            EscapeState::Csi => {
+                if (0x40..=0x7e).contains(&byte) {
+                    self.escape = EscapeState::None;
+                }
+            }
+            EscapeState::Osc => match byte {
+                0x07 => self.escape = EscapeState::None,
+                0x1b => self.escape = EscapeState::OscEscape,
+                _ => {}
+            },
+            EscapeState::OscEscape => {
+                self.escape = if byte == b'\\' {
+                    EscapeState::None
+                } else {
+                    EscapeState::Osc
+                };
+            }
+        }
+    }
+
+    fn feed_clean_byte(&mut self, byte: u8) {
+        if self.pending_cr {
+            self.pending_cr = false;
+            if byte == b'\n' {
+                return;
+            }
+        }
+
+        match byte {
+            b'\r' => {
+                self.lines = self.lines.saturating_add(1);
+                self.pending_cr = true;
+                self.has_content = false;
+            }
+            b'\n' => {
+                self.lines = self.lines.saturating_add(1);
+                self.has_content = false;
+            }
+            b'\t' | 0x20..=0x7e | 0x80..=0xff => {
+                self.has_content = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn total_lines(&self) -> u64 {
+        self.lines.saturating_add(u64::from(self.has_content))
+    }
 }
 
 fn remove_if_exists(path: &Path) -> io::Result<()> {
@@ -559,6 +799,11 @@ mod tests {
     }
 
     #[test]
+    fn logical_line_count_includes_utf8_content() {
+        assert_eq!(logical_line_count("中文\n下一行".as_bytes()), 2);
+    }
+
+    #[test]
     fn attach_snapshot_joins_multiple_output_chunks_and_keeps_recent_lines() {
         let directory = tempdir().expect("tempdir");
         let mut store = LogStore::new(directory.path().to_path_buf());
@@ -664,6 +909,43 @@ mod tests {
     }
 
     #[test]
+    fn persistent_logs_rotate_by_size_and_keep_line_metadata() {
+        let directory = tempdir().expect("tempdir");
+        let mut store = LogStore::with_limits(directory.path().to_path_buf(), 8, 2);
+        assert!(store.begin_run(true).is_empty());
+        store.append(b"one\ntwo\n");
+        store.append(b"three\n");
+
+        let records = store.records();
+        let archive = records
+            .iter()
+            .find(|record| !record.current && record.persisted)
+            .expect("size archive");
+        assert_eq!(archive.bytes, 8);
+        assert!(
+            directory
+                .path()
+                .join(format!("{}.lines", archive.id))
+                .is_file()
+        );
+        let chunk = store
+            .read_chunk(&archive.id, 0, DEFAULT_CHUNK_LIMIT)
+            .expect("archive chunk");
+        assert_eq!(chunk.total_lines, 2);
+        assert_eq!(
+            fs::read_to_string(directory.path().join(LATEST_FILE)).expect("latest"),
+            "three\n"
+        );
+        assert_eq!(
+            store
+                .read_chunk("latest", 0, DEFAULT_CHUNK_LIMIT)
+                .expect("latest chunk")
+                .total_lines,
+            1
+        );
+    }
+
+    #[test]
     fn memory_runs_are_bounded_and_archived() {
         let directory = tempdir().expect("tempdir");
         let mut store = LogStore::new(directory.path().to_path_buf());
@@ -700,10 +982,10 @@ mod tests {
     }
 
     #[test]
-    fn persistent_archive_retention_keeps_one_hundred_files() {
+    fn persistent_archive_retention_applies_configured_limits() {
         let directory = tempdir().expect("tempdir");
         fs::create_dir_all(directory.path()).expect("log directory");
-        for index in 0..=MAX_ARCHIVED_LOGS {
+        for index in 0..=2 {
             fs::write(
                 directory
                     .path()
@@ -712,13 +994,16 @@ mod tests {
             )
             .expect("archive");
         }
-        let mut store = LogStore::new(directory.path().to_path_buf());
+        fs::write(directory.path().join("20240101-000099.log"), "too-large")
+            .expect("large archive");
+        let mut store = LogStore::with_limits(directory.path().to_path_buf(), 8, 2);
         store.begin_run(false);
         let count = fs::read_dir(directory.path())
             .expect("log directory")
             .flatten()
             .filter(|entry| valid_archive_id(&entry.file_name().to_string_lossy()))
             .count();
-        assert_eq!(count, MAX_ARCHIVED_LOGS);
+        assert_eq!(count, 2);
+        assert!(!directory.path().join("20240101-000099.log").exists());
     }
 }

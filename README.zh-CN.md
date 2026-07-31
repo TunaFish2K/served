@@ -148,10 +148,11 @@ runner 持有；manager 重启不会丢失 runner 内的历史。持久化日志
 $HOME/.local/state/served/logs/<name>/
 ```
 
-当前运行写入 `latest.log`。下一次启动时按旧运行的开始时间归档为
-`YYYYMMDD-HHMMSS.log`；同一秒冲突时追加 `-1`、`-2`。`.latest.started` 保存当前记录的
-开始时间。每个服务最多保留 100 个归档和一个 latest，日志目录权限为 `0700`，日志文件
-权限为 `0600`。
+当前运行写入 `latest.log`。达到 `log_max_bytes` 后，served 按运行开始时间归档当前段为
+`YYYYMMDD-HHMMSS.log`，并继续写入新的 `latest.log`；同一秒冲突时追加 `-1`、`-2`。
+`.latest.started` 保存当前记录的
+开始时间。每个服务保留 `log_max_files` 个归档和一个 latest。默认值是每段 `10 MiB`、
+保留 `3` 个归档。日志目录权限为 `0700`，日志文件权限为 `0600`。
 
 `persist_logs: false` 时不会新增磁盘日志。runner 运行期间保留当前记录和最近 100 条
 内存归档；manager 重启后这些记录仍可查看，runner 或服务真正重启后才开始新的当前记录。
@@ -180,6 +181,8 @@ JSON5 模板，再用外部编辑器打开。已有文件不会被重写或格�
   syncRowsCols: true,
   restart: "never",
   persist_logs: false,
+  log_max_bytes: 10485760,
+  log_max_files: 3,
   env: {
     // PORT: "8080",
   },
@@ -199,6 +202,10 @@ JSON5 支持注释、单引号或双引号、不加引号的字段名和尾逗�
 - `restart`：可选，默认 `never`。可选值为 `never`、`on-failure`、`always`。
 - `persist_logs`：可选，默认 `false`。设置为 `true` 后，将每次运行的完整输出保存到
   `$HOME/.local/state/served/logs/<name>/`。配置修改在下次启动或重启时生效。
+- `log_max_bytes`：可选，默认 `10485760` 字节（`10 MiB`）。持久化日志段达到这个大小后，
+  served 会归档当前段，并继续写入新的 `latest.log`。
+- `log_max_files`：可选，默认 `3`。表示保留的持久化归档段数量。`latest.log` 不计入这个数量。
+  服务启动或日志轮转时会删除过旧或超过单文件上限的归档。
 - `env`：可选对象，值都是字面量字符串，不会做 shell 或变量展开。它的优先级高于
   manager 环境和旧 `.env.served` 中的同名键。
 
@@ -224,13 +231,13 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建
-Linux amd64/glibc 产物。例如版本 `0.1.8` 使用 tag `v0.1.8`，Release 会包含：
+Linux amd64/glibc 产物。例如版本 `0.2.0` 使用 tag `v0.2.0`，Release 会包含：
 
 ```text
-served-linux-amd64-v0.1.8-binary
-served-linux-amd64-v0.1.8-binary.sha256
-served-linux-amd64-v0.1.8-full.tar.gz
-served-linux-amd64-v0.1.8-full.tar.gz.sha256
+served-linux-amd64-v0.2.0-binary
+served-linux-amd64-v0.2.0-binary.sha256
+served-linux-amd64-v0.2.0-full.tar.gz
+served-linux-amd64-v0.2.0-full.tar.gz.sha256
 ```
 
 `binary` 只包含可执行文件；`full.tar.gz` 是完整安装包，包含 `served`、
@@ -254,8 +261,9 @@ SHA-256 sidecar 文件，文件名是在原文件名后追加 `.sha256`。
   因此 `/etc/profile` 等环境会在 manager 启动时被读取。manager 运行期间仍使用启动时的
   环境快照。
 - system service 的工作目录使用安装用户的 home，不依赖 system manager 的 `%h` 展开。
-- 停止服务先发送 `SIGTERM`，超时后发送 `SIGKILL`。manager 异常退出不会执行这条清理
-  路径；runner 只在明确 shutdown、disable 或 restart 时终结受管 shell。
+- 每个 pipe 或 PTY 服务都有独立进程组。runner 先向整个进程组发送 `SIGTERM`，超时后发送
+  `SIGKILL`，并确认服务 leader 已被回收。停止或重启失败会返回错误。manager 异常退出不会
+  执行这条清理路径。
 - `nohup`、后台化、daemonize 等脱离受管 shell 的子进程不在清理保证内。
 - V1 不提供 root 模式、容器隔离、namespace、资源限制、依赖图或健康检查。
 

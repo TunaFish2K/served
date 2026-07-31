@@ -563,6 +563,195 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
 }
 
 #[tokio::test]
+async fn process_group_stops_pipe_descendants() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("pipe-group-service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  "name": "pipe-group",
+  "command": "sleep 60 & child=$!; printf '%s' \"$child\" > child.pid; wait \"$child\"",
+  "tty": false,
+  "restart": "never"
+}
+"#,
+    )
+    .expect("config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable");
+    wait_for_state(&paths, "pipe-group", ServiceState::Running).await;
+
+    let child_path = service_dir.join("child.pid");
+    wait_for_path(&child_path).await;
+    let child_pid: u32 = fs::read_to_string(&child_path)
+        .expect("read child pid")
+        .parse()
+        .expect("parse child pid");
+    let proc_path = Path::new("/proc").join(child_pid.to_string());
+    wait_for_path(&proc_path).await;
+
+    client::expect_ok(
+        &paths,
+        Request::Disable {
+            target: Target::Name("pipe-group".to_owned()),
+        },
+    )
+    .await
+    .expect("disable");
+    wait_for_process_exit(child_pid).await;
+}
+
+#[tokio::test]
+async fn process_group_stops_pty_descendants() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("pty-group-service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  "name": "pty-group",
+  "command": "sleep 60 & child=$!; printf '%s' \"$child\" > child.pid; wait \"$child\"",
+  "tty": true,
+  "restart": "never"
+}
+"#,
+    )
+    .expect("config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable");
+    wait_for_state(&paths, "pty-group", ServiceState::Running).await;
+
+    let child_path = service_dir.join("child.pid");
+    wait_for_path(&child_path).await;
+    let child_pid: u32 = fs::read_to_string(&child_path)
+        .expect("read child pid")
+        .parse()
+        .expect("parse child pid");
+    let proc_path = Path::new("/proc").join(child_pid.to_string());
+    wait_for_path(&proc_path).await;
+
+    client::expect_ok(
+        &paths,
+        Request::Disable {
+            target: Target::Name("pty-group".to_owned()),
+        },
+    )
+    .await
+    .expect("disable");
+    wait_for_process_exit(child_pid).await;
+}
+
+#[tokio::test]
+async fn bounded_output_keeps_disable_responsive() {
+    let root = tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("flood-service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  "name": "output-flood",
+  "command": "while true; do printf 'served-output-flood-0123456789\\n'; done",
+  "tty": false,
+  "restart": "never"
+}
+"#,
+    )
+    .expect("config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable");
+    wait_for_state(&paths, "output-flood", ServiceState::Running).await;
+
+    timeout(
+        Duration::from_secs(3),
+        client::expect_ok(
+            &paths,
+            Request::Disable {
+                target: Target::Name("output-flood".to_owned()),
+            },
+        ),
+    )
+    .await
+    .expect("disable must not block behind output backpressure")
+    .expect("disable");
+}
+
+#[tokio::test]
 async fn daemon_uses_fixed_home_paths_and_rejects_duplicate_manager() {
     let root = tempdir().expect("tempdir");
     let home = root.path().join("home");

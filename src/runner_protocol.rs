@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 
 use crate::{
-    config::{LoadedService, ServiceConfig},
+    config::{
+        DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES, LoadedService, RestartPolicy, ServiceConfig,
+    },
     protocol::{Frame, HistoryRecord, ServiceState, framed, receive_json, send_json},
 };
 
@@ -13,11 +15,109 @@ use crate::{
 /// additive so an upgraded manager can continue to adopt an older runner.
 pub const RUNNER_PROTOCOL_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub directory: String,
     pub config: ServiceConfig,
     pub environment: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WireLaunchSpec {
+    directory: String,
+    config: WireServiceConfig,
+    environment: BTreeMap<String, String>,
+    #[serde(default)]
+    log_max_bytes: Option<u64>,
+    #[serde(default)]
+    log_max_files: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WireServiceConfig {
+    name: String,
+    command: String,
+    #[serde(default = "default_tty")]
+    tty: bool,
+    #[serde(rename = "syncRowsCols", default = "default_sync_rows_cols")]
+    sync_rows_cols: bool,
+    #[serde(default)]
+    restart: RestartPolicy,
+    #[serde(default)]
+    persist_logs: bool,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+fn default_tty() -> bool {
+    true
+}
+
+fn default_sync_rows_cols() -> bool {
+    true
+}
+
+impl From<&ServiceConfig> for WireServiceConfig {
+    fn from(config: &ServiceConfig) -> Self {
+        Self {
+            name: config.name.clone(),
+            command: config.command.clone(),
+            tty: config.tty,
+            sync_rows_cols: config.sync_rows_cols,
+            restart: config.restart,
+            persist_logs: config.persist_logs,
+            env: config.env.clone(),
+        }
+    }
+}
+
+impl From<WireServiceConfig> for ServiceConfig {
+    fn from(config: WireServiceConfig) -> Self {
+        Self {
+            name: config.name,
+            command: config.command,
+            tty: config.tty,
+            sync_rows_cols: config.sync_rows_cols,
+            restart: config.restart,
+            persist_logs: config.persist_logs,
+            log_max_bytes: DEFAULT_LOG_MAX_BYTES,
+            log_max_files: DEFAULT_LOG_MAX_FILES,
+            env: config.env,
+        }
+    }
+}
+
+impl Serialize for LaunchSpec {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        WireLaunchSpec {
+            directory: self.directory.clone(),
+            config: WireServiceConfig::from(&self.config),
+            environment: self.environment.clone(),
+            log_max_bytes: Some(self.config.log_max_bytes),
+            log_max_files: Some(self.config.log_max_files),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LaunchSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = WireLaunchSpec::deserialize(deserializer)?;
+        let mut config = ServiceConfig::from(wire.config);
+        config.log_max_bytes = wire.log_max_bytes.unwrap_or(DEFAULT_LOG_MAX_BYTES);
+        config.log_max_files = wire.log_max_files.unwrap_or(DEFAULT_LOG_MAX_FILES);
+        Ok(Self {
+            directory: wire.directory,
+            config,
+            environment: wire.environment,
+        })
+    }
 }
 
 impl LaunchSpec {
@@ -176,4 +276,57 @@ pub async fn request(
         bail!("{message}");
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn spec() -> LaunchSpec {
+        LaunchSpec {
+            directory: "/tmp/service".to_owned(),
+            config: ServiceConfig {
+                name: "service".to_owned(),
+                command: "echo ok".to_owned(),
+                tty: false,
+                sync_rows_cols: true,
+                restart: RestartPolicy::Always,
+                persist_logs: true,
+                log_max_bytes: 128,
+                log_max_files: 4,
+                env: BTreeMap::new(),
+            },
+            environment: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn launch_spec_keeps_log_limits_outside_legacy_config() {
+        let value = serde_json::to_value(spec()).expect("serialize launch spec");
+        assert_eq!(value["log_max_bytes"], 128);
+        assert_eq!(value["log_max_files"], 4);
+        assert!(value["config"].get("log_max_bytes").is_none());
+        assert!(value["config"].get("log_max_files").is_none());
+    }
+
+    #[test]
+    fn launch_spec_defaults_limits_when_reading_an_old_runner_message() {
+        let value = json!({
+            "directory": "/tmp/service",
+            "config": {
+                "name": "service",
+                "command": "echo ok",
+                "tty": false,
+                "syncRowsCols": true,
+                "restart": "never",
+                "persist_logs": false,
+                "env": {},
+            },
+            "environment": {},
+        });
+        let parsed: LaunchSpec = serde_json::from_value(value).expect("deserialize old spec");
+        assert_eq!(parsed.config.log_max_bytes, DEFAULT_LOG_MAX_BYTES);
+        assert_eq!(parsed.config.log_max_files, DEFAULT_LOG_MAX_FILES);
+    }
 }

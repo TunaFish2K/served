@@ -24,7 +24,8 @@ use crate::{
     config::{LoadedService, load_service, manager_environment},
     paths::ServedPaths,
     protocol::{
-        Request, Response, ServiceInfo, ServiceState, Target, framed, receive_json, send_json,
+        HandoffStream, Request, Response, ServiceInfo, ServiceState, Target, framed, into_handoff,
+        receive_json, send_json,
     },
     runner_protocol::{LaunchSpec, RunnerMetadata, RunnerRequest, RunnerResponse, RunnerStatus},
 };
@@ -51,7 +52,7 @@ enum ManagerCommand {
 
 struct AttachSetup {
     token: String,
-    runner_stream: UnixStream,
+    runner_stream: HandoffStream,
 }
 
 #[derive(Debug)]
@@ -488,7 +489,8 @@ impl ManagerState {
         match response {
             RunnerResponse::Attach { token } => Ok(AttachSetup {
                 token,
-                runner_stream: frame.into_inner(),
+                runner_stream: into_handoff(frame)
+                    .map_err(|error| PrepareAttachError::Message(error.to_string()))?,
             }),
             RunnerResponse::AttachUnavailable {
                 name,
@@ -867,7 +869,7 @@ async fn handle_connection(
                 match receiver.await.context("receive manager attach response")? {
                     Ok(setup) => {
                         send_json(&mut frame, &Response::Attach { token: setup.token }).await?;
-                        let client_stream = frame.into_inner();
+                        let client_stream = into_handoff(frame).context("handoff client socket")?;
                         proxy_attach(client_stream, setup.runner_stream).await;
                     }
                     Err(PrepareAttachError::Message(message)) => {
@@ -934,7 +936,7 @@ async fn handle_connection(
     }
 }
 
-async fn proxy_attach(mut client: UnixStream, mut runner: UnixStream) {
+async fn proxy_attach(mut client: HandoffStream, mut runner: HandoffStream) {
     let _ = copy_bidirectional(&mut client, &mut runner).await;
 }
 

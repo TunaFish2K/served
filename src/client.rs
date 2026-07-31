@@ -3,17 +3,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
-use thiserror::Error;
-use tokio::net::UnixStream;
-
 use crate::{
     paths::ServedPaths,
-    protocol::{Frame, Request, Response, ServiceInfo, Target, connect, receive_json, send_json},
+    protocol::{
+        Frame, HandoffStream, Request, Response, ServiceInfo, Target, connect, into_handoff,
+        receive_json, send_json,
+    },
 };
+use anyhow::{Context, Result, bail};
+use thiserror::Error;
 
 pub struct AttachSession {
-    pub stream: UnixStream,
+    pub stream: HandoffStream,
     pub token: String,
 }
 
@@ -55,7 +56,7 @@ pub async fn attach(paths: &ServedPaths, name: String) -> Result<AttachSession> 
         response => anyhow::bail!("unexpected attach response: {response:?}"),
     };
     Ok(AttachSession {
-        stream: frame.into_inner(),
+        stream: into_handoff(frame)?,
         token,
     })
 }

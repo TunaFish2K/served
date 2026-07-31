@@ -1,9 +1,16 @@
-use std::io;
+use std::{
+    io,
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
+};
 
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::net::UnixStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::UnixStream,
+};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub const PROTOCOL_VERSION: u32 = 5;
@@ -126,6 +133,62 @@ pub enum Response {
 
 pub type Frame = Framed<UnixStream, LengthDelimitedCodec>;
 
+#[derive(Debug)]
+pub struct HandoffStream {
+    inner: UnixStream,
+    read_buf: Vec<u8>,
+    read_offset: usize,
+}
+
+pub fn into_handoff(frame: Frame) -> Result<HandoffStream> {
+    let parts = frame.into_parts();
+    if !parts.write_buf.is_empty() {
+        bail!("protocol write buffer is not empty during raw socket handoff");
+    }
+    Ok(HandoffStream {
+        inner: parts.io,
+        read_buf: parts.read_buf.to_vec(),
+        read_offset: 0,
+    })
+}
+
+impl AsyncRead for HandoffStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.read_offset < self.read_buf.len() {
+            let count = (self.read_buf.len() - self.read_offset).min(buffer.remaining());
+            if count > 0 {
+                let end = self.read_offset + count;
+                buffer.put_slice(&self.read_buf[self.read_offset..end]);
+                self.read_offset = end;
+                return Poll::Ready(Ok(()));
+            }
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for HandoffStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 pub fn framed(stream: UnixStream) -> Frame {
     let mut codec = LengthDelimitedCodec::new();
     codec.set_max_frame_length(MAX_FRAME_LENGTH);
@@ -186,6 +249,7 @@ pub fn io_error(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn request_round_trips_as_json() {
@@ -281,5 +345,25 @@ mod tests {
                 Request::ManagerShutdown | Request::ManagerHandoff
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn handoff_stream_reads_framed_buffer_before_socket() {
+        let (stream, mut peer) = UnixStream::pair().expect("create unix stream pair");
+        let frame = framed(stream);
+        let mut parts = frame.into_parts();
+        parts.read_buf.extend_from_slice(b"buffered");
+        let mut handoff = into_handoff(Framed::from_parts(parts)).expect("create handoff stream");
+
+        peer.write_all(b"socket")
+            .await
+            .expect("write socket suffix");
+        let mut output = [0_u8; 14];
+        handoff
+            .read_exact(&mut output)
+            .await
+            .expect("read handoff bytes");
+
+        assert_eq!(&output, b"bufferedsocket");
     }
 }

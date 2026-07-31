@@ -956,7 +956,10 @@ fn run_direct_attach(paths: &ServedPaths, directory: &Path, name: Option<&str>) 
     );
 }
 
-async fn read_until(stream: &mut tokio::net::UnixStream, needle: &[u8]) -> Vec<u8> {
+async fn read_until<R>(stream: &mut R, needle: &[u8]) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     timeout(Duration::from_secs(3), async {
         let mut output = Vec::new();
         let mut buffer = [0_u8; 1024];

@@ -11,7 +11,6 @@ use nix::{
     unistd::Pid,
 };
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
-use tokio::net::UnixStream;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
@@ -24,7 +23,7 @@ use tracing::warn;
 use crate::{
     config::LoadedService,
     logs::{MEMORY_LOG_LIMIT, attach_snapshot_from_bytes},
-    protocol::Target,
+    protocol::{HandoffStream, Target},
 };
 
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,7 +40,7 @@ pub enum WorkerCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     Attach {
-        stream: UnixStream,
+        stream: HandoffStream,
     },
     Resize {
         cols: u16,
@@ -639,12 +638,12 @@ async fn spawn_pty_process(service: &LoadedService) -> Result<PtySpawn, String> 
 }
 
 async fn relay_attach(
-    stream: UnixStream,
+    stream: HandoffStream,
     input: mpsc::UnboundedSender<Vec<u8>>,
     mut output: broadcast::Receiver<Vec<u8>>,
     replay: Vec<u8>,
 ) {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     if !replay.is_empty() && writer.write_all(&replay).await.is_err() {
         return;
     }
@@ -673,11 +672,11 @@ async fn relay_attach(
 }
 
 async fn relay_readonly_attach(
-    stream: UnixStream,
+    stream: HandoffStream,
     mut output: broadcast::Receiver<Vec<u8>>,
     replay: Vec<u8>,
 ) {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     if !replay.is_empty() && writer.write_all(&replay).await.is_err() {
         return;
     }

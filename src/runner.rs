@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::{
     logs::LogStore,
-    protocol::{ServiceState, framed, receive_json, send_json},
+    protocol::{HandoffStream, ServiceState, framed, into_handoff, receive_json, send_json},
     runner_protocol::{
         LaunchSpec, RUNNER_PROTOCOL_VERSION, RunnerMetadata, RunnerRequest, RunnerResponse,
         RunnerStatus,
@@ -37,7 +37,7 @@ enum RunnerCommand {
     },
     AttachStream {
         token: String,
-        stream: UnixStream,
+        stream: HandoffStream,
     },
     Exit,
 }
@@ -279,7 +279,7 @@ impl RunnerState {
         Ok(token)
     }
 
-    async fn attach_stream(&mut self, token: String, stream: UnixStream) {
+    async fn attach_stream(&mut self, token: String, stream: HandoffStream) {
         let Some(worker) = self.worker.clone() else {
             self.reset_attach(&token);
             return;
@@ -618,7 +618,7 @@ async fn handle_connection(
                         },
                     )
                     .await?;
-                    let stream = frame.into_inner();
+                    let stream = into_handoff(frame)?;
                     commands
                         .send(RunnerCommand::AttachStream { token, stream })
                         .await

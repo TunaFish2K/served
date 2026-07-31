@@ -785,7 +785,7 @@ async fn attach_session(
     session: client::AttachSession,
 ) -> Result<()> {
     let client::AttachSession { stream, token } = session;
-    let (mut socket_read, mut socket_write) = stream.into_split();
+    let (mut socket_read, mut socket_write) = tokio::io::split(stream);
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut input = [0_u8; 8192];

@@ -102,6 +102,7 @@ jobs:
           install -Dm755 scripts/uninstall.sh "${full_root}/uninstall.sh"
           install -Dm644 README.md "${full_root}/README.md"
           install -Dm644 README.zh-CN.md "${full_root}/README.zh-CN.md"
+          install -Dm644 LICENSE "${full_root}/LICENSE"
 
           tar -C "$dist" -czf "${dist}/${full_asset}" "$(basename "$full_root")"
 

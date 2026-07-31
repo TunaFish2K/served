@@ -3,7 +3,7 @@ name = "served"
 version = "0.1.8"
 edition = "2024"
 description = "A lightweight service manager for one installation user"
-license = "MIT"
+license = "Unlicense"
 rust-version = "1.85"
 
 [dependencies]

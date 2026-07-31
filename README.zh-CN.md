@@ -273,3 +273,8 @@ cargo build --release
 
 核心需求记录在 [REQUIREMENTS.md](REQUIREMENTS.md)，技术决策记录在
 [TECH-STACK.md](TECH-STACK.md)。
+
+## 许可证
+
+served 使用 [Unlicense](LICENSE) 发布。你可以自由使用、复制、修改、发布和分发本项目。
+本软件不提供任何形式的保证。

@@ -326,3 +326,8 @@ cargo build --release
 
 Core requirements are in [REQUIREMENTS.md](REQUIREMENTS.md). Technical decisions are in
 [TECH-STACK.md](TECH-STACK.md).
+
+## License
+
+served is released under the [Unlicense](LICENSE). You can use, copy, modify, publish, and
+distribute it without licensing restrictions. The software is provided without warranty.

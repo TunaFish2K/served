@@ -10,6 +10,7 @@ shift
 
 cargo_path="$(rustup which --toolchain "$toolchain" cargo)"
 toolchain_bin="$(dirname "$cargo_path")"
-export PATH="$toolchain_bin:$PATH"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+export PATH="$toolchain_bin:$cargo_home/bin:$PATH"
 export RUSTUP_TOOLCHAIN="$toolchain"
 exec "$cargo_path" "$@"

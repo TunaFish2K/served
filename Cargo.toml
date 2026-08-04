@@ -1,6 +1,6 @@
 [package]
 name = "served"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A lightweight service manager for one installation user"
 license = "Unlicense"
@@ -12,7 +12,7 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dotenvy = "0.15"
-json5 = "1"
+json5 = "=0.4.1"
 futures-util = { version = "0.3", features = ["sink"] }
 nix = { version = "0.29", features = ["signal", "process"] }
 portable-pty = "0.9"
@@ -25,6 +25,9 @@ tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-threa
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 assert_cmd = "2"

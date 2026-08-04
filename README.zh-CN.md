@@ -2,10 +2,11 @@
 
 [English](README.md)
 
-`served` 是基于 systemd 的轻量部署工具，帮助个人开发者把个人非关键服务部署为长期运行的
-服务。它直接管理宿主机进程，由一个 systemd system unit 以安装用户身份启动 manager。
+`served` 帮助个人开发者把个人非关键服务部署为长期运行的服务。它直接管理宿主机进程，
+不运行容器。前台 manager 可以交给任意进程守护程序托管；仓库中的 systemd unit 只是可选
+的 Linux 集成。
 
-当前代码是 V1 实现，目标平台是 Linux/glibc。
+Release 支持 macOS 和 Linux/glibc，并分别提供 amd64/x64 和 arm64 二进制。
 
 ## 适用范围
 
@@ -21,18 +22,24 @@ served 不是 Docker 容器运行时，也不提供 root 服务管理、命名�
 
 ## 部署流程
 
-部署需要 Linux/glibc、systemd system manager 和可用的 `sudo`。Release 完整安装包是首选
-入口。安装脚本必须由安装用户运行，脚本会在需要时调用 `sudo`。
+下载与操作系统和 CPU 架构匹配的 Release 包，把 `served` 放到 `PATH` 中。配置进程守护程序，
+以目标用户身份和该用户正常的 `HOME` 运行以下前台命令：
 
-1. 从 GitHub Release 下载 `full.tar.gz` 安装包。
-2. 解压安装包，并进入解压目录。
-3. 运行 `./install.sh`。
-4. 进入项目目录。
-5. 运行 `served edit` 创建并编辑 `.served.json`。
-6. 运行 `served enable` 启用项目服务。
+```bash
+served daemon
+```
 
-安装脚本会安装并启动 `served.service`。这个 unit 只负责启动 served manager。它不会自动
-启用项目服务。`served enable` 会把当前项目目录加入管理器，并立即启动该服务。
+优雅停止使用 `served shutdown`。替换二进制后，使用 `served daemon --handoff` 切换 manager，
+同时保留 runner 和受管服务。向前台 manager 发送 `SIGTERM` 或 `SIGINT` 也会执行优雅停止。
+
+Linux 用户如果选择 systemd，可以下载对应架构的 `full.tar.gz` 并运行 `./install.sh`；该流程
+需要可用的 `sudo`。安装器会启用 `served.service`，但不会自动启用项目服务。
+
+manager 启动后：
+
+1. 进入项目目录。
+2. 运行 `served edit` 创建并编辑 `.served.json`。
+3. 运行 `served enable` 启用并启动项目服务。
 
 安装后可以用以下命令确认服务状态：
 
@@ -44,7 +51,7 @@ served attach <name>
 项目服务更新后，重新运行 `served restart`。服务异常时，可以使用 `served attach`、
 `served history` 和持久化日志排查。served 不会上传项目文件，也不会替用户执行构建流程。
 
-完整安装包包含以下文件，并从包目录运行安装脚本：
+Linux 完整安装包包含以下文件，并从包目录运行安装脚本：
 
 ```text
 served
@@ -55,8 +62,8 @@ README.md
 README.zh-CN.md
 ```
 
-仓库中的安装脚本位于 `scripts/`，system unit 模板位于 `systemd/`。安装脚本由普通
-安装用户执行，并在需要时通过 `sudo` 安装 `/usr/local/bin/served` 和
+以下 systemd 安装流程只适用于 Linux。仓库中的安装脚本位于 `scripts/`，system unit 模板
+位于 `systemd/`。安装脚本由普通安装用户执行，并在需要时通过 `sudo` 安装 `/usr/local/bin/served` 和
 `/etc/systemd/system/served.service`，然后执行 system scope 的 `daemon-reload`、启用和
 启动管理器。Rust 程序不会调用 `systemctl` 或 D-Bus。
 
@@ -86,7 +93,10 @@ XDG 目录只会收到迁移提示，不会被自动复制或删除。
 
 ```text
 served                 打开全局服务 TUI
-served daemon          运行 manager；与 system service 使用相同固定路径
+served daemon          用固定 HOME 路径运行前台 manager
+served daemon --handoff
+                       替换 manager，同时保留 runner
+served shutdown        停止 manager 和所有受管 runner
 served edit            用外部编辑器打开当前目录的 .served.json
 served edit -e <cmd>   指定编辑器命令，优先于 $EDITOR
 served edit --path     创建缺失模板后只打印 .served.json 路径
@@ -231,32 +241,42 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建
-Linux amd64/glibc 产物。例如版本 `0.2.0` 使用 tag `v0.2.0`，Release 会包含：
+macOS 和 Linux 的 amd64、arm64 原生产物。Linux 二进制最低需要 glibc 2.17；macOS amd64
+最低支持 10.12，arm64 最低支持 11.0。例如版本 `0.2.0` 会包含：
 
 ```text
-served-linux-amd64-v0.2.0-binary
-served-linux-amd64-v0.2.0-binary.sha256
-served-linux-amd64-v0.2.0-full.tar.gz
-served-linux-amd64-v0.2.0-full.tar.gz.sha256
+served-linux-amd64-v0.3.0-binary
+served-linux-amd64-v0.3.0-binary.sha256
+served-linux-amd64-v0.3.0-full.tar.gz
+served-linux-amd64-v0.3.0-full.tar.gz.sha256
+served-linux-arm64-v0.3.0-binary
+served-linux-arm64-v0.3.0-binary.sha256
+served-linux-arm64-v0.3.0-full.tar.gz
+served-linux-arm64-v0.3.0-full.tar.gz.sha256
+served-macos-amd64-v0.3.0.tar.gz
+served-macos-amd64-v0.3.0.tar.gz.sha256
+served-macos-arm64-v0.3.0.tar.gz
+served-macos-arm64-v0.3.0.tar.gz.sha256
 ```
 
-`binary` 只包含可执行文件；`full.tar.gz` 是完整安装包，包含 `served`、
+Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包，包含 `served`、
 `served.service`、`install.sh`、`uninstall.sh` 和两个 README 文件。每个产物都有自己的
 SHA-256 sidecar 文件，文件名是在原文件名后追加 `.sha256`。
 
-当前 workflow 只构建 Linux amd64/glibc，不构建 ARM、musl 或其他操作系统。
+macOS 压缩包包含可执行文件、两个 README 和许可证。macOS 二进制使用 ad-hoc 签名，未进行
+notarization。当前 workflow 不构建 musl 或 Windows 目标。
 
 ## 安全边界
 
 - manager 以普通用户身份运行，socket 设置为用户可读写。
-- systemd system unit 以安装用户身份启动和监督 manager；每个服务由独立 runner
-  持有，manager 通过私有 runner socket 接管它。
-- manager 或其 system unit 重启后，enabled registry 会被重新扫描，并优先接管已有 runner。
+- 进程守护程序以安装用户身份启动前台 manager；systemd unit 是一种 Linux 配置。每个服务
+  由独立 runner 持有，manager 通过私有 runner socket 接管它。
+- manager 重启后，enabled registry 会被重新扫描，并优先接管已有 runner。
 - runner 位于 `$HOME/.local/state/served/runtime/runners/<name>/`，持有服务进程、PTY、
   日志缓存、自动重启状态和 crash-loop 窗口。manager 异常退出不会停止它们。
-- `systemctl stop served` 通过 graceful shutdown 停止所有 runner；`served disable` 和
-  `served restart` 也会停止或替换对应 runner。升级使用 `systemctl reload served` 做
-  manager handoff，保留服务 PID；首次从旧 worker 架构升级时可能需要一次受控重启。
+- `served shutdown` 通过 graceful shutdown 停止所有 runner；`served disable` 和
+  `served restart` 也会停止或替换对应 runner。升级使用 manager handoff 保留服务 PID；
+  首次从旧 worker 架构升级时可能需要一次受控重启。
 - system service 按安装用户的登录环境设置 `HOME`，并通过 login shell 启动 manager，
   因此 `/etc/profile` 等环境会在 manager 启动时被读取。manager 运行期间仍使用启动时的
   环境快照。
@@ -273,11 +293,20 @@ SHA-256 sidecar 文件，文件名是在原文件名后追加 `.sha256`。
 应优先使用 Release 完整安装包。
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo build --release
+make bootstrap       # 安装当前系统的 amd64 和 arm64 Rust target
+make check           # 格式、Clippy 和本机测试
+make msrv-check      # 使用 Rust 1.85 编译全部 target
+make build-cross     # 构建当前系统的另一种架构
+make build-all       # 构建当前系统的两种架构
+make dist            # 打包当前系统的两种架构
+make linux-check     # 在 Docker 中运行完整 Linux 检查
 ```
+
+`make run` 使用 `.dev/` 下的隔离 `HOME` 启动 manager。另开终端后，可以运行
+`make cli ARGS="list"` 或其他 served 命令。Linux 交叉发行固定使用 Zig 0.14.1 和
+cargo-zigbuild 0.21.8。构建流程不跨操作系统：macOS 生成两个 macOS 目标，Linux 生成两个
+Linux 目标。Docker 检查固定使用 Rust 1.85；本机构建和 CI 默认使用 stable，也可以通过
+`RUST_TOOLCHAIN` 选择已经安装的 rustup 工具链。
 
 核心需求记录在 [REQUIREMENTS.md](REQUIREMENTS.md)，技术决策记录在
 [TECH-STACK.md](TECH-STACK.md)。

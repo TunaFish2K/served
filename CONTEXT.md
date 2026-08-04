@@ -28,9 +28,10 @@
   运行错误。
 - **Runner**：隐藏的 `served runner` 进程。它负责一个服务的进程、PTY、输出历史、
   重启循环和私有 runner socket。
-- **System service**：固定的 `/etc/systemd/system/served.service`，由 system manager
-  管理，不是 `systemd --user` unit。
-- **安装用户**：安装器选定的一个普通用户。system unit 和所有受管子进程都使用该身份。
+- **System service**：可选的 Linux 集成，固定为 `/etc/systemd/system/served.service`，
+  由 system manager 管理，不是 `systemd --user` unit。
+- **安装用户**：运行 manager 的普通用户。外部守护程序和所有受管子进程都使用该身份；
+  systemd 安装器会自动设置它。
 - **固定 HOME 路径**：配置使用 `$HOME/.config`，状态使用 `$HOME/.local/state`。
   `XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_RUNTIME_DIR` 不会改变 served 的路径。
 - **安装用户 home**：已安装 system service 使用的规范 home。该用户直接运行
@@ -40,6 +41,9 @@
 
 ## 已确认的决策
 
+- macOS 和 Linux/glibc 都支持 amd64、arm64。每个宿主系统支持本机和同系统另一架构构建，
+  不提供跨操作系统构建。外部守护程序以前台 `served daemon` 托管 manager；systemd 只是
+  Linux 的可选安装方式。
 - 直接 attach 进入备用屏幕，清屏并启用 raw mode。detach、EOF 或错误发生后，恢复 shell
   屏幕和终端模式。
 - TUI attach 继续使用 TUI 已持有的备用屏幕。它为服务会话清屏，detach 后完整重绘

@@ -2,12 +2,12 @@
 
 状态：实现基线。
 
-本文记录 V1 的实现选择。产品面向个人开发者在 Linux 主机上部署个人非关键服务，并使用
-一个安装用户。“极简”表示操作面和所有权边界简单，不表示依赖数量绝对最少。
+本文记录 V1 的实现选择。产品面向个人开发者在 macOS 或 Linux 主机上部署个人非关键服务，
+并使用一个安装用户。“极简”表示操作面和所有权边界简单，不表示依赖数量绝对最少。
 
 served 管理已经存在的项目目录和启动命令。它不负责代码上传、构建、依赖安装或健康检查。
-它使用 systemd system service 保证管理器在用户退出 SSH 后继续运行。它不替代 systemd，
-也不提供容器隔离、root 服务管理或资源限制。
+前台 manager 由用户选择的进程守护程序托管。仓库提供可选的 Linux systemd system
+service，但不替代 systemd，也不提供容器隔离、root 服务管理或资源限制。
 
 ## 运行时
 
@@ -20,14 +20,14 @@ served 管理已经存在的项目目录和启动命令。它不负责代码上�
 | 服务命令 | `/bin/sh -c <command>` | 工作目录是服务目录 |
 | 无 PTY 的进程 | `tokio::process` 和异步管道 | `.served.json` 使用 `tty: false` 时启用 |
 | 有 PTY 的进程 | `portable-pty` | 默认路径；master 始终由 worker 持有 |
+| 进程身份 | Linux `/proc`；macOS `sysinfo` | Linux 保留既有 tick 元数据格式；macOS 使用安全 API 获取启动时间 |
 | 本地时间戳 | `chrono` | 为归档日志生成可读的本地运行名称 |
 
-管理器作为固定的 `served.service` system unit 运行。unit 使用 `User=` 和 `Group=` 设置
-安装用户身份。管理器和独立运行器都留在该 unit 的 cgroup 中。`KillMode=process` 让管理器
-重启时可以保留运行器和受管子进程，供新管理器接管。`served` 不会变成 root daemon、容器
-运行时、namespace 管理器或资源策略引擎。unit 通过 `/bin/sh -lc` 加载安装用户的 profile，
-使用 `SetLoginEnvironment=yes`，并设置 `WorkingDirectory=~`，让 system manager 解析安装
-用户的 home。它不使用 system manager 的 `%h` specifier。
+管理器以前台进程运行。外部守护程序必须使用安装用户身份、规范 home 和固定 HOME 路径。
+通用生命周期接口是 `served daemon`、`served shutdown` 和 `served daemon --handoff`。
+可选 systemd unit 使用 `User=`、`Group=` 和 `KillMode=process`，使 manager 重启时保留 runner
+和受管子进程。unit 通过 `/bin/sh -lc` 加载安装用户 profile，使用
+`SetLoginEnvironment=yes` 和 `WorkingDirectory=~`，不依赖 `%h` specifier。
 
 ## 配置与状态
 
@@ -106,18 +106,20 @@ served 管理已经存在的项目目录和启动命令。它不负责代码上�
   测试真实 system service 安装。
 - TUI 渲染测试使用 Ratatui 的 `TestBackend`。第一阶段不要求快照测试。
 
-## 打包
+## 构建与打包
 
 - 推送匹配的 `v<semver>` tag 后，GitHub release workflow 自动运行。
-- Release 完整安装包是个人部署的首选入口。安装用户运行其中的 `install.sh`，脚本在需要时
-  调用 `sudo` 安装 system service。
-- workflow 面向 Linux amd64/glibc，发布只含二进制的产物和完整离线安装包。
+- `Makefile` 统一本机构建、测试、隔离运行、同系统交叉编译和 Docker Linux 检查。
+- macOS 使用 Rust/Clang 构建 amd64、arm64，deployment target 分别为 10.12、11.0。
+- Linux 使用 Zig 0.14.1 和 cargo-zigbuild 0.21.8 构建 amd64、arm64，固定 glibc 2.17。
+- CI 在四种原生 GitHub runner 上运行测试，并从每种宿主架构构建另一架构。
+- Linux 完整安装包包含可选 systemd 集成；macOS 包包含 ad-hoc 签名、未 notarize 的二进制。
 - 每个产物都有自己的 SHA-256 sidecar，命名方式是在原文件名后追加 `.sha256`。
 - 完整安装包包含 glibc 链接的二进制、system unit 模板、`install.sh`、`uninstall.sh` 和
   `README.md`。
 - shell 脚本负责 system unit 安装、`daemon-reload`、enable/start 和旧 user-service 迁移。
   Rust 不调用 `systemctl` 或 D-Bus。
-- V1 首先支持 Linux/glibc，不承诺其他平台兼容。
+- V1 支持 macOS 和 Linux/glibc 的 amd64、arm64，不支持跨操作系统构建、musl 或 Windows。
 
 ## 依赖策略
 

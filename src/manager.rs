@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use crate::{
     config::{LoadedService, load_service, manager_environment},
     paths::ServedPaths,
+    process,
     protocol::{
         HandoffStream, Request, Response, ServiceInfo, ServiceState, Target, framed, into_handoff,
         receive_json, send_json,
@@ -655,24 +656,11 @@ fn runner_identity_alive(metadata_path: &Path) -> bool {
     let Ok(metadata) = serde_json::from_slice::<RunnerMetadata>(&bytes) else {
         return false;
     };
-    process_matches(metadata.runner_pid, metadata.runner_start_time)
+    process::matches(metadata.runner_pid, metadata.runner_start_time)
         || metadata
             .service_pid
             .zip(metadata.service_start_time)
-            .is_some_and(|(pid, start)| process_matches(pid, Some(start)))
-}
-
-fn process_matches(pid: u32, start_time: Option<u64>) -> bool {
-    if !Path::new(&format!("/proc/{pid}")).exists() {
-        return false;
-    }
-    start_time.is_none_or(|expected| process_start_time(pid) == Some(expected))
-}
-
-fn process_start_time(pid: u32) -> Option<u64> {
-    let content = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = content.rsplit_once(") ")?;
-    fields.split_whitespace().nth(19)?.parse().ok()
+            .is_some_and(|(pid, start)| process::matches(pid, Some(start)))
 }
 
 fn remove_stale_runner_files(paths: &ServedPaths, name: &str) {
@@ -974,11 +962,12 @@ pub async fn request_handoff(paths: ServedPaths) -> Result<()> {
             (None, Some(_)) => true,
             _ => false,
         };
-        if replaced
-            && let Ok(Response::Services { .. }) =
+        if replaced {
+            if let Ok(Response::Services { .. }) =
                 crate::protocol::request(&paths.socket_path(), Request::List).await
-        {
-            return Ok(());
+            {
+                return Ok(());
+            }
         }
         sleep(RUNNER_START_DELAY).await;
     }

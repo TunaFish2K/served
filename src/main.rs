@@ -25,13 +25,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the manager. Normally started by the served system service.
+    /// Run the manager in the foreground under a process supervisor.
     Daemon {
-        #[arg(long, hide = true)]
+        /// Ask the running manager to replace itself while keeping runners alive.
+        #[arg(long)]
         handoff: bool,
     },
-    /// Stop the manager and all runners. Used by the system service.
-    #[command(hide = true)]
+    /// Stop the manager and all managed runners.
     Shutdown,
     /// Replace the manager process while keeping runners alive.
     #[command(hide = true)]
@@ -243,6 +243,19 @@ mod tests {
             with_name.command,
             Some(Command::Attach { name: Some(name) }) if name == "api"
         ));
+    }
+
+    #[test]
+    fn supervisor_lifecycle_commands_are_public() {
+        let daemon =
+            Cli::try_parse_from(["served", "daemon", "--handoff"]).expect("parse daemon handoff");
+        assert!(matches!(
+            daemon.command,
+            Some(Command::Daemon { handoff: true })
+        ));
+
+        let shutdown = Cli::try_parse_from(["served", "shutdown"]).expect("parse shutdown");
+        assert!(matches!(shutdown.command, Some(Command::Shutdown)));
     }
 
     #[test]

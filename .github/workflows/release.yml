@@ -9,11 +9,12 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build Linux amd64 release
+  metadata:
+    name: Verify release metadata
     runs-on: ubuntu-24.04
-    env:
-      RUST_TARGET: x86_64-unknown-linux-gnu
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
 
     steps:
       - name: Check out tag
@@ -21,21 +22,9 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ env.RUST_TARGET }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ env.RUST_TARGET }}-
 
       - name: Verify release tag
+        id: release
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -55,85 +44,127 @@ jobs:
             exit 1
           fi
 
-          {
-            echo "RELEASE_TAG=$RELEASE_TAG"
-            echo "RELEASE_VERSION=$package_version"
-          } >> "$GITHUB_ENV"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+  build:
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos
+            arch: amd64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos
+            arch: arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
 
-      - name: Run clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@v4
 
-      - name: Run tests
-        run: cargo test --locked
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: ${{ matrix.target }}
 
-      - name: Validate system service template
-        run: tests/system_service_template.sh
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-release-
 
-      - name: Build release binary
-        run: |
-          rustup target add "$RUST_TARGET"
-          cargo build --release --locked --target "$RUST_TARGET"
-
-      - name: Package release assets
+      - name: Install Linux release tools
+        if: matrix.os == 'linux'
         shell: bash
         run: |
-          set -euo pipefail
+          python3 -m pip install --user --break-system-packages ziglang==0.14.1
+          if ! cargo zigbuild --version 2>/dev/null | grep -q '0.21.8'; then
+            cargo install --locked --version 0.21.8 cargo-zigbuild
+          fi
 
-          dist="${GITHUB_WORKSPACE}/dist"
-          binary_asset="served-linux-amd64-${RELEASE_TAG}-binary"
-          full_asset="served-linux-amd64-${RELEASE_TAG}-full.tar.gz"
-          full_root="${dist}/served-linux-amd64-${RELEASE_TAG}-full"
+      - name: Run native checks
+        run: make check
 
-          rm -rf "$dist"
-          mkdir -p "$dist" "$full_root"
+      - name: Validate system service template
+        if: matrix.os == 'linux'
+        run: tests/system_service_template.sh
 
-          install -Dm755 \
-            "target/${RUST_TARGET}/release/served" \
-            "${dist}/${binary_asset}"
+      - name: Package release assets
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: scripts/package-release.sh "${{ matrix.arch }}"
 
-          install -Dm755 \
-            "target/${RUST_TARGET}/release/served" \
-            "${full_root}/served"
-          install -Dm644 systemd/served.service "${full_root}/served.service"
-          install -Dm755 scripts/install.sh "${full_root}/install.sh"
-          install -Dm755 scripts/uninstall.sh "${full_root}/uninstall.sh"
-          install -Dm644 README.md "${full_root}/README.md"
-          install -Dm644 README.zh-CN.md "${full_root}/README.zh-CN.md"
-          install -Dm644 LICENSE "${full_root}/LICENSE"
+      - name: Run packaged native binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "linux" ]]; then
+            "dist/served-linux-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-binary" --version
+          else
+            root="$(mktemp -d)"
+            tar -C "$root" -xzf "dist/served-macos-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}.tar.gz"
+            "$root/served-macos-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}/served" --version
+          fi
 
-          tar -C "$dist" -czf "${dist}/${full_asset}" "$(basename "$full_root")"
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
 
-          (
-            cd "$dist"
-            sha256sum "$binary_asset" > "${binary_asset}.sha256"
-            sha256sum "$full_asset" > "${full_asset}.sha256"
-          )
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-24.04
 
-      - name: Publish GitHub Release
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           set -euo pipefail
 
-          binary_asset="dist/served-linux-amd64-${RELEASE_TAG}-binary"
-          binary_checksum="${binary_asset}.sha256"
-          full_asset="dist/served-linux-amd64-${RELEASE_TAG}-full.tar.gz"
-          full_checksum="${full_asset}.sha256"
-
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --title "$RELEASE_TAG" \
               --generate-notes
           fi
 
           gh release upload "$RELEASE_TAG" \
-            "$binary_asset" \
-            "$binary_checksum" \
-            "$full_asset" \
-            "$full_checksum" \
+            --repo "$GITHUB_REPOSITORY" \
+            dist/* \
             --clobber

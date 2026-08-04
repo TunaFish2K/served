@@ -6,6 +6,7 @@ pub mod editor;
 pub mod logs;
 pub mod manager;
 pub mod paths;
+mod process;
 pub mod protocol;
 pub mod runner;
 pub mod runner_protocol;

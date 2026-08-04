@@ -2,11 +2,11 @@
 
 [简体中文](README.zh-CN.md)
 
-`served` deploys an existing project directory as a long-running service for personal, non-critical
-use. A systemd system unit starts the manager as the installation user.
-served manages host processes. It does not run containers.
+`served` runs an existing project directory as a long-running service for personal, non-critical
+use. It manages host processes directly and does not run containers. The foreground manager can
+run under any process supervisor; the included systemd unit is an optional Linux integration.
 
-This V1 release targets Linux with glibc.
+Release binaries support macOS and Linux with glibc on amd64/x64 and arm64.
 
 ## What served Does
 
@@ -32,19 +32,27 @@ services, or any service that you need to maintain the host.
 
 ## Quick Deployment
 
-You need Linux with glibc, a systemd system manager, and working `sudo` access. The full release
-package is the recommended installation method.
+Download the release package for the host operating system and architecture, then put `served` in a
+directory on `PATH`. Configure your process supervisor to run this foreground command as the target
+user with that user's normal `HOME`:
 
-1. Download the `full.tar.gz` package from a GitHub Release.
-2. Extract the package and enter its directory.
-3. Run `./install.sh`.
-4. Enter your project directory.
-5. Run `served edit` to create and edit `.served.json`.
-6. Run `served enable` to enable the project service.
+```bash
+served daemon
+```
 
-The installer enables and starts `served.service`. This unit starts the served manager. It does
-not enable project services. `served enable` adds the current project directory and starts its
-service.
+Use `served shutdown` for a graceful stop. Use `served daemon --handoff` after replacing the binary
+to switch managers while keeping runners and managed services alive. Sending `SIGTERM` or `SIGINT`
+to the foreground manager also performs a graceful stop.
+
+Linux users who want systemd can download the matching `full.tar.gz` package and run
+`./install.sh`; this requires working `sudo` access. The installer enables `served.service` but does
+not enable project services.
+
+After the manager is running:
+
+1. Enter the project directory.
+2. Run `served edit` to create and edit `.served.json`.
+3. Run `served enable` to enable and start the project service.
 
 Check the service after installation:
 
@@ -56,7 +64,7 @@ served attach <name>
 Run `served restart` after you update the project. Use `served attach`, `served history`,
 and persistent logs to investigate service failures. served does not upload or build the project.
 
-The full package contains these files:
+The Linux full package contains these files:
 
 ```text
 served
@@ -73,7 +81,10 @@ Run `served edit` in a project directory:
 
 ```text
 served                 Open the global service TUI
-served daemon          Run the manager with fixed paths
+served daemon          Run the foreground manager with fixed HOME paths
+served daemon --handoff
+                       Replace the manager while keeping runners alive
+served shutdown        Stop the manager and all managed runners
 served edit            Open .served.json in an external editor
 served edit -e <cmd>   Use the specified editor command
 served edit --path     Create a missing template and print its path
@@ -237,9 +248,10 @@ TTY history stores raw PTY bytes. Pipe history merges stdout and stderr in runne
 history view removes ANSI and invisible control sequences. If persistent storage fails, the service
 continues with memory history and the manager records a warning.
 
-## Installation, Upgrade, and Uninstall
+## Optional systemd Installation
 
-The repository stores the installer in `scripts/` and the system unit template in `systemd/`.
+The systemd integration is only for Linux. The repository stores its installer in `scripts/` and
+the unit template in `systemd/`.
 The installer runs as a normal installation user. It uses `sudo` when needed to install
 `/usr/local/bin/served` and `/etc/systemd/system/served.service`. It then runs a system
 scope `daemon-reload`, enables the unit, and starts the manager. The Rust program does not
@@ -277,35 +289,47 @@ exits unexpectedly, systemd starts it again and the runners continue. The new ma
 ## Release Downloads
 
 Push a `v<semver>` tag that matches the version in `Cargo.toml` to create a GitHub
-Release. The current workflow builds Linux amd64 with glibc.
+Release. The workflow builds and tests native macOS and Linux binaries for amd64 and arm64. Linux
+release binaries require glibc 2.17 or later. macOS requires 10.12 or later on amd64 and 11.0 or
+later on arm64.
 
 For version `0.2.0`, the release contains:
 
 ```text
-served-linux-amd64-v0.2.0-binary
-served-linux-amd64-v0.2.0-binary.sha256
-served-linux-amd64-v0.2.0-full.tar.gz
-served-linux-amd64-v0.2.0-full.tar.gz.sha256
+served-linux-amd64-v0.3.0-binary
+served-linux-amd64-v0.3.0-binary.sha256
+served-linux-amd64-v0.3.0-full.tar.gz
+served-linux-amd64-v0.3.0-full.tar.gz.sha256
+served-linux-arm64-v0.3.0-binary
+served-linux-arm64-v0.3.0-binary.sha256
+served-linux-arm64-v0.3.0-full.tar.gz
+served-linux-arm64-v0.3.0-full.tar.gz.sha256
+served-macos-amd64-v0.3.0.tar.gz
+served-macos-amd64-v0.3.0.tar.gz.sha256
+served-macos-arm64-v0.3.0.tar.gz
+served-macos-arm64-v0.3.0.tar.gz.sha256
 ```
 
-The `binary` asset contains only the executable. The `full.tar.gz` asset contains the
+The Linux `binary` asset contains only the executable. The Linux `full.tar.gz` asset contains the
 executable, system unit, installer, uninstaller, and both README files. Each asset has its own
 SHA-256 sidecar file with `.sha256` appended to the original file name.
 
-The workflow does not build ARM, musl, or other operating systems.
+The macOS archive contains the executable, both README files, and the license. macOS binaries use
+ad-hoc code signatures and are not notarized. The workflow does not build musl or Windows targets.
 
 ## Security and Limits
 
 - The manager runs as a normal user. The manager socket is readable and writable by that user.
-- The systemd system unit starts and supervises the manager as the installation user.
+- A process supervisor starts the foreground manager as the installation user. The systemd unit is
+  one supported Linux configuration.
 - Each enabled service has an independent runner. The manager adopts it through a private runner
   socket.
-- After a manager or system unit restart, the manager scans the enabled registry and adopts existing
+- After a manager restart, the manager scans the enabled registry and adopts existing
   runners first.
 - A runner at `$HOME/.local/state/served/runtime/runners/<name>/` owns the service process,
   PTY, log cache, restart state, and crash-loop window. A manager crash does not stop these items.
-- `systemctl stop served` performs a graceful shutdown for all runners. `served disable`
-  and `served restart` stop or replace the matching runner. A systemd reload uses manager
+- `served shutdown` performs a graceful shutdown for all runners. `served disable` and
+  `served restart` stop or replace the matching runner. A manager reload uses
   handoff and keeps the service PID. A first upgrade from the old worker architecture may need one
   controlled restart.
 - The system service sets `HOME` from the installation user's login environment. It starts
@@ -327,11 +351,20 @@ These commands build and check served itself. You do not need a Rust toolchain t
 project. Use a full release package for personal deployment.
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo build --release
+make bootstrap       # Install same-OS amd64 and arm64 targets
+make check           # Format, clippy, and native tests
+make msrv-check      # Compile every target with Rust 1.85
+make build-cross     # Build the other host architecture
+make build-all       # Build both host architectures
+make dist            # Package both host architectures
+make linux-check     # Run the Linux checks in Docker
 ```
+
+`make run` starts an isolated manager with `HOME` under `.dev/`. In another terminal, use
+`make cli ARGS="list"` or another served command against that manager. Linux cross releases use
+Zig 0.14.1 and cargo-zigbuild 0.21.8. Cross-operating-system builds are not supported: macOS builds
+the two macOS targets, and Linux builds the two Linux targets. The Docker check runs on Rust 1.85;
+local builds and CI use stable unless `RUST_TOOLCHAIN` selects another installed rustup toolchain.
 
 Core requirements are in [REQUIREMENTS.md](REQUIREMENTS.md). Technical decisions are in
 [TECH-STACK.md](TECH-STACK.md).

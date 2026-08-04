@@ -2,8 +2,9 @@
 
 状态：产品需求草案。
 
-`served` 是基于 systemd 的轻量部署工具。它帮助个人开发者把个人非关键服务部署为长期运行
-的服务。它通过一个以安装用户身份运行的 systemd system unit 管理宿主机进程。
+`served` 是轻量的宿主机服务管理工具。它帮助个人开发者把个人非关键服务部署为长期运行
+的服务。前台 manager 由安装用户选择的进程守护程序托管；systemd system unit 是可选的
+Linux 集成，不是核心运行时依赖。
 
 个人非关键服务停止后，不会影响主机的登录和基础维护能力。机器人、Webhook、个人 API
 和 Worker 适合使用 served。`sshd`、登录和网络等基础服务不适合使用 served。
@@ -16,9 +17,13 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 
 ## 部署边界
 
-- 首次安装使用 Release 完整安装包中的 `install.sh`。
-- 安装脚本由目标安装用户运行，并在需要时调用 `sudo`。
-- 安装脚本启用并启动 `served.service`。这个 unit 运行 served 管理器。
+- macOS 和 Linux/glibc 分别提供 amd64、arm64 Release 产物。
+- 进程守护程序必须以安装用户身份、该用户正常的 `HOME` 和前台 `served daemon` 启动
+  manager。
+- 通用优雅停止接口是 `served shutdown`；保留 runner 的 manager 切换接口是
+  `served daemon --handoff`。
+- Linux systemd 完整安装包提供 `install.sh`。脚本由目标安装用户运行，在需要时调用
+  `sudo`，并启用运行 manager 的 `served.service`。
 - 项目服务必须先有自己的目录和 `.served.json`，再运行 `served enable`。
 - `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
 - 项目文件或配置更新后，使用 `served restart` 应用变化。
@@ -252,24 +257,23 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 
 ## 管理器与安全边界
 
-- 管理器作为固定的 `served.service` system service 在 system manager 中运行。
-- unit 使用 `User=<installation user>` 和该用户的主组；管理器及其所有受管子进程都保持
-  普通用户权限。
-- unit 使用安装用户的登录环境和 home 作为工作目录；不得依赖 system manager 的 `%h`
-  展开。
-- unit 为 `multi-user.target` 启用，因此 SSH 退出后仍会运行，不使用
-  `loginctl enable-linger`。
+- manager 是前台进程，由外部进程守护程序负责启动和异常重启。manager 及其所有受管
+  子进程都保持普通用户权限。
+- 进程守护程序必须提供安装用户的规范 home；served 使用固定 HOME 路径，不读取 XDG 路径
+  覆盖。
+- 可选 systemd unit 使用 `User=<installation user>`、该用户主组和 home 工作目录，不依赖
+  system manager 的 `%h` 展开，并在 `multi-user.target` 启用。
 - TUI 和命令通过 `$HOME/.local/state/served/runtime/served.sock` 通信。
 - socket 只允许该用户访问。
 - 所有受管服务使用与管理器相同的用户身份。
 - 不提供 root 模式、提权、容器隔离、namespace 策略、资源限制、依赖图或健康检查协议。
-- 每个启用服务在 system unit 的 cgroup 中拥有独立运行器。`KillMode=process` 和管理器
-  接管机制允许管理器崩溃或 systemd 重启时保留运行器和服务进程。明确的 shutdown、
+- 每个启用服务拥有独立运行器。管理器接管机制允许 manager 崩溃或被守护程序重启时保留
+  runner 和服务进程；systemd 集成额外使用 `KillMode=process`。明确的 shutdown、
   disable 或服务 restart 会停止对应运行器。
 - `served daemon` 与 system service 使用同一组固定的 HOME 路径。第二个 daemon 遇到已
   占用的 socket 时会拒绝接管。
 
-## 安装生命周期
+## 可选 systemd 安装生命周期
 
 - 安装脚本由目标用户运行，并在内部调用 `sudo`。它安装
   `/usr/local/bin/served` 和 `/etc/systemd/system/served.service`，不修改用户 shell 配置。
@@ -319,6 +323,7 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - 公共 `served` CLI 中独立的 `start`、`stop` 或 `reload` 命令。
 - 任意位置的 `.env.served` 文件。
 - 自动发现无关进程或端口。
+- launchd、runit、s6、supervisord 等守护程序的安装器或配置生成器。
 
 ## 验收场景
 
@@ -371,3 +376,9 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
     `persist_logs: false` 不创建临时文件，只报告内存历史选项。
 31. 关闭崩溃日志编辑器后，attach 仍然失败，且不会自动重试服务连接；非交互式 CLI attach
     永远不会等待输入。
+32. macOS 和 Linux 的 amd64、arm64 原生测试通过；每种宿主架构都能构建同操作系统的另一
+    架构。
+33. Linux amd64、arm64 发行二进制最高依赖 GLIBC 2.17；macOS amd64、arm64 分别声明
+    10.12 和 11.0 deployment target，并通过 ad-hoc 签名校验。
+34. `served daemon` 可由非 systemd 守护程序前台托管；`served shutdown` 优雅停止所有
+    runner，`served daemon --handoff` 替换 manager 并保留服务 PID。

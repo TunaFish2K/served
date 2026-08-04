@@ -11,8 +11,28 @@ permissions:
 
 jobs:
   checks:
-    name: Check Linux amd64
-    runs-on: ubuntu-24.04
+    name: Check ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux amd64
+            runner: ubuntu-24.04
+            os: linux
+            cross_target: aarch64-unknown-linux-gnu
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            os: linux
+            cross_target: x86_64-unknown-linux-gnu
+          - name: macOS amd64
+            runner: macos-15-intel
+            os: macos
+            cross_target: aarch64-apple-darwin
+          - name: macOS arm64
+            runner: macos-15
+            os: macos
+            cross_target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Check out source
@@ -20,6 +40,69 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: ${{ matrix.cross_target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ci-
+
+      - name: Install Linux cross tools
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          python3 -m pip install --user --break-system-packages ziglang==0.14.1
+          if ! cargo zigbuild --version 2>/dev/null | grep -q '0.21.8'; then
+            cargo install --locked --version 0.21.8 cargo-zigbuild
+          fi
+
+      - name: Run native checks
+        run: make check
+
+      - name: Validate system service template
+        if: matrix.os == 'linux'
+        run: tests/system_service_template.sh
+
+      - name: Build native release binary
+        run: make build-release
+
+      - name: Run native release binary
+        run: target/release/served --version
+
+      - name: Cross-build other architecture
+        run: make build-cross
+
+      - name: Inspect cross-built binary
+        shell: bash
+        run: file "target/${{ matrix.cross_target }}/release/served"
+
+  msrv:
+    name: Rust 1.85 on ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+          - name: macOS
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@1.85.0
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -28,21 +111,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-ci-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-ci-
+          key: ${{ runner.os }}-${{ runner.arch }}-msrv-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Run tests
-        run: cargo test --locked
-
-      - name: Validate system service template
-        run: tests/system_service_template.sh
-
-      - name: Build release binary
-        run: cargo build --release --locked
+      - name: Check all targets
+        run: ./scripts/cargo-toolchain.sh 1.85.0 check --all-targets --locked

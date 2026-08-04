@@ -1,0 +1,24 @@
+FROM rust:1.85.0-bookworm
+
+ARG CARGO_ZIGBUILD_VERSION=0.21.8
+ARG ZIG_VERSION=0.14.1
+ENV RUST_TOOLCHAIN=1.85.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils \
+        file \
+        make \
+        python3 \
+        python3-pip \
+        systemd \
+    && python3 -m pip install --break-system-packages --no-cache-dir "ziglang==${ZIG_VERSION}" \
+    && cargo install --locked --version "${CARGO_ZIGBUILD_VERSION}" cargo-zigbuild \
+    && rustup component add clippy rustfmt \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY . .
+RUN ./scripts/cargo-toolchain.sh "$RUST_TOOLCHAIN" fetch --locked
+
+CMD ["scripts/container-check.sh"]

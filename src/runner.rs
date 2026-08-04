@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::{
     logs::LogStore,
+    process,
     protocol::{HandoffStream, ServiceState, framed, into_handoff, receive_json, send_json},
     runner_protocol::{
         LaunchSpec, RUNNER_PROTOCOL_VERSION, RunnerMetadata, RunnerRequest, RunnerResponse,
@@ -389,14 +390,14 @@ impl RunnerState {
             WorkerEvent::Started { pid, .. } => {
                 self.state = ServiceState::Running;
                 self.pid = Some(pid);
-                self.pid_start_time = process_start_time(pid);
+                self.pid_start_time = process::start_time(pid);
                 self.write_metadata();
             }
             WorkerEvent::Output { bytes, .. } => {
-                if let Some(logs) = self.logs.as_mut()
-                    && let Some(warning) = logs.append(&bytes)
-                {
-                    warn!(service = %self.name, %warning, "log history degraded");
+                if let Some(logs) = self.logs.as_mut() {
+                    if let Some(warning) = logs.append(&bytes) {
+                        warn!(service = %self.name, %warning, "log history degraded");
+                    }
                 }
             }
             WorkerEvent::Exited { success, .. } => {
@@ -458,7 +459,7 @@ impl RunnerState {
         let metadata = RunnerMetadata {
             name: self.name.clone(),
             runner_pid: std::process::id(),
-            runner_start_time: process_start_time(std::process::id()),
+            runner_start_time: process::start_time(std::process::id()),
             service_pid: self.pid,
             service_start_time: self.pid_start_time,
         };
@@ -693,10 +694,4 @@ fn restart_name(policy: crate::config::RestartPolicy) -> &'static str {
         crate::config::RestartPolicy::OnFailure => "on-failure",
         crate::config::RestartPolicy::Always => "always",
     }
-}
-
-fn process_start_time(pid: u32) -> Option<u64> {
-    let content = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = content.rsplit_once(") ")?;
-    fields.split_whitespace().nth(19)?.parse().ok()
 }

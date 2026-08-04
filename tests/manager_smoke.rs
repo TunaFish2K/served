@@ -7,13 +7,14 @@ use std::{
     time::Duration,
 };
 
+use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
 use portable_pty::{Child as PtyChild, CommandBuilder, PtySize, native_pty_system};
 use served::{
     client,
     paths::ServedPaths,
     protocol::{Request, Response, ServiceState, Target},
 };
-use tempfile::tempdir;
+use tempfile::{Builder, TempDir};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::{sleep, timeout},
@@ -30,7 +31,7 @@ impl Drop for DaemonGuard {
 
 #[tokio::test]
 async fn enable_restart_and_disable_a_pipe_service() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -125,7 +126,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
 
 #[tokio::test]
 async fn persistent_and_memory_history_survive_service_restarts() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -262,7 +263,7 @@ async fn persistent_and_memory_history_survive_service_restarts() {
 
 #[tokio::test]
 async fn crash_loop_attach_reports_only_a_persisted_latest_log() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -363,7 +364,7 @@ async fn crash_loop_attach_reports_only_a_persisted_latest_log() {
 
 #[tokio::test]
 async fn pty_service_accepts_one_attach_session() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -444,7 +445,7 @@ async fn pty_service_accepts_one_attach_session() {
 
 #[tokio::test]
 async fn pipe_service_supports_multiple_readonly_attach_sessions() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -564,7 +565,7 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
 
 #[tokio::test]
 async fn process_group_stops_pipe_descendants() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -613,8 +614,7 @@ async fn process_group_stops_pipe_descendants() {
         .expect("read child pid")
         .parse()
         .expect("parse child pid");
-    let proc_path = Path::new("/proc").join(child_pid.to_string());
-    wait_for_path(&proc_path).await;
+    wait_for_process(child_pid).await;
 
     client::expect_ok(
         &paths,
@@ -629,7 +629,7 @@ async fn process_group_stops_pipe_descendants() {
 
 #[tokio::test]
 async fn process_group_stops_pty_descendants() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -678,8 +678,7 @@ async fn process_group_stops_pty_descendants() {
         .expect("read child pid")
         .parse()
         .expect("parse child pid");
-    let proc_path = Path::new("/proc").join(child_pid.to_string());
-    wait_for_path(&proc_path).await;
+    wait_for_process(child_pid).await;
 
     client::expect_ok(
         &paths,
@@ -694,7 +693,7 @@ async fn process_group_stops_pty_descendants() {
 
 #[tokio::test]
 async fn bounded_output_keeps_disable_responsive() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -753,7 +752,7 @@ async fn bounded_output_keeps_disable_responsive() {
 
 #[tokio::test]
 async fn daemon_uses_fixed_home_paths_and_rejects_duplicate_manager() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -805,7 +804,7 @@ async fn daemon_uses_fixed_home_paths_and_rejects_duplicate_manager() {
 
 #[tokio::test]
 async fn manager_crash_keeps_runner_and_service_alive_for_adoption() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -887,7 +886,7 @@ async fn manager_crash_keeps_runner_and_service_alive_for_adoption() {
 
 #[tokio::test]
 async fn shutdown_stops_runners_after_manager_crash() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -944,7 +943,7 @@ async fn shutdown_stops_runners_after_manager_crash() {
 
 #[tokio::test]
 async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -1014,7 +1013,7 @@ async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
 
 #[tokio::test]
 async fn direct_attach_supports_name_and_current_directory() {
-    let root = tempdir().expect("tempdir");
+    let root = test_root();
     let home = root.path().join("home");
     let config_home = home.join(".config");
     let runtime_dir = home.join(".local/state/served/runtime");
@@ -1262,14 +1261,41 @@ async fn wait_for_absent(path: &Path) {
 }
 
 async fn wait_for_process_exit(pid: u32) {
-    let path = Path::new("/proc").join(pid.to_string());
     for _ in 0..100 {
-        if !path.exists() {
+        if !process_exists(pid) {
             return;
         }
         sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for process {pid} to exit");
+}
+
+async fn wait_for_process(pid: u32) {
+    for _ in 0..100 {
+        if process_exists(pid) {
+            return;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for process {pid}");
+}
+
+fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    match kill(Pid::from_raw(pid), None) {
+        Ok(()) | Err(Errno::EPERM) => true,
+        Err(Errno::ESRCH) => false,
+        Err(_) => true,
+    }
+}
+
+fn test_root() -> TempDir {
+    Builder::new()
+        .prefix("served-")
+        .tempdir_in("/tmp")
+        .expect("short test tempdir")
 }
 
 async fn wait_for_state(paths: &ServedPaths, name: &str, expected: ServiceState) {
@@ -1304,13 +1330,14 @@ async fn wait_for_output_tail(paths: &ServedPaths, name: &str, needle: &str) {
 
 async fn service_pid(paths: &ServedPaths, name: &str) -> u32 {
     for _ in 0..100 {
-        if let Ok(Response::Services { services }) = client::request(paths, Request::List).await
-            && let Some(pid) = services
+        if let Ok(Response::Services { services }) = client::request(paths, Request::List).await {
+            if let Some(pid) = services
                 .iter()
                 .find(|service| service.name == name)
                 .and_then(|service| service.pid)
-        {
-            return pid;
+            {
+                return pid;
+            }
         }
         sleep(Duration::from_millis(20)).await;
     }

@@ -71,7 +71,11 @@ jobs:
 
       - name: Validate system service template
         if: matrix.os == 'linux'
-        run: tests/system_service_template.sh
+        run: make systemd-check
+
+      - name: Check shell scripts
+        if: matrix.os == 'linux'
+        run: make shellcheck
 
       - name: Build native release binary
         run: make build-release
@@ -116,3 +120,55 @@ jobs:
 
       - name: Check all targets
         run: ./scripts/cargo-toolchain.sh 1.85.0 check --all-targets --locked
+
+  nix:
+    name: Nix ${{ matrix.system }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-darwin
+            runner: macos-15-intel
+          - system: aarch64-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Build served
+        run: nix build ".#packages.${{ matrix.system }}.served" --print-build-logs
+
+      - name: Run multi-user NixOS test
+        if: matrix.system == 'x86_64-linux'
+        run: nix build .#checks.x86_64-linux.multi-user --print-build-logs
+
+  aur:
+    name: AUR split packages
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install packaging tools
+        run: pacman -Syu --noconfirm --needed namcap rustup
+
+      - name: Create unprivileged package builder
+        shell: bash
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- env HOME=/home/builder rustup toolchain install stable --profile minimal
+
+      - name: Build and inspect packages
+        run: runuser -u builder -- env HOME=/home/builder scripts/check-aur-package.sh

@@ -21,11 +21,15 @@ systemd 重启或二进制 handoff 都不能终止仍然健康的服务。同时
 - 管理器启动时比较当前加载的服务规格与运行器规格。规格变化会作为受控运行器重启应用。
   如果运行器仍存活但控制 socket 暂不可用，不会重复启动；必须等到它的身份不再可观察后
   才能恢复。
-- 管理器公共协议为版本 5。运行器 IPC 是独立的版本 1 协议，因此 manager handoff 可以
+- 管理器公共协议为版本 6。运行器 IPC 是独立的版本 1 协议，因此 manager handoff 可以
   替换管理器而不替换运行器。
-- `systemctl reload served` 请求 manager handoff。管理器关闭公共 listener，并重新执行当前
-  二进制；运行器继续运行。system unit 使用 `KillMode=process`，因此管理器失败或替换时，
-  systemd 不会清理运行器。
+- `systemctl reload served@<user>` 请求 manager handoff。请求包含客户端当前可执行文件的
+  绝对路径；管理器验证它是可执行的普通文件，关闭公共 listener，并执行该路径。运行器
+  继续运行。system unit 使用 `KillMode=process`，因此管理器失败或替换时，systemd 不会
+  清理运行器。
+- `served daemon --relinquish` 让管理器释放公共 socket 并以状态 75 退出，但不停止 runner。
+  systemd 模板把 75 同时标记为成功和禁止自动重启，用于从旧 unit 转移到新 unit；新
+  supervisor 随后启动 manager 并接管 runner。
 - `served shutdown`、`served disable` 和 `served restart` 是明确的服务生命周期操作。它们
   向相关运行器发送停止请求，并等待服务进程被 reap 后再删除运行器状态。
 - 管理器的 attach 代理连接可能在管理器崩溃或 handoff 时丢失。服务和运行器仍然存活，

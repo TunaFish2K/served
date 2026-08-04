@@ -28,10 +28,10 @@
   运行错误。
 - **Runner**：隐藏的 `served runner` 进程。它负责一个服务的进程、PTY、输出历史、
   重启循环和私有 runner socket。
-- **System service**：可选的 Linux 集成，固定为 `/etc/systemd/system/served.service`，
-  由 system manager 管理，不是 `systemd --user` unit。
-- **安装用户**：运行 manager 的普通用户。外部守护程序和所有受管子进程都使用该身份；
-  systemd 安装器会自动设置它。
+- **System service 实例**：可选的 Linux 集成，由共享的 `served@.service` 模板实例化为
+  `served@<user>.service`，由 system manager 管理，不是 `systemd --user` unit。
+- **安装用户**：运行某个 manager 的普通用户。外部守护程序和该 manager 的所有受管子
+  进程都使用该身份；一台主机可以有多个相互隔离的安装用户。
 - **固定 HOME 路径**：配置使用 `$HOME/.config`，状态使用 `$HOME/.local/state`。
   `XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_RUNTIME_DIR` 不会改变 served 的路径。
 - **安装用户 home**：已安装 system service 使用的规范 home。该用户直接运行
@@ -78,8 +78,12 @@
 - 尺寸控制使用单独的长连接 framed manager connection、opaque attach token 和版本化
   协议。客户端立即发送初始终端尺寸，随后轮询变化；控制连接失败后使用退避重连。detach
   后保留最后的 PTY 尺寸；新建 PTY 使用默认尺寸。
-- system service 以安装用户身份运行，使用该用户的规范 home 作为登录环境和工作目录。
-  system manager 的 home 展开不属于服务路径约定。
+- system service 模板以实例用户身份运行，拒绝 root，不覆盖该用户的主组，并使用其规范
+  home 作为登录环境和工作目录。system manager 的 home 展开不属于服务路径约定。
+- `/usr/local/bin/served` 和 `served@.service` 是共享文件；每个实例的 socket、registry、
+  runner 和服务仍按固定 HOME 路径隔离。共享升级会 handoff 所有活动实例。
+- AUR 分为只含二进制的 `served` 和可选的 `served-systemd`；Nix flake 提供 package 和以
+  `services.served.users` 声明实例的 NixOS module。其他 init 暂不提供专用包。
 - 每个启用服务在 `$HOME/.local/state/served/runtime/runners/<name>/` 下拥有一个 runner。
   manager 失败或收到非预期信号时，不会停止 runner 或服务。明确的 shutdown、disable 和
   服务 restart 会停止它。
@@ -90,8 +94,9 @@
 
 `Request::Attach { name }` 仍然使用服务名称。manager 根据启用服务配置选择 PTY 或管道
 relay。协议版本 3 增加精确的清理后历史行数；版本 4 增加结构化崩溃循环 attach 诊断；
-版本 5 增加 manager handoff/shutdown 请求。成功 attach 仍返回 opaque token，尺寸控制
-使用单独 framed connection 上的 `Request::Resize` 消息。Runner IPC 使用独立的 additive v1
+版本 5 增加 manager handoff/shutdown 请求；版本 6 为 handoff 增加目标可执行文件绝对路径，
+并增加只退出 manager 的 relinquish 请求。成功 attach 仍返回 opaque token，尺寸控制使用
+单独 framed connection 上的 `Request::Resize` 消息。Runner IPC 使用独立的 additive v1
 协议，因此 manager 升级可以接管已有 runner。相关握手阶段会拒绝版本不匹配；raw PTY
 字节不会与 control frame 混合。
 

@@ -34,6 +34,13 @@ use crate::{
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 const RUNNER_START_ATTEMPTS: usize = 100;
 const RUNNER_START_DELAY: Duration = Duration::from_millis(20);
+pub const SUPERVISOR_RELINQUISH_EXIT_CODE: i32 = 75;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonExit {
+    Stopped,
+    Relinquished,
+}
 
 enum ManagerCommand {
     Request {
@@ -48,7 +55,10 @@ enum ManagerCommand {
         reply: oneshot::Sender<std::result::Result<(), String>>,
         finished: oneshot::Receiver<()>,
     },
-    Handoff,
+    Handoff {
+        executable: PathBuf,
+    },
+    Relinquish,
 }
 
 struct AttachSetup {
@@ -274,7 +284,9 @@ impl ManagerState {
                 offset,
                 limit,
             } => self.history_chunk(target, id, offset, limit).await,
-            Request::ManagerShutdown | Request::ManagerHandoff => {
+            Request::ManagerShutdown
+            | Request::ManagerHandoff { .. }
+            | Request::ManagerRelinquish => {
                 Err("manager lifecycle requests must use their dedicated control path".to_owned())
             }
         }
@@ -681,7 +693,7 @@ fn validate_target_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
+pub async fn run_daemon(paths: ServedPaths) -> Result<DaemonExit> {
     fs::create_dir_all(paths.registry_dir()).context("create served enable registry")?;
     let state_served_dir = paths.state_home.join("served");
     fs::create_dir_all(&state_served_dir).context("create served state directory")?;
@@ -750,7 +762,8 @@ pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
     let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
     let mut reconcile_tick = interval(RECONCILE_INTERVAL);
-    let mut handoff = false;
+    let mut handoff_executable = None;
+    let mut relinquished = false;
 
     loop {
         tokio::select! {
@@ -777,8 +790,12 @@ pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
                     let _ = finished.await;
                     break;
                 }
-                ManagerCommand::Handoff => {
-                    handoff = true;
+                ManagerCommand::Handoff { executable } => {
+                    handoff_executable = Some(executable);
+                    break;
+                }
+                ManagerCommand::Relinquish => {
+                    relinquished = true;
                     break;
                 }
             },
@@ -798,10 +815,14 @@ pub async fn run_daemon(paths: ServedPaths) -> Result<()> {
     drop(listener);
     let _ = fs::remove_file(&socket_path);
     let _ = fs::remove_file(&generation_path);
-    if handoff {
-        reexec_manager().context("handoff manager process")?;
+    if let Some(executable) = handoff_executable {
+        reexec_manager(&executable).context("handoff manager process")?;
     }
-    Ok(())
+    Ok(if relinquished {
+        DaemonExit::Relinquished
+    } else {
+        DaemonExit::Stopped
+    })
 }
 
 async fn handle_connection(
@@ -882,12 +903,27 @@ async fn handle_connection(
                 }
                 return Ok(());
             }
-            Request::ManagerHandoff => {
+            Request::ManagerHandoff { executable } => {
+                let executable = match validate_handoff_executable(&executable) {
+                    Ok(executable) => executable,
+                    Err(message) => {
+                        send_json(&mut frame, &Response::Error { message }).await?;
+                        return Ok(());
+                    }
+                };
                 send_json(&mut frame, &Response::Ok).await?;
                 commands
-                    .send(ManagerCommand::Handoff)
+                    .send(ManagerCommand::Handoff { executable })
                     .await
                     .context("request manager handoff")?;
+                return Ok(());
+            }
+            Request::ManagerRelinquish => {
+                send_json(&mut frame, &Response::Ok).await?;
+                commands
+                    .send(ManagerCommand::Relinquish)
+                    .await
+                    .context("request manager relinquish")?;
                 return Ok(());
             }
             Request::ManagerShutdown => {
@@ -928,8 +964,23 @@ async fn proxy_attach(mut client: HandoffStream, mut runner: HandoffStream) {
     let _ = copy_bidirectional(&mut client, &mut runner).await;
 }
 
-fn reexec_manager() -> Result<()> {
-    let binary = std::env::current_exe().context("resolve current served binary")?;
+fn validate_handoff_executable(value: &str) -> std::result::Result<PathBuf, String> {
+    let executable = PathBuf::from(value);
+    if !executable.is_absolute() {
+        return Err("manager handoff executable must be an absolute path".to_owned());
+    }
+    let metadata = fs::metadata(&executable)
+        .map_err(|error| format!("inspect manager handoff executable: {error}"))?;
+    if !metadata.is_file() {
+        return Err("manager handoff executable is not a regular file".to_owned());
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err("manager handoff executable is not executable".to_owned());
+    }
+    Ok(executable)
+}
+
+fn reexec_manager(binary: &Path) -> Result<()> {
     let error = Command::new(binary).arg("daemon").exec();
     Err(error).context("exec new served daemon")
 }
@@ -950,8 +1001,15 @@ pub async fn request_shutdown(paths: ServedPaths) -> Result<()> {
 }
 
 pub async fn request_handoff(paths: ServedPaths) -> Result<()> {
+    let executable = std::env::current_exe().context("resolve handoff executable")?;
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("handoff executable path is not valid UTF-8"))?
+        .to_owned();
     let previous_generation = fs::read_to_string(paths.manager_generation()).ok();
-    match crate::protocol::request(&paths.socket_path(), Request::ManagerHandoff).await? {
+    match crate::protocol::request(&paths.socket_path(), Request::ManagerHandoff { executable })
+        .await?
+    {
         Response::Ok => {}
         response => bail!("unexpected manager handoff response: {response:?}"),
     }
@@ -973,5 +1031,21 @@ pub async fn request_handoff(paths: ServedPaths) -> Result<()> {
     }
     Err(anyhow::anyhow!(
         "new manager did not become ready after handoff"
+    ))
+}
+
+pub async fn request_relinquish(paths: ServedPaths) -> Result<()> {
+    match crate::protocol::request(&paths.socket_path(), Request::ManagerRelinquish).await? {
+        Response::Ok => {}
+        response => bail!("unexpected manager relinquish response: {response:?}"),
+    }
+    for _ in 0..RUNNER_START_ATTEMPTS {
+        if !paths.socket_path().exists() && !paths.manager_generation().exists() {
+            return Ok(());
+        }
+        sleep(RUNNER_START_DELAY).await;
+    }
+    Err(anyhow::anyhow!(
+        "manager did not release its socket after relinquish"
     ))
 }

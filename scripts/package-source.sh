@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+output="${1:-}"
+version="${2:-}"
+
+[[ -n "$output" && -n "$version" ]] || {
+    printf 'usage: scripts/package-source.sh OUTPUT VERSION\n' >&2
+    exit 1
+}
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+    printf 'error: VERSION must be semantic\n' >&2
+    exit 1
+}
+
+manifest_version="$(awk -F ' *= *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }' "$project_dir/Cargo.toml")"
+[[ "$manifest_version" = "$version" ]] || {
+    printf 'error: version %s does not match Cargo.toml version %s\n' "$version" "$manifest_version" >&2
+    exit 1
+}
+
+inputs=(
+    Cargo.toml
+    Cargo.lock
+    LICENSE
+    Makefile
+    README.md
+    README.zh-CN.md
+    REQUIREMENTS.md
+    TECH-STACK.md
+    CONTEXT.md
+    flake.nix
+    flake.lock
+    nix
+    rust-toolchain.toml
+    docs
+    scripts
+    src
+    systemd
+    tests
+)
+
+mkdir -p "$(dirname -- "$output")"
+tar \
+    --sort=name \
+    --format=ustar \
+    --mtime='@0' \
+    --owner=0 \
+    --group=0 \
+    --numeric-owner \
+    --transform="s,^,served-${version}/," \
+    -C "$project_dir" \
+    -cf - \
+    "${inputs[@]}" | gzip -n -9 > "$output"

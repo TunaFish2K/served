@@ -5,7 +5,7 @@ project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_dir"
 
 make check
-tests/system_service_template.sh
+make shellcheck systemd-check
 scripts/build-targets.sh all
 
 for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do

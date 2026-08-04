@@ -11,6 +11,7 @@ RUN apt-get update \
         make \
         python3 \
         python3-pip \
+        shellcheck \
         systemd \
     && python3 -m pip install --break-system-packages --no-cache-dir "ziglang==${ZIG_VERSION}" \
     && cargo install --locked --version "${CARGO_ZIGBUILD_VERSION}" cargo-zigbuild \

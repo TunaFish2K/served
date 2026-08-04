@@ -1,0 +1,22 @@
+pkgbase = served
+	pkgdesc = Lightweight per-user service manager
+	pkgver = 0.4.0
+	pkgrel = 1
+	url = https://github.com/TunaFish2K/served
+	arch = x86_64
+	arch = aarch64
+	license = Unlicense
+	makedepends = cargo
+	options = !debug
+	source = served-0.4.0.tar.gz::https://github.com/TunaFish2K/served/releases/download/v0.4.0/served-v0.4.0-source.tar.gz
+	sha256sums = b74cc2c95ef425f1b3928f4c3afd120504915358461f33fb2cb52615516e4873
+
+pkgname = served
+	depends = gcc-libs
+	depends = glibc
+
+pkgname = served-systemd
+	pkgdesc = systemd system-service template for served
+	arch = any
+	depends = served=0.4.0-1
+	depends = systemd

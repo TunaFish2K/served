@@ -109,7 +109,11 @@ jobs:
 
       - name: Validate system service template
         if: matrix.os == 'linux'
-        run: tests/system_service_template.sh
+        run: make systemd-check
+
+      - name: Check shell scripts
+        if: matrix.os == 'linux'
+        run: make shellcheck
 
       - name: Package release assets
         env:
@@ -142,12 +146,24 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      - name: Check out tag
+        uses: actions/checkout@v6
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
+
+      - name: Package deterministic source archive
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          scripts/package-source.sh "dist/served-v${RELEASE_VERSION}-source.tar.gz" "$RELEASE_VERSION"
+          cd dist
+          sha256sum "served-v${RELEASE_VERSION}-source.tar.gz" > "served-v${RELEASE_VERSION}-source.tar.gz.sha256"
 
       - name: Publish assets
         shell: bash

@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 pub const MAX_FRAME_LENGTH: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,9 +58,14 @@ pub enum Request {
     /// Stop the manager and all managed runners. Used by systemd ExecStop.
     #[serde(rename = "ManagerShutdown")]
     ManagerShutdown,
-    /// Replace the manager process without stopping runners.
+    /// Replace the manager process with a specific executable without stopping runners.
     #[serde(rename = "ManagerHandoff")]
-    ManagerHandoff,
+    ManagerHandoff {
+        executable: String,
+    },
+    /// Exit the manager without stopping runners so another supervisor can adopt them.
+    #[serde(rename = "ManagerRelinquish")]
+    ManagerRelinquish,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,12 +342,20 @@ mod tests {
 
     #[test]
     fn manager_lifecycle_requests_round_trip_as_json() {
-        for request in [Request::ManagerShutdown, Request::ManagerHandoff] {
+        for request in [
+            Request::ManagerShutdown,
+            Request::ManagerHandoff {
+                executable: "/nix/store/example/bin/served".to_owned(),
+            },
+            Request::ManagerRelinquish,
+        ] {
             let value = serde_json::to_value(&request).expect("serialize");
             let decoded: Request = serde_json::from_value(value).expect("decode");
             assert!(matches!(
                 decoded,
-                Request::ManagerShutdown | Request::ManagerHandoff
+                Request::ManagerShutdown
+                    | Request::ManagerHandoff { .. }
+                    | Request::ManagerRelinquish
             ));
         }
     }

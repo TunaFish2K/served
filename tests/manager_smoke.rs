@@ -11,6 +11,7 @@ use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
 use portable_pty::{Child as PtyChild, CommandBuilder, PtySize, native_pty_system};
 use served::{
     client,
+    manager::SUPERVISOR_RELINQUISH_EXIT_CODE,
     paths::ServedPaths,
     protocol::{Request, Response, ServiceState, Target},
 };
@@ -800,6 +801,16 @@ async fn daemon_uses_fixed_home_paths_and_rejects_duplicate_manager() {
     let stderr = String::from_utf8_lossy(&duplicate.stderr);
     assert!(stderr.contains("manager already running"), "{stderr}");
     assert!(!root.path().join("wrong-runtime/served.sock").exists());
+
+    let invalid_handoff = client::request(
+        &paths,
+        Request::ManagerHandoff {
+            executable: "relative/served".to_owned(),
+        },
+    )
+    .await
+    .expect_err("relative handoff executable must be rejected");
+    assert!(invalid_handoff.to_string().contains("absolute path"));
 }
 
 #[tokio::test]
@@ -969,7 +980,16 @@ async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
         runtime_dir,
         state_home,
     };
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+    let first_binary = root.path().join("served-old");
+    let next_binary = root.path().join("served-new");
+    fs::copy(env!("CARGO_BIN_EXE_served"), &first_binary).expect("copy old manager binary");
+    fs::copy(env!("CARGO_BIN_EXE_served"), &next_binary).expect("copy new manager binary");
+    fs::set_permissions(&first_binary, fs::Permissions::from_mode(0o755))
+        .expect("make old manager executable");
+    fs::set_permissions(&next_binary, fs::Permissions::from_mode(0o755))
+        .expect("make new manager executable");
+
+    let mut daemon = Command::new(&first_binary)
         .arg("daemon")
         .env("HOME", &home)
         .spawn()
@@ -985,8 +1005,9 @@ async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
     .expect("enable handoff service");
     wait_for_state(&paths, "handoff", ServiceState::Running).await;
     let pid_before = service_pid(&paths, "handoff").await;
+    fs::remove_file(&first_binary).expect("remove old manager path");
 
-    let handoff = Command::new(env!("CARGO_BIN_EXE_served"))
+    let handoff = Command::new(&next_binary)
         .args(["daemon", "--handoff"])
         .env("HOME", &home)
         .output()
@@ -995,7 +1016,7 @@ async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
     wait_for_state(&paths, "handoff", ServiceState::Running).await;
     assert_eq!(service_pid(&paths, "handoff").await, pid_before);
 
-    let shutdown = Command::new(env!("CARGO_BIN_EXE_served"))
+    let shutdown = Command::new(&next_binary)
         .arg("shutdown")
         .env("HOME", &home)
         .output()
@@ -1009,6 +1030,84 @@ async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
     }
     assert!(daemon.try_wait().expect("recheck manager").is_some());
     assert!(!paths.runner_socket("handoff").exists());
+}
+
+#[tokio::test]
+async fn manager_relinquish_preserves_runner_for_a_new_supervisor() {
+    let root = test_root();
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("service");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(
+        service_dir.join(".served.json"),
+        r#"{
+  name: "relinquish",
+  command: "sleep 60",
+  tty: false,
+  restart: "never",
+}
+"#,
+    )
+    .expect("config");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let mut first = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn first manager");
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Enable {
+            directory: service_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect("enable relinquish service");
+    wait_for_state(&paths, "relinquish", ServiceState::Running).await;
+    let service_pid = service_pid(&paths, "relinquish").await;
+
+    let relinquish = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["daemon", "--relinquish"])
+        .env("HOME", &home)
+        .output()
+        .expect("request manager relinquish");
+    assert!(
+        relinquish.status.success(),
+        "relinquish client failed: {relinquish:?}"
+    );
+    let status = first.wait().expect("reap relinquished manager");
+    assert_eq!(status.code(), Some(SUPERVISOR_RELINQUISH_EXIT_CODE));
+    assert!(paths.runner_socket("relinquish").exists());
+    assert!(process_exists(service_pid));
+
+    let replacement = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn replacement manager");
+    let _guard = DaemonGuard(replacement);
+    wait_for_path(&paths.socket_path()).await;
+    wait_for_state(&paths, "relinquish", ServiceState::Running).await;
+    assert_eq!(self::service_pid(&paths, "relinquish").await, service_pid);
+
+    let shutdown = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("shutdown")
+        .env("HOME", &home)
+        .output()
+        .expect("shutdown replacement manager");
+    assert!(shutdown.status.success(), "shutdown failed: {shutdown:?}");
+    wait_for_process_exit(service_pid).await;
 }
 
 #[tokio::test]

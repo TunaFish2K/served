@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-service_name="served.service"
 binary_target="/usr/local/bin/served"
-unit_target="/etc/systemd/system/${service_name}"
+template_name="served@.service"
+template_target="/etc/systemd/system/${template_name}"
+legacy_system_name="served.service"
+legacy_system_target="/etc/systemd/system/${legacy_system_name}"
 user_name="$(id -un)"
+instance_name="served@${user_name}.service"
 user_home=""
-legacy_binary_target=""
-legacy_unit_target=""
-legacy_manager_checked=0
-legacy_was_active=0
-legacy_was_enabled=0
-legacy_was_disabled=0
-legacy_was_stopped=0
+legacy_user_binary=""
+legacy_user_unit=""
+instance_active=0
+instance_enabled=0
+legacy_system_active=0
+legacy_system_enabled=0
+legacy_user_active=0
+legacy_user_enabled=0
+declare -A other_instances=()
 
 fatal() {
     printf 'error: %s\n' "$1" >&2
@@ -21,10 +26,6 @@ fatal() {
 
 path_exists() {
     [[ -e "$1" || -L "$1" ]]
-}
-
-require_interactive() {
-    [[ -t 0 && -t 1 ]] || fatal "interactive terminal required for uninstall"
 }
 
 confirm_no() {
@@ -45,23 +46,6 @@ confirm_no() {
     done
 }
 
-require_target_user() {
-    ((EUID != 0)) || fatal "run uninstall.sh as the installation user, not root; it uses sudo internally"
-    command -v getent >/dev/null 2>&1 || fatal "getent is required to resolve the installation user home"
-    if ! user_home="$(getent passwd "$user_name" 2>/dev/null | awk -F: 'NR == 1 { print $6; exit }')"; then
-        fatal "could not resolve the installation user home from passwd"
-    fi
-    [[ -n "$user_home" && "$user_home" = /* ]] ||
-        fatal "installation user home from passwd is not an absolute path"
-    [[ -d "$user_home" ]] || fatal "installation user home does not exist: $user_home"
-    if [[ "${HOME:-}" != "$user_home" ]]; then
-        printf 'warning: HOME does not match the passwd home; using %s for uninstall paths\n' "$user_home" >&2
-    fi
-    legacy_binary_target="$user_home/.local/bin/served"
-    legacy_unit_target="$user_home/.config/systemd/user/${service_name}"
-    command -v sudo >/dev/null 2>&1 || fatal "sudo is required for system uninstall"
-}
-
 root_cmd() {
     sudo "$@"
 }
@@ -70,10 +54,10 @@ systemctl_root() {
     root_cmd systemctl "$@"
 }
 
-service_active() {
+unit_active() {
+    local unit="$1"
     local state
-
-    state="$(systemctl_root is-active "$service_name" 2>/dev/null || true)"
+    state="$(systemctl_root is-active "$unit" 2>/dev/null || true)"
     case "$state" in
         active|activating|deactivating|reloading) return 0 ;;
         inactive|failed|dead|unknown|not-found) return 1 ;;
@@ -81,10 +65,10 @@ service_active() {
     esac
 }
 
-service_enabled() {
+unit_enabled() {
+    local unit="$1"
     local state
-
-    state="$(systemctl_root is-enabled "$service_name" 2>/dev/null || true)"
+    state="$(systemctl_root is-enabled "$unit" 2>/dev/null || true)"
     case "$state" in
         enabled|enabled-runtime|linked|linked-runtime|alias) return 0 ;;
         disabled|static|indirect|generated|transient|masked|not-found) return 1 ;;
@@ -92,91 +76,132 @@ service_enabled() {
     esac
 }
 
-legacy_active_state() {
-    systemctl --user is-active "$service_name" 2>/dev/null || true
+require_target_user() {
+    ((EUID != 0)) || fatal "run uninstall.sh as an installation user, not root; it uses sudo internally"
+    [[ "$user_name" != root ]] || fatal "served managers must not run as root"
+    [[ "$user_name" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] ||
+        fatal "installation user name cannot be represented as a served systemd instance: $user_name"
+    command -v getent >/dev/null 2>&1 || fatal "getent is required to resolve the installation user home"
+    user_home="$(getent passwd "$user_name" | awk -F: 'NR == 1 { print $6; exit }')"
+    [[ -n "$user_home" && "$user_home" = /* ]] ||
+        fatal "installation user home from passwd is not an absolute path"
+    command -v sudo >/dev/null 2>&1 || fatal "sudo is required for system uninstall"
+    legacy_user_binary="$user_home/.local/bin/served"
+    legacy_user_unit="$user_home/.config/systemd/user/${legacy_system_name}"
 }
 
-legacy_enabled_state() {
-    systemctl --user is-enabled "$service_name" 2>/dev/null || true
-}
-
-require_legacy_manager() {
-    local state
-
-    if ((legacy_manager_checked)); then
-        return 0
+record_system_state() {
+    local unit="$1"
+    local active_var="$2"
+    local enabled_var="$3"
+    local status
+    if unit_active "$unit"; then
+        printf -v "$active_var" '%s' 1
+    else
+        status=$?
+        ((status == 1)) || fatal "could not determine whether ${unit} is active"
     fi
-    state="$(legacy_active_state)"
-    case "$state" in
-        active|activating|deactivating|reloading|inactive|failed|dead|unknown|not-found)
-            legacy_manager_checked=1
-            return 0
-            ;;
-        *)
-            fatal "old user service detected, but the user systemd manager is unavailable; no files were removed"
-            ;;
-    esac
+    if unit_enabled "$unit"; then
+        printf -v "$enabled_var" '%s' 1
+    else
+        status=$?
+        ((status == 1)) || fatal "could not determine whether ${unit} is enabled"
+    fi
 }
 
-inspect_legacy_service() {
-    path_exists "$legacy_unit_target" || return 0
-    require_legacy_manager
-
+record_legacy_user_state() {
     local state
-    state="$(legacy_active_state)"
+    path_exists "$legacy_user_unit" || return 0
+    state="$(systemctl --user is-active "$legacy_system_name" 2>/dev/null || true)"
     case "$state" in
-        active|activating|deactivating|reloading) legacy_was_active=1 ;;
+        active|activating|deactivating|reloading) legacy_user_active=1 ;;
         inactive|failed|dead|unknown|not-found) ;;
-        *) fatal "could not determine the old user service state; no files were removed" ;;
+        *) fatal "old user service manager is unavailable" ;;
     esac
-
-    state="$(legacy_enabled_state)"
+    state="$(systemctl --user is-enabled "$legacy_system_name" 2>/dev/null || true)"
     case "$state" in
-        enabled|enabled-runtime|linked|linked-runtime|alias) legacy_was_enabled=1 ;;
+        enabled|enabled-runtime|linked|linked-runtime|alias) legacy_user_enabled=1 ;;
         disabled|static|indirect|generated|transient|masked|not-found) ;;
-        *) fatal "could not determine whether the old user service is enabled; no files were removed" ;;
+        *) fatal "could not determine whether the old user service is enabled" ;;
     esac
 }
 
-read_existing_system_user() {
-    [[ -f "$unit_target" ]] || return 0
-    root_cmd awk "\$1 ~ /^User=/ { sub(/^User=/, \"\", \$1); print \$1; exit }" \
-        "$unit_target" 2>/dev/null || true
+inspect_legacy_system_unit() {
+    local owner
+    path_exists "$legacy_system_target" || return 0
+    owner="$(root_cmd awk "\$1 ~ /^User=/ { sub(/^User=/, \"\", \$1); print \$1; exit }" "$legacy_system_target" 2>/dev/null || true)"
+    [[ -n "$owner" ]] || fatal "existing ${legacy_system_target} has no User=; refusing to remove it"
+    [[ "$owner" = "$user_name" ]] ||
+        fatal "existing ${legacy_system_target} belongs to ${owner@Q}, not ${user_name@Q}"
+    record_system_state "$legacy_system_name" legacy_system_active legacy_system_enabled
 }
 
-check_system_user_conflict() {
-    local existing_user
-
-    existing_user="$(read_existing_system_user)"
-    [[ -n "$existing_user" ]] ||
-        fatal "existing ${unit_target} has no User=; refusing to uninstall an installation with unknown ownership"
-    [[ "$existing_user" = "$user_name" ]] ||
-        fatal "${unit_target} belongs to installation user ${existing_user@Q}; refusing to remove it as ${user_name@Q}"
+disable_and_stop_system_unit() {
+    local unit="$1"
+    local was_active="$2"
+    local was_enabled="$3"
+    if ((was_enabled)); then
+        systemctl_root disable "$unit" || fatal "could not disable ${unit}; files were kept"
+    fi
+    if ((was_active)); then
+        if ! systemctl_root stop "$unit"; then
+            ((was_enabled == 0)) || systemctl_root enable "$unit" || true
+            fatal "could not stop ${unit}; shared files were kept"
+        fi
+        if unit_active "$unit"; then
+            fatal "${unit} is still active; shared files were kept"
+        fi
+    fi
 }
 
-rollback_legacy() {
-    local failed=0
+disable_and_stop_legacy_user_unit() {
+    if ((legacy_user_enabled)); then
+        systemctl --user disable "$legacy_system_name" ||
+            fatal "could not disable the old user service; shared files were kept"
+    fi
+    if ((legacy_user_active)); then
+        if ! systemctl --user stop "$legacy_system_name"; then
+            ((legacy_user_enabled == 0)) || systemctl --user enable "$legacy_system_name" || true
+            fatal "could not stop the old user service; shared files were kept"
+        fi
+    fi
+}
 
-    if ((legacy_was_disabled && legacy_was_enabled)); then
-        systemctl --user enable "$service_name" || failed=1
-    fi
-    if ((legacy_was_stopped && legacy_was_active)); then
-        systemctl --user start "$service_name" || failed=1
-    fi
-    return "$failed"
+find_other_instances() {
+    local active_units
+    local unit
+    local unit_files
+
+    unit_files="$(
+        systemctl_root list-unit-files 'served@*.service' --no-legend --plain
+    )" || fatal "could not list enabled served template instances; shared files were kept"
+    active_units="$(
+        systemctl_root list-units --type=service --state=active 'served@*.service' \
+            --no-legend --plain
+    )" || fatal "could not list active served template instances; shared files were kept"
+
+    while read -r unit _; do
+        [[ -n "$unit" && "$unit" != "$template_name" && "$unit" != "$instance_name" ]] || continue
+        other_instances["$unit"]=1
+    done <<<"$unit_files"
+    while read -r unit _; do
+        [[ -n "$unit" && "$unit" != "$instance_name" ]] || continue
+        other_instances["$unit"]=1
+    done <<<"$active_units"
 }
 
 require_target_user
-require_interactive
-
-if [[ -d "$binary_target" || -d "$unit_target" || -d "$legacy_binary_target" || -d "$legacy_unit_target" ]]; then
+[[ -t 0 && -t 1 ]] || fatal "interactive terminal required for uninstall"
+if [[ -d "$binary_target" || -d "$template_target" || -d "$legacy_system_target" ||
+      -d "$legacy_user_binary" || -d "$legacy_user_unit" ]]; then
     fatal "an installation target is a directory; refusing to remove it"
 fi
-if path_exists "$unit_target"; then
-    check_system_user_conflict
-fi
 
-if confirm_no "Uninstall served and disable its service?"; then
+record_system_state "$instance_name" instance_active instance_enabled
+inspect_legacy_system_unit
+record_legacy_user_state
+
+if confirm_no "Disable and remove served integration for ${user_name}?"; then
     :
 else
     status=$?
@@ -185,60 +210,35 @@ else
     exit 0
 fi
 
-inspect_legacy_service
+disable_and_stop_system_unit "$instance_name" "$instance_active" "$instance_enabled"
+disable_and_stop_system_unit "$legacy_system_name" "$legacy_system_active" "$legacy_system_enabled"
+disable_and_stop_legacy_user_unit
 
-system_was_active=0
-if service_active; then
-    system_was_active=1
-else
-    status=$?
-    ((status == 1)) || fatal "could not determine whether ${service_name} is running"
-fi
-
-if service_enabled; then
-    systemctl_root disable "$service_name" ||
-        fatal "could not disable ${service_name}; files were kept"
-else
-    status=$?
-    ((status == 1)) || fatal "could not determine whether ${service_name} is enabled"
-fi
-
-if ((system_was_active)); then
-    systemctl_root stop "$service_name" ||
-        fatal "could not stop ${service_name}; files were kept and the service remains disabled"
-    service_active && fatal "${service_name} is still active; files were kept and the service remains disabled"
-    status=$?
-    ((status == 1)) || fatal "could not determine whether ${service_name} stopped"
-fi
-
-if path_exists "$legacy_unit_target" && ((legacy_was_enabled)); then
-    systemctl --user disable "$service_name" || {
-        rollback_legacy || true
-        fatal "could not disable the old user service; system files were kept"
-    }
-    legacy_was_disabled=1
-fi
-if path_exists "$legacy_unit_target" && ((legacy_was_active)); then
-    systemctl --user stop "$service_name" || {
-        rollback_legacy || true
-        fatal "could not stop the old user service; system files were kept"
-    }
-    legacy_was_stopped=1
-    state="$(legacy_active_state)"
-    [[ "$state" != active && "$state" != activating && "$state" != deactivating && "$state" != reloading ]] || {
-        rollback_legacy || true
-        fatal "the old user service is still active; system files were kept"
-    }
-fi
-
-root_cmd rm -f -- "$unit_target" "$binary_target"
-systemctl_root daemon-reload ||
-    printf 'warning: system daemon-reload failed after removing served files\n' >&2
-
-rm -f -- "$legacy_unit_target" "$legacy_binary_target"
-if ((legacy_manager_checked)); then
+rm -f -- "$legacy_user_unit" "$legacy_user_binary"
+if ((legacy_user_active || legacy_user_enabled)); then
     systemctl --user daemon-reload ||
         printf 'warning: old user manager daemon-reload failed after removing legacy files\n' >&2
 fi
+if path_exists "$legacy_system_target"; then
+    root_cmd rm -f -- "$legacy_system_target"
+    systemctl_root daemon-reload
+fi
 
-printf 'served system service and binary removed; configuration and state were preserved.\n'
+find_other_instances
+if ((${#other_instances[@]})); then
+    printf 'served integration for %s was removed; shared files remain for:' "$user_name"
+    printf ' %s' "${!other_instances[@]}"
+    printf '\nconfiguration and state were preserved.\n'
+    exit 0
+fi
+
+if confirm_no "No other enabled or active instances were found. Remove the shared served binary and template?"; then
+    root_cmd rm -f -- "$template_target" "$binary_target"
+    systemctl_root daemon-reload ||
+        printf 'warning: system daemon-reload failed after removing shared served files\n' >&2
+    printf 'shared served binary and systemd template removed; configuration and state were preserved.\n'
+else
+    status=$?
+    ((status == 2)) && fatal "could not read shared-file removal confirmation"
+    printf 'served integration for %s was removed; shared files and user data were preserved.\n' "$user_name"
+fi

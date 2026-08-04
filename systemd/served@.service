@@ -1,0 +1,23 @@
+[Unit]
+Description=served service manager for %i
+After=local-fs.target
+
+[Service]
+Type=simple
+User=%i
+ExecCondition=/bin/sh -c 'test "%i" != root'
+SetLoginEnvironment=yes
+WorkingDirectory=~
+ExecStart=/bin/sh -lc 'exec @SERVED_BIN@ daemon'
+ExecStop=@SERVED_BIN@ shutdown
+ExecReload=@SERVED_BIN@ daemon --handoff
+Restart=always
+RestartSec=1s
+RestartPreventExitStatus=75
+SuccessExitStatus=75
+KillMode=process
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

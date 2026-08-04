@@ -36,7 +36,9 @@ package_linux() {
     install -m 755 "$project_dir/target/$target/release/served" "$dist/$binary_asset"
     mkdir -p "$full_root"
     install -m 755 "$project_dir/target/$target/release/served" "$full_root/served"
-    install -m 644 "$project_dir/systemd/served.service" "$full_root/served.service"
+    sed 's|@SERVED_BIN@|/usr/local/bin/served|g' \
+        "$project_dir/systemd/served@.service" > "$full_root/served@.service"
+    chmod 644 "$full_root/served@.service"
     install -m 755 "$project_dir/scripts/install.sh" "$full_root/install.sh"
     install -m 755 "$project_dir/scripts/uninstall.sh" "$full_root/uninstall.sh"
     install -m 644 "$project_dir/README.md" "$full_root/README.md"

@@ -45,8 +45,8 @@ to switch managers while keeping runners and managed services alive. Sending `SI
 to the foreground manager also performs a graceful stop.
 
 Linux users who want systemd can download the matching `full.tar.gz` package and run
-`./install.sh`; this requires working `sudo` access. The installer enables `served.service` but does
-not enable project services.
+`./install.sh`; this requires working `sudo` access. The installer enables
+`served@$USER.service` for the invoking account but does not enable project services.
 
 After the manager is running:
 
@@ -68,11 +68,41 @@ The Linux full package contains these files:
 
 ```text
 served
-served.service
+served@.service
 install.sh
 uninstall.sh
 README.md
 README.zh-CN.md
+```
+
+## Nix and AUR
+
+Install only the binary from this flake:
+
+```bash
+nix profile install github:TunaFish2K/served
+```
+
+For NixOS, import `inputs.served.nixosModules.default` and declare every account that needs an
+independent manager:
+
+```nix
+services.served = {
+  enable = true;
+  users = [ "alice" "bob" ];
+};
+```
+
+The module adds the binary to `environment.systemPackages` and creates one system service per user.
+It does not accept `root`, an empty user list, or duplicate users.
+
+The AUR metadata under `packaging/aur/` produces two packages. `served` contains only the binary.
+`served-systemd` depends on that exact binary package and installs the optional systemd template.
+After both packages are installed, enable the accounts you need:
+
+```bash
+sudo systemctl enable --now "served@$USER.service"
+sudo systemctl enable --now served@alice.service
 ```
 
 ## Common Commands
@@ -84,6 +114,8 @@ served                 Open the global service TUI
 served daemon          Run the foreground manager with fixed HOME paths
 served daemon --handoff
                        Replace the manager while keeping runners alive
+served daemon --relinquish
+                       Exit the manager while keeping runners alive for another supervisor
 served shutdown        Stop the manager and all managed runners
 served edit            Open .served.json in an external editor
 served edit -e <cmd>   Use the specified editor command
@@ -251,40 +283,43 @@ continues with memory history and the manager records a warning.
 ## Optional systemd Installation
 
 The systemd integration is only for Linux. The repository stores its installer in `scripts/` and
-the unit template in `systemd/`.
-The installer runs as a normal installation user. It uses `sudo` when needed to install
-`/usr/local/bin/served` and `/etc/systemd/system/served.service`. It then runs a system
-scope `daemon-reload`, enables the unit, and starts the manager. The Rust program does not
-call `systemctl` or D-Bus.
+the unit template in `systemd/`. Run the installer as the normal user that will own the manager. It
+uses `sudo` to install the shared `/usr/local/bin/served` binary and
+`/etc/systemd/system/served@.service`, then enables and starts `served@$USER.service`. The Rust
+program does not call `systemctl` or D-Bus.
 
-The installer puts the executable at `/usr/local/bin/served`. It does not change shell startup
-files. You can run `served` from any directory after installation.
+The template uses `User=%i`; each instance gets that account's login environment, home directory,
+socket, registry, runners, and managed services. It refuses the `root` instance. It does not set
+`Group=`, so systemd uses the account's primary group. To add another account after installing the
+shared files, enable its instance explicitly:
 
-The first installation enables and starts `served.service` at `multi-user.target`. If the
-executable or unit already exists, the installer asks before it performs an overwrite upgrade.
-After installation, it asks whether to run `systemctl reload` for a manager handoff. The
-default answer accepts the handoff. A successful handoff does not stop runners or managed services.
-If the handoff fails, the installer uses a controlled restart. If you decline, the old manager keeps
-running and the installer prints a command for a later reload. If the upgrade fails, the installer
-tries to restore the old files and service.
+```bash
+sudo systemctl enable --now served@alice.service
+```
 
-If the service was inactive or failed before an upgrade, the upgrade keeps it stopped. The installer
-prints the matching `systemctl start` or `systemctl enable --now` command. Pressing
-Enter accepts the overwrite handoff. Uninstall uses `y/N`, and Enter cancels. After uninstall
-confirmation, the installer disables the unit before it stops the running service. It deletes the
-installed files only after the stop succeeds. It does not delete configuration or state. It does not
-change shell configuration. Non-interactive use skips actions that require confirmation.
+The first installation on a host enables and starts the invoking account's instance at
+`multi-user.target`.
+Upgrades preserve every instance's enabled and active state. When the shared binary changes, the
+installer reloads every active `served@*.service`; the new client tells each manager which executable
+to run, so a replaced path also works. If handoff fails, that instance receives a controlled restart.
+Stopped instances remain stopped. File or service failures restore the previous shared files and
+attempt to restore the recorded instance states.
 
-The installer detects old `~/.config/systemd/user/served.service` and `~/.local/bin/served`
-files. After migration confirmation, it stops and disables the old user service. It deletes old files
-only after the new system service becomes active. If the old user manager is not available, migration
-stops without deleting old files. Custom XDG directories receive a migration notice. The installer
-does not copy or delete them automatically.
+The installer automatically detects the old fixed `/etc/systemd/system/served.service`, the old
+`~/.config/systemd/user/served.service`, and `~/.local/bin/served`. It verifies that a fixed unit
+belongs to the invoking account. For an active fixed service, it first upgrades the manager, asks it
+to release its socket without stopping runners, and starts the new template instance to adopt them.
+If that transfer is unavailable, migration uses a controlled stop. Old files are deleted only after
+the new instance reaches its requested state. Custom XDG directories are reported but not moved.
 
-The installed systemd service uses `systemctl reload served` for manager handoff. A manager
-upgrade does not restart managed services. `systemctl restart served` and
-`systemctl stop served` are explicit lifecycle actions. They stop runners. If the manager
-exits unexpectedly, systemd starts it again and the runners continue. The new manager adopts them.
+Run `./uninstall.sh` as the account whose integration you want to remove. It disables and stops only
+that account's instance and keeps configuration and state. If any other enabled or active instance
+exists, it keeps the shared binary and template. Otherwise, a separate `y/N` prompt controls shared
+file removal. Non-interactive operations that require confirmation stop without changing state.
+
+Use `systemctl reload "served@$USER.service"` for manager handoff. `systemctl restart` and
+`systemctl stop` are explicit lifecycle actions for that account and stop its runners. If a manager
+exits unexpectedly, systemd starts it again and the surviving runners are adopted.
 
 ## Release Downloads
 
@@ -293,26 +328,28 @@ Release. The workflow builds and tests native macOS and Linux binaries for amd64
 release binaries require glibc 2.17 or later. macOS requires 10.12 or later on amd64 and 11.0 or
 later on arm64.
 
-For version `0.3.2`, the release contains:
+For version `0.4.0`, the release contains:
 
 ```text
-served-linux-amd64-v0.3.2-binary
-served-linux-amd64-v0.3.2-binary.sha256
-served-linux-amd64-v0.3.2-full.tar.gz
-served-linux-amd64-v0.3.2-full.tar.gz.sha256
-served-linux-arm64-v0.3.2-binary
-served-linux-arm64-v0.3.2-binary.sha256
-served-linux-arm64-v0.3.2-full.tar.gz
-served-linux-arm64-v0.3.2-full.tar.gz.sha256
-served-macos-amd64-v0.3.2.tar.gz
-served-macos-amd64-v0.3.2.tar.gz.sha256
-served-macos-arm64-v0.3.2.tar.gz
-served-macos-arm64-v0.3.2.tar.gz.sha256
+served-linux-amd64-v0.4.0-binary
+served-linux-amd64-v0.4.0-binary.sha256
+served-linux-amd64-v0.4.0-full.tar.gz
+served-linux-amd64-v0.4.0-full.tar.gz.sha256
+served-linux-arm64-v0.4.0-binary
+served-linux-arm64-v0.4.0-binary.sha256
+served-linux-arm64-v0.4.0-full.tar.gz
+served-linux-arm64-v0.4.0-full.tar.gz.sha256
+served-macos-amd64-v0.4.0.tar.gz
+served-macos-amd64-v0.4.0.tar.gz.sha256
+served-macos-arm64-v0.4.0.tar.gz
+served-macos-arm64-v0.4.0.tar.gz.sha256
+served-v0.4.0-source.tar.gz
+served-v0.4.0-source.tar.gz.sha256
 ```
 
 The Linux `binary` asset contains only the executable. The Linux `full.tar.gz` asset contains the
-executable, system unit, installer, uninstaller, and both README files. Each asset has its own
-SHA-256 sidecar file with `.sha256` appended to the original file name.
+executable, `served@.service`, installer, uninstaller, and both README files. The deterministic
+source archive is the input used by the AUR package. Each asset has its own SHA-256 sidecar file.
 
 The macOS archive contains the executable, both README files, and the license. macOS binaries use
 ad-hoc code signatures and are not notarized. The workflow does not build musl or Windows targets.
@@ -357,6 +394,10 @@ make msrv-check      # Compile every target with Rust 1.85
 make build-cross     # Build the other host architecture
 make build-all       # Build both host architectures
 make dist            # Package both host architectures
+make source-dist     # Create the deterministic source archive
+make shellcheck      # Check all repository shell scripts
+make systemd-check   # Validate the systemd template
+make aur-check       # Build and inspect both AUR packages (Arch Linux)
 make linux-check     # Run the Linux checks in Docker
 ```
 

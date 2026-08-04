@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "served",
     version,
-    about = "lightweight service manager for one installation user"
+    about = "lightweight per-user service manager"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,8 +28,11 @@ enum Command {
     /// Run the manager in the foreground under a process supervisor.
     Daemon {
         /// Ask the running manager to replace itself while keeping runners alive.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "relinquish")]
         handoff: bool,
+        /// Ask the running manager to exit while keeping runners alive.
+        #[arg(long, conflicts_with = "handoff")]
+        relinquish: bool,
     },
     /// Stop the manager and all managed runners.
     Shutdown,
@@ -88,11 +91,21 @@ async fn main() -> Result<()> {
             let paths = ServedPaths::from_environment().context("served requires HOME")?;
             match command {
                 None => tui::run(paths).await,
-                Some(Command::Daemon { handoff }) => {
+                Some(Command::Daemon {
+                    handoff,
+                    relinquish,
+                }) => {
                     if handoff {
                         manager::request_handoff(paths).await
+                    } else if relinquish {
+                        manager::request_relinquish(paths).await
                     } else {
-                        manager::run_daemon(paths).await
+                        match manager::run_daemon(paths).await? {
+                            manager::DaemonExit::Stopped => Ok(()),
+                            manager::DaemonExit::Relinquished => {
+                                process::exit(manager::SUPERVISOR_RELINQUISH_EXIT_CODE)
+                            }
+                        }
                     }
                 }
                 Some(Command::Shutdown) => manager::request_shutdown(paths).await,
@@ -251,8 +264,22 @@ mod tests {
             Cli::try_parse_from(["served", "daemon", "--handoff"]).expect("parse daemon handoff");
         assert!(matches!(
             daemon.command,
-            Some(Command::Daemon { handoff: true })
+            Some(Command::Daemon {
+                handoff: true,
+                relinquish: false,
+            })
         ));
+
+        let relinquish =
+            Cli::try_parse_from(["served", "daemon", "--relinquish"]).expect("parse relinquish");
+        assert!(matches!(
+            relinquish.command,
+            Some(Command::Daemon {
+                handoff: false,
+                relinquish: true,
+            })
+        ));
+        assert!(Cli::try_parse_from(["served", "daemon", "--handoff", "--relinquish"]).is_err());
 
         let shutdown = Cli::try_parse_from(["served", "shutdown"]).expect("parse shutdown");
         assert!(matches!(shutdown.command, Some(Command::Shutdown)));

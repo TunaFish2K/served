@@ -62,7 +62,8 @@ build_target() {
         zig_version="$(zig version)"
     elif python3 -m ziglang version >/dev/null 2>&1; then
         zig_version="$(python3 -m ziglang version)"
-        export CARGO_ZIGBUILD_PYTHON_PATH="$(command -v python3)"
+        CARGO_ZIGBUILD_PYTHON_PATH="$(command -v python3)"
+        export CARGO_ZIGBUILD_PYTHON_PATH
     else
         fail "zig 0.14.1 is required for Linux release builds; run make bootstrap"
     fi

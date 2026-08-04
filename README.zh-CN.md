@@ -33,7 +33,8 @@ served daemon
 同时保留 runner 和受管服务。向前台 manager 发送 `SIGTERM` 或 `SIGINT` 也会执行优雅停止。
 
 Linux 用户如果选择 systemd，可以下载对应架构的 `full.tar.gz` 并运行 `./install.sh`；该流程
-需要可用的 `sudo`。安装器会启用 `served.service`，但不会自动启用项目服务。
+需要可用的 `sudo`。安装器会为执行脚本的账户启用 `served@$USER.service`，但不会自动启用
+项目服务。
 
 manager 启动后：
 
@@ -55,39 +56,69 @@ Linux 完整安装包包含以下文件，并从包目录运行安装脚本：
 
 ```text
 served
-served.service
+served@.service
 install.sh
 uninstall.sh
 README.md
 README.zh-CN.md
 ```
 
+## Nix 和 AUR
+
+只安装二进制：
+
+```bash
+nix profile install github:TunaFish2K/served
+```
+
+NixOS 配置先导入 `inputs.served.nixosModules.default`，再声明需要独立 manager 的账户：
+
+```nix
+services.served = {
+  enable = true;
+  users = [ "alice" "bob" ];
+};
+```
+
+模块会把二进制加入 `environment.systemPackages`，并为每个用户创建一个 system service。
+用户列表不能为空，不能包含 `root` 或重复项。
+
+`packaging/aur/` 中的 AUR 元数据生成两个包。`served` 只包含二进制；`served-systemd`
+依赖完全相同版本的二进制包，并安装可选的 systemd 模板。安装两个包后，按需启用实例：
+
+```bash
+sudo systemctl enable --now "served@$USER.service"
+sudo systemctl enable --now served@alice.service
+```
+
 以下 systemd 安装流程只适用于 Linux。仓库中的安装脚本位于 `scripts/`，system unit 模板
-位于 `systemd/`。安装脚本由普通安装用户执行，并在需要时通过 `sudo` 安装 `/usr/local/bin/served` 和
-`/etc/systemd/system/served.service`，然后执行 system scope 的 `daemon-reload`、启用和
-启动管理器。Rust 程序不会调用 `systemctl` 或 D-Bus。
+位于 `systemd/`。脚本由拥有 manager 的普通用户执行，通过 `sudo` 安装共享的
+`/usr/local/bin/served` 和 `/etc/systemd/system/served@.service`，然后启用并启动
+`served@$USER.service`。Rust 程序不会调用 `systemctl` 或 D-Bus。
 
-安装脚本把可执行文件安装到 `/usr/local/bin/served`。它不会修改用户 shell 配置文件，
-安装后无需 PATH export，在任意目录都可以运行 `served`。脚本最后会输出安装路径。
+模板使用 `User=%i`。每个实例分别使用该账户的登录环境、home、socket、registry、runner
+和受管服务。模板拒绝 `root` 实例，并且不设置 `Group=`，因此 systemd 使用账户的主组。
+共享文件安装后，可以显式增加其他账户：
 
-首次安装会直接启用并启动 `served.service` 到 `multi-user.target`。如果
-`/usr/local/bin/served` 或 `/etc/systemd/system/served.service` 已存在，脚本会进入
-覆盖升级流程。确认覆盖后，文件安装成功会询问是否通过 `systemctl reload` 做 manager
-handoff。默认同意时不会停止 runner 或受管服务。handoff 失败会退回受控重启；拒绝时旧
-manager 继续运行，并输出稍后手动 reload 的命令。升级失败会尝试恢复旧文件和旧服务。
-安装器按 passwd 中的安装用户 home 处理旧 user-service 路径，不依赖被覆盖的 `HOME`
-环境变量。
+```bash
+sudo systemctl enable --now served@alice.service
+```
 
-如果升级前服务处于 inactive 或 failed，升级后仍保持停止，但脚本会输出对应的
-`systemctl start` 或 `systemctl enable --now` 恢复命令。覆盖升级 handoff 提示回车默认为
-同意；卸载提示为 `y/N`，回车取消。卸载确认后会先 disable，再停止运行中的服务，成功后
-才删除文件。卸载不会删除配置和状态，也不会修改 shell 配置。非交互环境不会执行需要
-确认的操作。
+主机首次安装时，会在 `multi-user.target` 启用并启动调用账户的实例。升级会保留每个实例的
+enabled 和 active 状态。共享二进制变化后，安装器 reload 所有活动的
+`served@*.service`；新客户端会把新可执行文件的绝对路径交给 manager，因此目标路径被
+替换后也能 handoff。handoff 失败时只对该实例受控重启；停止的实例保持停止。文件或服务
+操作失败时，安装器会恢复旧共享文件，并尝试恢复记录的实例状态。
 
-旧版本的 `~/.config/systemd/user/served.service` 或 `~/.local/bin/served` 会被检测。
-确认迁移后，脚本会先停止并 disable 旧 user service，确认新的 system service active 后
-再删除旧文件。如果旧 user manager 不可用，迁移会安全中止且不会删除旧文件。自定义
-XDG 目录只会收到迁移提示，不会被自动复制或删除。
+安装器会自动检测旧的固定 `/etc/systemd/system/served.service`、
+`~/.config/systemd/user/served.service` 和 `~/.local/bin/served`，并确认固定 unit 属于
+当前账户。固定服务活动时，安装器先升级 manager，再让它释放 socket 但保留 runner，最后
+启动模板实例接管。无法完成转移时才执行受控停止。只有新实例达到目标状态后才删除旧文件。
+自定义 XDG 目录只报告提示，不自动移动。
+
+以目标账户运行 `./uninstall.sh` 只会 disable 和停止该账户实例，并保留配置和状态。如果
+还有其他 enabled 或 active 实例，脚本会保留共享二进制和模板；否则使用单独的 `y/N`
+提示决定是否删除共享文件。需要确认的操作在非交互环境中不会执行。
 
 ## 命令
 
@@ -96,6 +127,8 @@ served                 打开全局服务 TUI
 served daemon          用固定 HOME 路径运行前台 manager
 served daemon --handoff
                        替换 manager，同时保留 runner
+served daemon --relinquish
+                       退出 manager，但保留 runner 供另一个守护程序接管
 served shutdown        停止 manager 和所有受管 runner
 served edit            用外部编辑器打开当前目录的 .served.json
 served edit -e <cmd>   指定编辑器命令，优先于 $EDITOR
@@ -114,10 +147,9 @@ served history [name] --path
 served list            列出 manager 管理的服务
 ```
 
-安装的 systemd 服务使用 `systemctl reload served` 做 manager handoff。升级 manager 时
-不会重启受管服务。`systemctl restart served` 和 `systemctl stop served` 是明确的服务
-生命周期操作，会停止 runner。manager 异常退出或被 systemd 自动拉起时，runner 会继续
-运行，并在新 manager 启动后被接管。
+安装的 systemd 服务使用 `systemctl reload "served@$USER.service"` 做 manager handoff。
+`systemctl restart` 和 `systemctl stop` 是该账户的明确生命周期操作，会停止其 runner。
+manager 异常退出后，systemd 会启动新 manager 并接管仍在运行的 runner。
 
 `served attach` 不会启动服务管理 TUI。省略名称时使用当前目录对应的已启用服务；提供
 名称时可以从任意目录 attach。目标服务必须正在运行。attach 会话进入终端第二屏，先显示
@@ -242,26 +274,28 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建
 macOS 和 Linux 的 amd64、arm64 原生产物。Linux 二进制最低需要 glibc 2.17；macOS amd64
-最低支持 10.12，arm64 最低支持 11.0。例如版本 `0.3.2` 会包含：
+最低支持 10.12，arm64 最低支持 11.0。例如版本 `0.4.0` 会包含：
 
 ```text
-served-linux-amd64-v0.3.2-binary
-served-linux-amd64-v0.3.2-binary.sha256
-served-linux-amd64-v0.3.2-full.tar.gz
-served-linux-amd64-v0.3.2-full.tar.gz.sha256
-served-linux-arm64-v0.3.2-binary
-served-linux-arm64-v0.3.2-binary.sha256
-served-linux-arm64-v0.3.2-full.tar.gz
-served-linux-arm64-v0.3.2-full.tar.gz.sha256
-served-macos-amd64-v0.3.2.tar.gz
-served-macos-amd64-v0.3.2.tar.gz.sha256
-served-macos-arm64-v0.3.2.tar.gz
-served-macos-arm64-v0.3.2.tar.gz.sha256
+served-linux-amd64-v0.4.0-binary
+served-linux-amd64-v0.4.0-binary.sha256
+served-linux-amd64-v0.4.0-full.tar.gz
+served-linux-amd64-v0.4.0-full.tar.gz.sha256
+served-linux-arm64-v0.4.0-binary
+served-linux-arm64-v0.4.0-binary.sha256
+served-linux-arm64-v0.4.0-full.tar.gz
+served-linux-arm64-v0.4.0-full.tar.gz.sha256
+served-macos-amd64-v0.4.0.tar.gz
+served-macos-amd64-v0.4.0.tar.gz.sha256
+served-macos-arm64-v0.4.0.tar.gz
+served-macos-arm64-v0.4.0.tar.gz.sha256
+served-v0.4.0-source.tar.gz
+served-v0.4.0-source.tar.gz.sha256
 ```
 
 Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包，包含 `served`、
-`served.service`、`install.sh`、`uninstall.sh` 和两个 README 文件。每个产物都有自己的
-SHA-256 sidecar 文件，文件名是在原文件名后追加 `.sha256`。
+`served@.service`、`install.sh`、`uninstall.sh` 和两个 README 文件。可重复生成的 source
+压缩包是 AUR 构建输入。每个产物都有自己的 SHA-256 sidecar 文件。
 
 macOS 压缩包包含可执行文件、两个 README 和许可证。macOS 二进制使用 ad-hoc 签名，未进行
 notarization。当前 workflow 不构建 musl 或 Windows 目标。
@@ -299,6 +333,10 @@ make msrv-check      # 使用 Rust 1.85 编译全部 target
 make build-cross     # 构建当前系统的另一种架构
 make build-all       # 构建当前系统的两种架构
 make dist            # 打包当前系统的两种架构
+make source-dist     # 生成确定性的 source 压缩包
+make shellcheck      # 检查仓库中的 shell 脚本
+make systemd-check   # 验证 systemd 模板
+make aur-check       # 构建并检查两个 AUR 包（仅 Arch Linux）
 make linux-check     # 在 Docker 中运行完整 Linux 检查
 ```
 

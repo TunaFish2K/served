@@ -21,9 +21,9 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 - 进程守护程序必须以安装用户身份、该用户正常的 `HOME` 和前台 `served daemon` 启动
   manager。
 - 通用优雅停止接口是 `served shutdown`；保留 runner 的 manager 切换接口是
-  `served daemon --handoff`。
+  `served daemon --handoff`；跨 supervisor 迁移使用 `served daemon --relinquish`。
 - Linux systemd 完整安装包提供 `install.sh`。脚本由目标安装用户运行，在需要时调用
-  `sudo`，并启用运行 manager 的 `served.service`。
+  `sudo`，并启用运行 manager 的 `served@<user>.service`。
 - 项目服务必须先有自己的目录和 `.served.json`，再运行 `served enable`。
 - `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
 - 项目文件或配置更新后，使用 `served restart` 应用变化。
@@ -261,8 +261,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
   子进程都保持普通用户权限。
 - 进程守护程序必须提供安装用户的规范 home；served 使用固定 HOME 路径，不读取 XDG 路径
   覆盖。
-- 可选 systemd unit 使用 `User=<installation user>`、该用户主组和 home 工作目录，不依赖
-  system manager 的 `%h` 展开，并在 `multi-user.target` 启用。
+- 可选 systemd 模板使用 `User=%i`，不覆盖该用户主组，拒绝 root 实例，并使用用户 home
+  作为工作目录。它不依赖 system manager 的 `%h` 展开，并在 `multi-user.target` 启用。
 - TUI 和命令通过 `$HOME/.local/state/served/runtime/served.sock` 通信。
 - socket 只允许该用户访问。
 - 所有受管服务使用与管理器相同的用户身份。
@@ -275,42 +275,42 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 
 ## 可选 systemd 安装生命周期
 
-- 安装脚本由目标用户运行，并在内部调用 `sudo`。它安装
-  `/usr/local/bin/served` 和 `/etc/systemd/system/served.service`，不修改用户 shell 配置。
-- 安装器从 passwd 解析目标用户的 home。如果无法解析或目录不存在，会在修改文件前失败。
-- 全新安装不询问升级确认。
-- 只要目标二进制或 system unit 任一已存在，安装就按覆盖升级处理，并在修改文件前询问
-  确认。这也覆盖修复不完整安装的情况。
-- 活动管理器进行覆盖升级时，安装器会询问是否通过 `systemctl reload` 应用新管理器。
-  默认 `Y`，执行 manager handoff，不停止运行器或受管服务。
-- handoff 失败时，安装器执行受控的 `systemctl restart`，并报告受管服务已重启。拒绝
-  handoff 时，新文件仍会安装，但旧管理器继续运行，直到稍后 reload。
-- 安装器不会悄悄留下使用旧可执行文件的活动管理器而不报告状态。
-- 卸载会询问确认。确认后先 disable system service；如果服务仍在运行，再停止它。只有
-  两个操作都成功后，才删除已安装的 unit 和二进制文件。
-- 已经 disable 的服务或不存在的 unit 可以满足卸载的 disable 步骤；只有真正的 systemd
-  失败才会中止清理。
-- 卸载不修改用户 shell 配置，包括旧版本可能写入的 PATH 片段。
-- 确认提示要求交互式终端。非交互执行会中止，且不改变服务状态或文件。
-- 如果 disable 成功但停止活动服务失败，卸载会在删除任何文件前中止。
-- 卸载只有一个确认提示。确认后，disable 和 stop 不再重复询问。
-- 全新安装失败时，脚本会删除本次创建的文件和服务启用状态，然后退出。
-- 升级 handoff 使用 `Y/n`，默认同意。卸载使用 `y/N`，必须明确输入 `y`。
-- 全新安装直接启用并启动 system service，不询问 handoff。安装后的 handoff 提示只适用于
-  正在运行的活动服务覆盖升级。
-- 覆盖升级会保留 inactive 服务的停止状态，不会启动升级前已经停止的服务。
-- 如果升级后服务保持停止，安装器会按 enabled 状态输出对应的恢复命令。
-- 覆盖升级保留服务原有的 enabled 或 disabled 状态，不调用 `enable` 或 `disable`；只有
-  全新安装会启用 system service。
-- 安装或升级成功后，脚本会输出全局二进制路径，不需要 export 命令。
-- 文件替换具有事务性：保存旧文件后，如果安装新二进制或 unit 失败，脚本会恢复两者。
-- 如果升级后的受控重启失败，脚本会恢复旧二进制和 unit，并尝试启动旧管理器。回滚也失败
-  时，会同时报告两个错误。
-- 安装时会检测旧的 `~/.config/systemd/user/served.service` 或 `~/.local/bin/served`。
-  确认迁移后，先 disable 并停止旧 user service，再安装新的 system service；只有新服务
-  active 后才删除旧文件。
-- 如果无法联系旧 user manager，迁移会中止，不删除旧文件。自定义 XDG 目录只报告 warning，
-  不会自动复制或删除。
+- 安装脚本由目标普通用户运行，并在内部调用 `sudo`。它安装共享的
+  `/usr/local/bin/served` 和 `/etc/systemd/system/served@.service`，不修改 shell 配置。
+- 安装器从 passwd 解析目标用户 home，拒绝 root 和不能安全表示为实例名的用户。解析失败
+  或 home 不存在时，必须在修改文件前退出。
+- 一个实例对应一个普通用户。共享文件可以支持多个 enabled、active 或 stopped 实例；每个
+  实例使用独立 HOME 状态和 socket。
+- 主机首次建立 served systemd 集成时，安装器启用并启动调用用户的
+  `served@<user>.service`。共享模板已经存在时，新增用户实例需要显式启用。覆盖共享文件前
+  要求 `Y/n` 确认；非交互环境在需要确认时不修改文件或状态。
+- 覆盖升级记录所有活动模板实例，并对每个实例执行 manager handoff。请求携带新客户端的
+  绝对可执行文件路径。handoff 不停止 runner；单个实例失败时对它执行受控 restart。
+- 覆盖升级保留每个已知实例的 active 和 enabled 状态。升级前停止的当前用户实例不被启动；
+  安装器输出后续 start 或 enable 命令。
+- 共享二进制、模板和用于迁移的固定 unit 先备份再替换。文件安装、handoff、迁移或目标
+  状态应用失败时，脚本恢复旧文件并尝试恢复记录的服务状态。
+- 安装器检测旧固定 `/etc/systemd/system/served.service`，读取并验证它的 `User=` 属于当前
+  用户。活动 manager 优先通过旧客户端 handoff 到新二进制，再执行 relinquish，以状态 75
+  退出且保留 runner；模板实例随后接管。失败时回退到受控 stop。
+- 安装器同时检测旧 `~/.config/systemd/user/served.service` 和 `~/.local/bin/served`。
+  只有模板实例达到目标状态后才删除旧 system/user 文件。自定义 XDG 目录只报告 warning，
+  不自动复制或删除。
+- 卸载使用 `y/N` 确认，只 disable 和停止当前用户的模板实例及属于该用户的旧 unit。停止
+  失败时不删除相关文件；配置、状态和 shell 配置始终保留。
+- 卸载后若还有其他 enabled 或 active 模板实例，必须保留共享二进制和模板。没有其他实例
+  时，再用独立的 `y/N` 提示决定是否删除共享文件。
+
+## 发行包边界
+
+- GitHub Release 提供平台二进制、Linux systemd 完整包和确定性的 source archive；每个
+  产物都有 SHA-256 sidecar。
+- AUR split package 中，`served` 只包含二进制，`served-systemd` 只包含模板并精确依赖同一
+  package release。包安装不会自动选择或启用用户实例。
+- Nix flake 提供四个平台的 `served` package。NixOS module 使用
+  `services.served.users` 声明非 root、非重复用户，并生成相互隔离的 system services。
+- 当前不提供 launchd、runit、s6 或 supervisord 安装包；这些 init 可以直接托管前台
+  `served daemon`，专用集成需要另行设计。
 
 ## V1 不做的事
 
@@ -361,15 +361,15 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
     持久化 raw 文件。
 24. `served history` 使用 `-e/--editor` 优先于 `$EDITOR` 打开选中的持久化 raw 日志；
     `--path` 只打印路径，内存记录清晰报告失败原因。
-25. 渲染后的 system unit 通过 `systemd-analyze verify`，使用安装用户 home 作为
-    `WorkingDirectory`，不依赖 system manager 的 `%h` home，并定义 `ExecStop`、
-    `ExecReload` 和 `KillMode=process`。
+25. 渲染后的 `served@.service` 通过 `systemd-analyze verify`，使用 `User=%i` 和用户 home，
+    拒绝 root，不设置 `Group=`，并定义 `ExecStop`、`ExecReload`、`KillMode=process` 和状态
+    75 的 relinquish 语义。
 26. 终止管理器后，启用服务的运行器和服务 PID 仍存活；新管理器接管运行器，不重复启动
     服务。
-27. `systemctl reload served` 替换管理器但不改变受管服务 PID；`served shutdown` 在管理器
-    退出前停止运行器。
-28. 活动安装覆盖升级时提供 manager handoff；拒绝时报告状态，handoff 失败时回退到受控
-    重启。
+27. `systemctl reload served@<user>` 从请求指定的新绝对路径替换管理器但不改变受管服务
+    PID；`served shutdown` 在管理器退出前停止运行器。
+28. `served daemon --relinquish` 让 manager 以状态 75 释放 socket，保留 runner；新
+    supervisor 启动的 manager 接管相同服务 PID。
 29. 60 秒内发生三次启动失败或非成功退出时，失败的 attach 返回结构化崩溃循环诊断；窗口
     外的失败不计入。
 30. `persist_logs: true` 的崩溃循环服务会在 CLI 和 TUI attach 提示中提供当前 `latest.log`；
@@ -382,3 +382,11 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
     10.12 和 11.0 deployment target，并通过 ad-hoc 签名校验。
 34. `served daemon` 可由非 systemd 守护程序前台托管；`served shutdown` 优雅停止所有
     runner，`served daemon --handoff` 替换 manager 并保留服务 PID。
+35. 两个 systemd 用户实例同时运行时，各自 socket 归对应用户所有；停止一个实例不会影响
+    另一个实例。
+36. 安装器把当前用户的旧固定 system service 自动迁移到模板实例；可用时保留 runner，
+    失败时明确报告受控停止。
+37. 卸载一个用户实例时，如果其他实例仍 enabled 或 active，共享二进制和模板保持不变。
+38. AUR 构建生成只含二进制的 `served` 和只含模板的 `served-systemd`；`.SRCINFO` 与
+    `PKGBUILD` 一致，source archive 哈希可重复。
+39. Nix package 在四个声明平台求值并构建；NixOS VM 验证两个用户实例的隔离。

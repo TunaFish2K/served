@@ -41,15 +41,10 @@ inputs=(
     tests
 )
 
+command -v python3 >/dev/null 2>&1 || {
+    printf 'error: python3 is required\n' >&2
+    exit 1
+}
 mkdir -p "$(dirname -- "$output")"
-tar \
-    --sort=name \
-    --format=ustar \
-    --mtime='@0' \
-    --owner=0 \
-    --group=0 \
-    --numeric-owner \
-    --transform="s,^,served-${version}/," \
-    -C "$project_dir" \
-    -cf - \
-    "${inputs[@]}" | gzip -n -9 > "$output"
+python3 "$project_dir/scripts/package-source.py" \
+    "$project_dir" "$output" "$version" "${inputs[@]}"

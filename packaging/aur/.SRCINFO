@@ -9,7 +9,7 @@ pkgbase = served
 	makedepends = cargo
 	options = !debug
 	source = served-0.4.0.tar.gz::https://github.com/TunaFish2K/served/releases/download/v0.4.0/served-v0.4.0-source.tar.gz
-	sha256sums = b74cc2c95ef425f1b3928f4c3afd120504915358461f33fb2cb52615516e4873
+	sha256sums = e7769469cb1c22c6d910cfc97ef28bfe878a3e43c2049b16bada6483bb795132
 
 pkgname = served
 	depends = gcc-libs

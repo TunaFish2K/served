@@ -98,6 +98,8 @@ jobs:
         if: matrix.os == 'linux'
         shell: bash
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
           python3 -m pip install --user --break-system-packages ziglang==0.14.1
           if [[ ! -x "$CARGO_HOME/bin/cargo-zigbuild" ]] ||
              [[ "$("$CARGO_HOME/bin/cargo-zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then

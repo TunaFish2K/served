@@ -172,4 +172,19 @@ jobs:
           chown -R builder:builder "$GITHUB_WORKSPACE"
 
       - name: Build and inspect packages
-        run: runuser -u builder -- env HOME=/home/builder scripts/check-aur-package.sh
+        shell: bash
+        run: |
+          log="$(mktemp)"
+          set +e
+          runuser -u builder -- env HOME=/home/builder TMPDIR=/tmp \
+            bash "$GITHUB_WORKSPACE/scripts/check-aur-package.sh" 2>&1 | tee "$log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          if (( status != 0 )); then
+            details="$(tail -n 20 "$log" | tr '\n' ' ')"
+            details="${details//'%'/'%25'}"
+            details="${details//$'\r'/'%0D'}"
+            printf '::error title=AUR package check failed::exit %s: %s\n' \
+              "$status" "$details"
+            exit "$status"
+          fi

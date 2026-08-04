@@ -99,7 +99,8 @@ jobs:
         shell: bash
         run: |
           python3 -m pip install --user --break-system-packages ziglang==0.14.1
-          if ! cargo zigbuild --version 2>/dev/null | grep -q '0.21.8'; then
+          if [[ ! -x "$CARGO_HOME/bin/cargo-zigbuild" ]] ||
+             [[ "$("$CARGO_HOME/bin/cargo-zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
             cargo install --locked --version 0.21.8 cargo-zigbuild
           fi
 

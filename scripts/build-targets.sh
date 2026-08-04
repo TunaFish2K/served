@@ -5,6 +5,8 @@ project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-}"
 rust_toolchain="${RUST_TOOLCHAIN:-stable}"
 cargo_for_target=("$project_dir/scripts/cargo-toolchain.sh" "$rust_toolchain")
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+cargo_zigbuild="$cargo_home/bin/cargo-zigbuild"
 
 fail() {
     printf 'error: %s\n' "$1" >&2
@@ -66,7 +68,8 @@ build_target() {
     fi
     [[ "$zig_version" == "0.14.1" ]] ||
         fail "Zig 0.14.1 is required, found $zig_version"
-    "${cargo_for_target[@]}" zigbuild --version >/dev/null 2>&1 ||
+    [[ -x "$cargo_zigbuild" ]] &&
+        [[ "$("$cargo_zigbuild" --version 2>/dev/null)" == "cargo-zigbuild 0.21.8" ]] ||
         fail "cargo-zigbuild 0.21.8 is required; run make bootstrap"
     "${cargo_for_target[@]}" zigbuild --release --locked --target "${target}.2.17"
 }

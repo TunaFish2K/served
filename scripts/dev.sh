@@ -6,6 +6,8 @@ dev_home="$project_dir/.dev/home"
 command_name="${1:-}"
 rust_toolchain="${RUST_TOOLCHAIN:-stable}"
 cargo_for_dev=("$project_dir/scripts/cargo-toolchain.sh" "$rust_toolchain")
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+cargo_zigbuild="$cargo_home/bin/cargo-zigbuild"
 shift || true
 
 fail() {
@@ -29,7 +31,8 @@ bootstrap() {
     rustup component add --toolchain "$rust_toolchain" rustfmt clippy
 
     if [[ "$(uname -s)" == "Linux" ]]; then
-        if ! "${cargo_for_dev[@]}" zigbuild --version 2>/dev/null | grep -q '0.21.8'; then
+        if [[ ! -x "$cargo_zigbuild" ]] ||
+            [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
             "${cargo_for_dev[@]}" install --locked --version 0.21.8 cargo-zigbuild
         fi
         if command -v zig >/dev/null 2>&1; then

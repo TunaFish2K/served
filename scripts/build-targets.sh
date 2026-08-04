@@ -69,9 +69,10 @@ build_target() {
     fi
     [[ "$zig_version" == "0.14.1" ]] ||
         fail "Zig 0.14.1 is required, found $zig_version"
-    [[ -x "$cargo_zigbuild" ]] &&
-        [[ "$("$cargo_zigbuild" --version 2>/dev/null)" == "cargo-zigbuild 0.21.8" ]] ||
+    if [[ ! -x "$cargo_zigbuild" ]] ||
+        [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
         fail "cargo-zigbuild 0.21.8 is required; run make bootstrap"
+    fi
     "${cargo_for_target[@]}" zigbuild --release --locked --target "${target}.2.17"
 }
 

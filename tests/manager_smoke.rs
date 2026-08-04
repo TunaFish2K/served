@@ -1380,13 +1380,14 @@ async fn wait_for_process(pid: u32) {
 }
 
 fn process_exists(pid: u32) -> bool {
-    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat"))
-        && stat
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let is_zombie = stat
             .rsplit_once(") ")
             .and_then(|(_, fields)| fields.as_bytes().first())
-            == Some(&b'Z')
-    {
-        return false;
+            == Some(&b'Z');
+        if is_zombie {
+            return false;
+        }
     }
     let Ok(pid) = i32::try_from(pid) else {
         return false;

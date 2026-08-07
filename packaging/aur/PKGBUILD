@@ -12,7 +12,7 @@ license=(Unlicense)
 makedepends=(cargo)
 options=(!debug)
 source=("served-$pkgver.tar.gz::$url/releases/download/v$pkgver/served-v$pkgver-source.tar.gz")
-sha256sums=('b98220d8ce453c821236fbb4f02db708239dd76b10ed8b6e917eb3ba50decad8')
+sha256sums=('7724d5776a614c8b4cffadbfff6ec866de40d238c1a6f20e8c4fe58089ea2000')
 
 case "$CARCH" in
     x86_64) _target=x86_64-unknown-linux-gnu ;;

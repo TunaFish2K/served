@@ -223,7 +223,7 @@ inspect_installation() {
         systemctl_root list-units --type=service --state=active 'served@*.service' \
             --no-legend --plain
     )" || fatal "could not list active served template instances"
-    mapfile -t active_instances < <(awk '{ print $1 }' <<<"$active_instance_output")
+    mapfile -t active_instances < <(awk 'NF { print $1 }' <<<"$active_instance_output")
 }
 
 backup_files() {
@@ -311,6 +311,7 @@ restore_active_instance_managers() {
     local failed=0
 
     for unit in "${active_instances[@]}"; do
+        [[ -n "$unit" ]] || continue
         if systemctl_root reload "$unit" && unit_active "$unit"; then
             continue
         fi
@@ -351,6 +352,7 @@ install_files() {
 reload_active_instances() {
     local unit
     for unit in "${active_instances[@]}"; do
+        [[ -n "$unit" ]] || continue
         if systemctl_root reload "$unit" && unit_active "$unit"; then
             printf '%s manager handed off with runners preserved\n' "$unit"
         else

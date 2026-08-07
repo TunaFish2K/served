@@ -274,23 +274,23 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建
 macOS 和 Linux 的 amd64、arm64 原生产物。Linux 二进制最低需要 glibc 2.17；macOS amd64
-最低支持 10.12，arm64 最低支持 11.0。例如版本 `0.4.0` 会包含：
+最低支持 10.12，arm64 最低支持 11.0。例如版本 `0.4.1` 会包含：
 
 ```text
-served-linux-amd64-v0.4.0-binary
-served-linux-amd64-v0.4.0-binary.sha256
-served-linux-amd64-v0.4.0-full.tar.gz
-served-linux-amd64-v0.4.0-full.tar.gz.sha256
-served-linux-arm64-v0.4.0-binary
-served-linux-arm64-v0.4.0-binary.sha256
-served-linux-arm64-v0.4.0-full.tar.gz
-served-linux-arm64-v0.4.0-full.tar.gz.sha256
-served-macos-amd64-v0.4.0.tar.gz
-served-macos-amd64-v0.4.0.tar.gz.sha256
-served-macos-arm64-v0.4.0.tar.gz
-served-macos-arm64-v0.4.0.tar.gz.sha256
-served-v0.4.0-source.tar.gz
-served-v0.4.0-source.tar.gz.sha256
+served-linux-amd64-v0.4.1-binary
+served-linux-amd64-v0.4.1-binary.sha256
+served-linux-amd64-v0.4.1-full.tar.gz
+served-linux-amd64-v0.4.1-full.tar.gz.sha256
+served-linux-arm64-v0.4.1-binary
+served-linux-arm64-v0.4.1-binary.sha256
+served-linux-arm64-v0.4.1-full.tar.gz
+served-linux-arm64-v0.4.1-full.tar.gz.sha256
+served-macos-amd64-v0.4.1.tar.gz
+served-macos-amd64-v0.4.1.tar.gz.sha256
+served-macos-arm64-v0.4.1.tar.gz
+served-macos-arm64-v0.4.1.tar.gz.sha256
+served-v0.4.1-source.tar.gz
+served-v0.4.1-source.tar.gz.sha256
 ```
 
 Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包，包含 `served`、

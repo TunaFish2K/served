@@ -328,23 +328,23 @@ Release. The workflow builds and tests native macOS and Linux binaries for amd64
 release binaries require glibc 2.17 or later. macOS requires 10.12 or later on amd64 and 11.0 or
 later on arm64.
 
-For version `0.4.0`, the release contains:
+For version `0.4.1`, the release contains:
 
 ```text
-served-linux-amd64-v0.4.0-binary
-served-linux-amd64-v0.4.0-binary.sha256
-served-linux-amd64-v0.4.0-full.tar.gz
-served-linux-amd64-v0.4.0-full.tar.gz.sha256
-served-linux-arm64-v0.4.0-binary
-served-linux-arm64-v0.4.0-binary.sha256
-served-linux-arm64-v0.4.0-full.tar.gz
-served-linux-arm64-v0.4.0-full.tar.gz.sha256
-served-macos-amd64-v0.4.0.tar.gz
-served-macos-amd64-v0.4.0.tar.gz.sha256
-served-macos-arm64-v0.4.0.tar.gz
-served-macos-arm64-v0.4.0.tar.gz.sha256
-served-v0.4.0-source.tar.gz
-served-v0.4.0-source.tar.gz.sha256
+served-linux-amd64-v0.4.1-binary
+served-linux-amd64-v0.4.1-binary.sha256
+served-linux-amd64-v0.4.1-full.tar.gz
+served-linux-amd64-v0.4.1-full.tar.gz.sha256
+served-linux-arm64-v0.4.1-binary
+served-linux-arm64-v0.4.1-binary.sha256
+served-linux-arm64-v0.4.1-full.tar.gz
+served-linux-arm64-v0.4.1-full.tar.gz.sha256
+served-macos-amd64-v0.4.1.tar.gz
+served-macos-amd64-v0.4.1.tar.gz.sha256
+served-macos-arm64-v0.4.1.tar.gz
+served-macos-arm64-v0.4.1.tar.gz.sha256
+served-v0.4.1-source.tar.gz
+served-v0.4.1-source.tar.gz.sha256
 ```
 
 The Linux `binary` asset contains only the executable. The Linux `full.tar.gz` asset contains the

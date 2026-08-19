@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+pub mod cli;
 pub mod client;
 pub mod config;
 pub mod editor;
+mod ipc;
 pub mod logs;
 pub mod manager;
 pub mod paths;

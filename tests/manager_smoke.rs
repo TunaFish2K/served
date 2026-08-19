@@ -78,6 +78,33 @@ async fn enable_restart_and_disable_a_pipe_service() {
     assert!(matches!(response, Response::Ok));
     wait_for_state(&paths, "smoke", ServiceState::Running).await;
 
+    let duplicate_dir = root.path().join("duplicate");
+    fs::create_dir_all(&duplicate_dir).expect("duplicate service");
+    fs::write(
+        duplicate_dir.join(".served.json"),
+        r#"{
+  "name": "smoke",
+  "command": "exit 99",
+  "tty": false,
+  "restart": "never"
+}
+"#,
+    )
+    .expect("duplicate config");
+    let duplicate_error = client::request(
+        &paths,
+        Request::Enable {
+            directory: duplicate_dir.display().to_string(),
+        },
+    )
+    .await
+    .expect_err("duplicate service name must be rejected");
+    assert!(duplicate_error.to_string().contains("already enabled"));
+    assert_eq!(
+        fs::read_link(paths.registry_dir().join("smoke")).expect("read enable link"),
+        service_dir
+    );
+
     let original_config = fs::read(service_dir.join(".served.json")).expect("read config");
     fs::write(service_dir.join(".served.json"), "{ invalid json\n").expect("invalid config");
     let error = client::request(
@@ -154,7 +181,7 @@ async fn persistent_and_memory_history_survive_service_restarts() {
         memory_dir.join(".served.json"),
         r#"{
   "name": "memory",
-  "command": "printf 'memory-output\\n'; sleep 0.2",
+  "command": "i=0; while [ \"$i\" -lt 6000 ]; do printf 'memory-line-%04d\\n' \"$i\"; i=$((i + 1)); done; printf '\\033[31mmemory-output\\033[0m\\n'; sleep 0.2",
   "tty": false,
   "restart": "never",
   "persist_logs": false
@@ -246,9 +273,58 @@ async fn persistent_and_memory_history_survive_service_restarts() {
         .iter()
         .find(|record| !record.current && !record.persisted)
         .expect("memory archive");
+    assert_eq!(memory_archive.bytes, 64 * 1024);
     assert!(!paths.logs_dir().join("memory").exists());
     let memory_output = read_history(&paths, "memory", &memory_archive.id, 4).await;
     assert!(memory_output.contains("memory-output"));
+
+    let persistent_stdout = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["history", "persistent", "--run"])
+        .arg(&persistent_archive.id)
+        .arg("--stdout")
+        .env("HOME", &home)
+        .output()
+        .expect("export persistent history");
+    assert!(persistent_stdout.status.success());
+    assert!(String::from_utf8_lossy(&persistent_stdout.stdout).contains("persistent-output"));
+
+    let memory_stdout = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["history", "memory", "--run"])
+        .arg(&memory_archive.id)
+        .arg("--stdout")
+        .env("HOME", &home)
+        .output()
+        .expect("export memory history");
+    assert!(memory_stdout.status.success());
+    let memory_stdout = String::from_utf8(memory_stdout.stdout).expect("UTF-8 history output");
+    assert!(memory_stdout.contains("memory-output"));
+    assert!(!memory_stdout.contains('\u{1b}'));
+
+    let memory_json = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["history", "memory", "--run"])
+        .arg(&memory_archive.id)
+        .arg("--json")
+        .env("HOME", &home)
+        .output()
+        .expect("export memory history JSON");
+    assert!(memory_json.status.success());
+    let memory_json: serde_json::Value =
+        serde_json::from_slice(&memory_json.stdout).expect("parse history JSON");
+    assert_eq!(memory_json["service"], "memory");
+    assert_eq!(memory_json["id"], memory_archive.id);
+    assert_eq!(memory_json["current"], false);
+    assert_eq!(memory_json["persisted"], false);
+    assert_eq!(memory_json["raw_bytes"], 64 * 1024);
+    let memory_json_content = memory_json["content"]
+        .as_str()
+        .expect("JSON history content");
+    assert_eq!(
+        memory_json["total_lines"],
+        memory_json_content.lines().count() as u64
+    );
+    assert!(memory_json_content.contains("memory-output"));
+    assert!(!memory_json_content.contains('\u{1b}'));
+    assert!(!paths.logs_dir().join("memory").exists());
 
     for name in ["persistent", "memory"] {
         client::expect_ok(

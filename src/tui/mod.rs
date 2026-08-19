@@ -1,6 +1,6 @@
 use std::{
     io::{self, IsTerminal, Write, stdout},
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -10,7 +10,7 @@ use crate::{
     editor,
     logs::DEFAULT_CHUNK_LIMIT,
     paths::ServedPaths,
-    protocol::{HistoryRecord, Request, Response, ServiceInfo, ServiceState, Target},
+    protocol::{Request, Response, Target},
 };
 use anyhow::{Context, Result, bail};
 use crossterm::{
@@ -23,18 +23,22 @@ use crossterm::{
     },
 };
 use rand::{seq::SliceRandom, thread_rng};
-use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
-};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::interval,
 };
+
+mod model;
+mod view;
+
+use model::{CrashLogPrompt, CrashPromptAction, HistoryView, crash_prompt_action};
+use view::{draw_history_content, draw_history_list, draw_main};
+
+#[cfg(test)]
+use crate::protocol::{ServiceInfo, ServiceState};
+#[cfg(test)]
+use view::{history_position, main_footer};
 
 const TIPS: &[&str] = &[
     "one directory, one .served.json, one working directory",
@@ -193,7 +197,7 @@ async fn run_loop(
             }
         }
 
-        terminal.draw(|frame| draw(frame, &services, selected, tip, &notice))?;
+        terminal.draw(|frame| draw_main(frame, &services, selected, tip, &notice))?;
         if !event::poll(Duration::from_millis(250)).context("poll terminal event")? {
             continue;
         }
@@ -298,122 +302,10 @@ async fn run_loop(
     }
 }
 
-struct CrashLogPrompt {
-    warning: String,
-    path: PathBuf,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CrashPromptAction {
-    Open,
-    Cancel,
-    Ignore,
-}
-
-fn crash_prompt_action(code: &KeyCode) -> CrashPromptAction {
-    match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => CrashPromptAction::Open,
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => CrashPromptAction::Cancel,
-        _ => CrashPromptAction::Ignore,
-    }
-}
-
 fn command_notice(result: Result<()>, action: &str) -> String {
     match result {
         Ok(()) => format!("{action} requested"),
         Err(error) => format!("{action}: {error}"),
-    }
-}
-
-fn draw(frame: &mut Frame<'_>, services: &[ServiceInfo], selected: usize, tip: &str, notice: &str) {
-    let areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(6),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
-        .split(frame.area());
-
-    let title = Paragraph::new(Line::from("served"))
-        .block(Block::default().borders(Borders::ALL).title("manager"));
-    frame.render_widget(title, areas[0]);
-
-    let items: Vec<ListItem> = services
-        .iter()
-        .map(|service| {
-            let state = state_name(&service.state);
-            ListItem::new(format!(
-                "{:<18} {:<11} {}",
-                service.name, state, service.directory
-            ))
-        })
-        .collect();
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("enabled services"),
-        )
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    let mut list_state = ListState::default();
-    if !services.is_empty() {
-        list_state.select(Some(selected.min(services.len() - 1)));
-    }
-    frame.render_stateful_widget(list, areas[1], &mut list_state);
-
-    frame.render_widget(Paragraph::new(notice).wrap(Wrap { trim: false }), areas[2]);
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[3]);
-    frame.render_widget(
-        Paragraph::new(main_footer(services, selected)).wrap(Wrap { trim: false }),
-        areas[4],
-    );
-}
-
-fn main_footer(services: &[ServiceInfo], selected: usize) -> String {
-    let navigation = "up/down/j/k move";
-    if services.get(selected).is_none() {
-        return format!("{navigation}   q/Esc quit");
-    }
-    format!("{navigation}   r restart   d disable   a attach   h history   q/Esc quit")
-}
-
-fn state_name(state: &ServiceState) -> &'static str {
-    match state {
-        ServiceState::Starting => "starting",
-        ServiceState::Running => "running",
-        ServiceState::Restarting => "restarting",
-        ServiceState::Stopped => "stopped",
-        ServiceState::Failed => "failed",
-    }
-}
-
-struct HistoryView {
-    id: String,
-    content: String,
-    offset: u64,
-    eof: bool,
-    total_lines: u64,
-    scroll: u64,
-}
-
-impl HistoryView {
-    fn new(id: String) -> Self {
-        Self {
-            id,
-            content: String::new(),
-            offset: 0,
-            eof: false,
-            total_lines: 0,
-            scroll: 0,
-        }
     }
 }
 
@@ -553,97 +445,6 @@ fn clamp_history_scroll(view: &mut HistoryView) {
     } else {
         view.scroll = view.scroll.min(view.total_lines.saturating_sub(1));
     }
-}
-
-fn history_position(scroll: u64, total_lines: u64) -> (u64, u64) {
-    if total_lines == 0 {
-        (0, 0)
-    } else {
-        (scroll.min(total_lines.saturating_sub(1)) + 1, total_lines)
-    }
-}
-
-fn draw_history_list(
-    frame: &mut Frame<'_>,
-    name: &str,
-    records: &[HistoryRecord],
-    selected: usize,
-    tip: &str,
-) {
-    let areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(6),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
-        .split(frame.area());
-    let title = Paragraph::new(format!("history: {name}"))
-        .block(Block::default().borders(Borders::ALL).title("served"));
-    frame.render_widget(title, areas[0]);
-    let items = records.iter().map(|record| {
-        ListItem::new(format!(
-            "{:<28} {:>10} bytes  {}",
-            record.id,
-            record.bytes,
-            if record.persisted { "disk" } else { "memory" }
-        ))
-    });
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("runs"))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    let mut state = ListState::default();
-    if !records.is_empty() {
-        state.select(Some(selected.min(records.len() - 1)));
-    }
-    frame.render_stateful_widget(list, areas[1], &mut state);
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[2]);
-    frame.render_widget(
-        Paragraph::new("up/down/j/k move   Enter open   Esc/q back").wrap(Wrap { trim: false }),
-        areas[3],
-    );
-}
-
-fn draw_history_content(frame: &mut Frame<'_>, name: &str, view: &HistoryView, tip: &str) {
-    let areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(4),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
-        .split(frame.area());
-    frame.render_widget(
-        Paragraph::new(format!("history: {name} / {}", view.id))
-            .block(Block::default().borders(Borders::ALL).title("served")),
-        areas[0],
-    );
-    frame.render_widget(
-        Paragraph::new(view.content.as_str())
-            .block(Block::default().borders(Borders::ALL).title("output"))
-            .scroll((view.scroll.min(u16::MAX as u64) as u16, 0))
-            .wrap(Wrap { trim: false }),
-        areas[1],
-    );
-    let (position, total_lines) = history_position(view.scroll, view.total_lines);
-    frame.render_widget(
-        Paragraph::new(format!("{position}/{total_lines}")),
-        areas[2],
-    );
-    frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[3]);
-    frame.render_widget(
-        Paragraph::new("up/down/j/k scroll   PgUp/PgDn page   g/G top/end   Esc/q back")
-            .wrap(Wrap { trim: false }),
-        areas[4],
-    );
 }
 
 async fn attach_in_tui(
@@ -914,7 +715,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         let services = vec![service_info(true)];
         terminal
-            .draw(|frame| draw(frame, &services, 0, "render tip", ""))
+            .draw(|frame| draw_main(frame, &services, 0, "render tip", ""))
             .expect("draw");
 
         let text = buffer_text(&terminal);

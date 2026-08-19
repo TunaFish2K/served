@@ -53,18 +53,20 @@
 - Attach 先显示当前运行的 48 行清理快照，再显示实时输出。快照只用于显示，不会发送给
   服务 PTY。完整输出历史仍由独立的 TUI 历史页和 `served history` 命令提供；历史记录
   不会作为终端状态回放。TUI 保留列表、内容浏览器和位置行。CLI 选择 `latest` 或
-  `--run <id>`，用 `-e/--editor`（否则使用 `$EDITOR`）打开持久化 raw 日志；`--path`
-  只打印路径。内存记录没有 CLI 路径。
+  `--run <id>`；编辑器和 `--path` 访问持久化 raw 日志，`--stdout` 和 `--json` 通过分页
+  IPC 输出持久化或内存记录的清理后内容。内存输出不会创建临时文件。
 - 管道 attach 转发 stdout/stderr raw 字节，忽略输入，并允许多个观察者。PTY attach
   仍然双向通信，并且只有一个写入者。
 - Attach 中的 `Ctrl-C` 只执行 detach，不会把该字节转发给任何服务。
 - 只有 attach 失败时才显示面向用户的崩溃循环警告。CLI 和 TUI 使用协议中的结构化诊断，
-  有可用的当前持久化 `latest.log` 时通过 `$EDITOR` 提供打开选项。内存历史不会导出到
-  临时文件。离开编辑器后不重试 attach。
+  有可用的当前持久化 `latest.log` 时通过统一编辑器解析器提供打开选项。内存历史不会
+  导出到临时文件，可在 attach 失败后用 `served history --stdout` 或 `--json` 读取。离开
+  编辑器后不重试 attach。
 - 主 TUI 不再显示最近输出面板。无论 TTY 模式如何，都显示 `a attach`。
 - `.served.json` 按 JSON5 解析。新的 `served edit` 模板为每个字段添加详细行内注释；
-  已有文件打开时不重写。编辑器优先使用 `-e/--editor COMMAND`，否则使用 `$EDITOR`；
-  `--path` 创建缺失模板后只打印绝对配置路径。
+  已有文件打开时不重写。编辑器依次使用 `-e/--editor COMMAND`、`$EDITOR`，或从 `PATH`
+  查找 `editor`、`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`；`--path`
+  创建缺失模板后只打印绝对配置路径。
 - 每个服务的环境优先级为 manager 启动环境、旧版 `.env.served` dotenv 值、JSON5 字面量
   `env` 值。新模板不创建 `.env.served`，项目 `.env` 永远不读取。
 - `persist_logs` 默认值为 `false`，下次进程启动或重启时生效。持久化日志使用
@@ -82,13 +84,20 @@
   home 作为登录环境和工作目录。system manager 的 home 展开不属于服务路径约定。
 - `/usr/local/bin/served` 和 `served@.service` 是共享文件；每个实例的 socket、registry、
   runner 和服务仍按固定 HOME 路径隔离。共享升级会 handoff 所有活动实例。
-- AUR 分为只含二进制的 `served` 和可选的 `served-systemd`；Nix flake 提供 package 和以
-  `services.served.users` 声明实例的 NixOS module。其他 init 暂不提供专用包。
+- GitHub Release、source archive 和可选 systemd 完整包是仓库维护的发行边界。发行版
+  包管理器元数据和模块由外部打包者维护，不属于兼容性承诺；其他 init 暂不提供专用包。
 - 每个启用服务在 `$HOME/.local/state/served/runtime/runners/<name>/` 下拥有一个 runner。
   manager 失败或收到非预期信号时，不会停止 runner 或服务。明确的 shutdown、disable 和
   服务 restart 会停止它。
 - runner 状态包含有上限的内存历史、重启退避和近期崩溃窗口。manager 重启不会清除这些
   状态。已有 attach 流是 manager 代理，在 manager 替换时会断开。
+- manager 维护 runner 状态缓存，`served list` 和 TUI 列表只读取缓存。新 runner 通过
+  additive v1 `WatchStatus` 长连接推送初始状态和后续变化；旧 v1 runner 不认识该请求时，
+  manager 自动退回每秒一次的 `Status` 轮询。该兼容路径不改变公共 manager v6 wire shape。
+- TTY 和管道服务共用一个 worker supervisor。进程退出、stop、restart、attach、resize、
+  进程组终止和输出分发只有一套状态机；PTY 和 pipe 只保留各自的进程与 I/O 适配代码。
+- framed Unix transport、公共 manager 协议和私有 runner 协议分别拥有独立模块。runner wire
+  DTO 不复用 manager DTO，日志存储记录也不作为 wire DTO 使用。
 
 ## 兼容性
 
@@ -97,7 +106,8 @@ relay。协议版本 3 增加精确的清理后历史行数；版本 4 增加结
 版本 5 增加 manager handoff/shutdown 请求；版本 6 为 handoff 增加目标可执行文件绝对路径，
 并增加只退出 manager 的 relinquish 请求。成功 attach 仍返回 opaque token，尺寸控制使用
 单独 framed connection 上的 `Request::Resize` 消息。Runner IPC 使用独立的 additive v1
-协议，因此 manager 升级可以接管已有 runner。相关握手阶段会拒绝版本不匹配；raw PTY
-字节不会与 control frame 混合。
+协议，因此 manager 升级可以接管已有 runner。新 manager 会先尝试状态订阅，并兼容只支持
+请求式状态查询的旧 v1 runner。相关握手阶段会拒绝版本不匹配；raw PTY 字节不会与 control
+frame 混合。
 
 历史请求使用同一 manager IPC，并且需要当前的 manager 二进制。

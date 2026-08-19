@@ -3,7 +3,7 @@ SHELL := /bin/bash
 RUST_TOOLCHAIN ?= stable
 CARGO ?= ./scripts/cargo-toolchain.sh $(RUST_TOOLCHAIN)
 
-.PHONY: help bootstrap build build-release build-cross build-all dist source-dist fmt clippy test check shellcheck systemd-check aur-check msrv-check run cli linux-check
+.PHONY: help bootstrap build build-release build-cross build-all dist source-dist fmt clippy test check shellcheck systemd-check msrv-check run cli linux-check
 
 help:
 	@echo "served development targets"
@@ -17,7 +17,6 @@ help:
 	@echo "  make check           Run format, clippy, and all native tests"
 	@echo "  make shellcheck      Check repository shell scripts"
 	@echo "  make systemd-check   Validate the system service template"
-	@echo "  make aur-check       Build and inspect both AUR split packages"
 	@echo "  make msrv-check      Check all targets with Rust 1.85.0"
 	@echo "  make run             Run an isolated development manager"
 	@echo "  make cli ARGS=list   Run a client against the development manager"
@@ -61,9 +60,6 @@ shellcheck:
 
 systemd-check:
 	@tests/system_service_template.sh
-
-aur-check:
-	@scripts/check-aur-package.sh
 
 msrv-check:
 	@./scripts/dev.sh msrv-check

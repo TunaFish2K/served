@@ -8,7 +8,7 @@ use crate::{
     config::{
         DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES, LoadedService, RestartPolicy, ServiceConfig,
     },
-    protocol::{Frame, HistoryRecord, ServiceState, framed, receive_json, send_json},
+    ipc::{Frame, framed, receive_json, send_json},
 };
 
 /// The runner protocol is separate from the public manager protocol. It stays
@@ -138,11 +138,28 @@ impl LaunchSpec {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunnerServiceState {
+    Starting,
+    Running,
+    Restarting,
+    Stopped,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerHistoryRecord {
+    pub id: String,
+    pub bytes: u64,
+    pub current: bool,
+    pub persisted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerStatus {
     pub name: String,
     pub runner_pid: u32,
-    pub state: ServiceState,
+    pub state: RunnerServiceState,
     pub pid: Option<u32>,
     pub pid_start_time: Option<u64>,
     pub tty: bool,
@@ -182,6 +199,10 @@ pub enum RunnerRequest {
     },
     Stop,
     Status,
+    /// Stream an initial status followed by status changes on this connection.
+    /// Older v1 runners close the connection when they see this additive request;
+    /// callers must fall back to `Status` polling in that case.
+    WatchStatus,
     Attach,
     Resize {
         token: String,
@@ -217,7 +238,7 @@ pub enum RunnerResponse {
         latest_log: Option<String>,
     },
     HistoryList {
-        records: Vec<HistoryRecord>,
+        records: Vec<RunnerHistoryRecord>,
     },
     HistoryChunk {
         id: String,
@@ -328,5 +349,57 @@ mod tests {
         let parsed: LaunchSpec = serde_json::from_value(value).expect("deserialize old spec");
         assert_eq!(parsed.config.log_max_bytes, DEFAULT_LOG_MAX_BYTES);
         assert_eq!(parsed.config.log_max_files, DEFAULT_LOG_MAX_FILES);
+    }
+
+    #[test]
+    fn watch_status_is_an_additive_v1_request() {
+        let value = serde_json::to_value(RunnerRequest::WatchStatus).expect("serialize watch");
+        assert_eq!(value, json!("WatchStatus"));
+        let decoded: RunnerRequest = serde_json::from_value(value).expect("decode watch");
+        assert!(matches!(decoded, RunnerRequest::WatchStatus));
+    }
+
+    #[test]
+    fn runner_status_keeps_the_v1_wire_shape() {
+        let status = RunnerStatus {
+            name: "api".to_owned(),
+            runner_pid: 10,
+            state: RunnerServiceState::Running,
+            pid: Some(11),
+            pid_start_time: Some(12),
+            tty: true,
+            restart: "always".to_owned(),
+            persist_logs: true,
+            attach_active: false,
+            output_tail: "ready".to_owned(),
+            recent_failures: 2,
+            window_seconds: 60,
+            latest_log: Some("/tmp/latest.log".to_owned()),
+            spec: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(RunnerResponse::Status { status }).expect("serialize status"),
+            json!({
+                "Status": {
+                    "status": {
+                        "name": "api",
+                        "runner_pid": 10,
+                        "state": "Running",
+                        "pid": 11,
+                        "pid_start_time": 12,
+                        "tty": true,
+                        "restart": "always",
+                        "persist_logs": true,
+                        "attach_active": false,
+                        "output_tail": "ready",
+                        "recent_failures": 2,
+                        "window_seconds": 60,
+                        "latest_log": "/tmp/latest.log",
+                        "spec": null
+                    }
+                }
+            })
+        );
     }
 }

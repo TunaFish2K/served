@@ -75,36 +75,6 @@ README.md
 README.zh-CN.md
 ```
 
-## Nix and AUR
-
-Install only the binary from this flake:
-
-```bash
-nix profile install github:TunaFish2K/served
-```
-
-For NixOS, import `inputs.served.nixosModules.default` and declare every account that needs an
-independent manager:
-
-```nix
-services.served = {
-  enable = true;
-  users = [ "alice" "bob" ];
-};
-```
-
-The module adds the binary to `environment.systemPackages` and creates one system service per user.
-It does not accept `root`, an empty user list, or duplicate users.
-
-The AUR metadata under `packaging/aur/` produces two packages. `served` contains only the binary.
-`served-systemd` depends on that exact binary package and installs the optional systemd template.
-After both packages are installed, enable the accounts you need:
-
-```bash
-sudo systemctl enable --now "served@$USER.service"
-sudo systemctl enable --now served@alice.service
-```
-
 ## Common Commands
 
 Run `served edit` in a project directory:
@@ -131,6 +101,10 @@ served history [name] -e <command>
                        Use the specified editor command
 served history [name] --path
                        Print the selected persistent log path
+served history [name] --stdout
+                       Print sanitized persistent or in-memory history
+served history [name] --json
+                       Print sanitized history and metadata as JSON
 served list            List services managed by the manager
 ```
 
@@ -228,9 +202,11 @@ size. A control connection can fail without stopping raw attach. The client reco
 background and sends the current size again. Detach does not reset the PTY size.
 
 The main TUI does not edit service configuration. Use `served edit` to open `.served.json`
-in an external editor. `-e/--editor COMMAND` takes priority over `$EDITOR`. The editor command
-can contain arguments. served adds the configuration path as the last argument. `--path` creates
-a missing template and prints its absolute path. `--path` conflicts with `--editor`.
+in an external editor. `-e/--editor COMMAND` takes priority over `$EDITOR`. If neither is set,
+served searches `PATH` for `editor`, `sensible-editor`, `nvim`, `vim`, `vi`, `nano`, `micro`, then
+`hx`. The editor command can contain arguments. served adds the configuration path as the last
+argument. `--path` creates a missing template and prints its absolute path. `--path` conflicts with
+`--editor`.
 
 ## Logs and Troubleshooting
 
@@ -242,9 +218,9 @@ uses `y` or `Enter` to open the file. Use `n` or `Esc` to cancel. A log path
 exists only when the current run has persistent logs. Otherwise, use the TUI history browser or
 enable `persist_logs`.
 
-served opens logs with `$EDITOR`. After the editor exits, attach returns the original service
-not running error. It does not retry attach. This warning appears only when attach fails. It does
-not change the service list.
+served opens logs with `$EDITOR` or the editor fallback described above. After the editor exits,
+attach returns the original service not running error. It does not retry attach. This warning
+appears only when attach fails. It does not change the service list.
 
 Press `h` in the TUI to select `latest` or a time archive. Press `Enter` to view
 cleaned log content. The history page supports the arrow keys, `j/k`, `PgUp/PgDn`, and
@@ -252,11 +228,12 @@ cleaned log content. The history page supports the arrow keys, `j/k`, `PgUp/PgDn
 does not change the total line count. History stays separate from attach. Attach does not replay old
 PTY control state.
 
-The command `served history` opens the selected persistent raw log. Without `--run`, it
-selects `latest`. `-e/--editor COMMAND` takes priority over `$EDITOR`. The editor
-command can contain arguments. served adds the log path as the last safely quoted argument.
-`--path` prints only the path. It conflicts with `--editor`. A non-persistent record has
-no file path. Use the TUI to view it or enable `persist_logs`.
+The command `served history` selects `latest` unless `--run <id>` is present. With no output mode,
+it opens the selected persistent raw log; `-e/--editor COMMAND` takes priority over `$EDITOR` and
+the editor fallback. `--path` prints only a persistent path. `--stdout` streams sanitized content,
+and `--json` prints the same content with service, record, storage, byte, and line metadata. These
+two output modes work for persistent and in-memory records and never create a temporary file.
+`--path`, `--editor`, `--stdout`, and `--json` are mutually exclusive output modes.
 
 Each process start creates a separate history record. This includes automatic and manual restarts.
 The runner owns the history, so a manager restart does not remove it. Persistent logs use:
@@ -274,7 +251,8 @@ run start time. Each service keeps `log_max_files` archives and one latest file.
 
 With `persist_logs: false`, served does not add disk logs. The runner keeps the current record
 and the latest 100 memory archives during its lifetime. A manager restart keeps these records. A
-runner or service restart starts a new current record.
+service restart starts a new current record; terminating the runner clears them. Use
+`served history --stdout` or `--json` to read them from scripts and AI tools.
 
 TTY history stores raw PTY bytes. Pipe history merges stdout and stderr in runner event order. The
 history view removes ANSI and invisible control sequences. If persistent storage fails, the service
@@ -328,28 +306,28 @@ Release. The workflow builds and tests native macOS and Linux binaries for amd64
 release binaries require glibc 2.17 or later. macOS requires 10.12 or later on amd64 and 11.0 or
 later on arm64.
 
-For version `0.4.1`, the release contains:
+For a release tag `vX.Y.Z`, the assets follow this naming scheme:
 
 ```text
-served-linux-amd64-v0.4.1-binary
-served-linux-amd64-v0.4.1-binary.sha256
-served-linux-amd64-v0.4.1-full.tar.gz
-served-linux-amd64-v0.4.1-full.tar.gz.sha256
-served-linux-arm64-v0.4.1-binary
-served-linux-arm64-v0.4.1-binary.sha256
-served-linux-arm64-v0.4.1-full.tar.gz
-served-linux-arm64-v0.4.1-full.tar.gz.sha256
-served-macos-amd64-v0.4.1.tar.gz
-served-macos-amd64-v0.4.1.tar.gz.sha256
-served-macos-arm64-v0.4.1.tar.gz
-served-macos-arm64-v0.4.1.tar.gz.sha256
-served-v0.4.1-source.tar.gz
-served-v0.4.1-source.tar.gz.sha256
+served-linux-amd64-vX.Y.Z-binary
+served-linux-amd64-vX.Y.Z-binary.sha256
+served-linux-amd64-vX.Y.Z-full.tar.gz
+served-linux-amd64-vX.Y.Z-full.tar.gz.sha256
+served-linux-arm64-vX.Y.Z-binary
+served-linux-arm64-vX.Y.Z-binary.sha256
+served-linux-arm64-vX.Y.Z-full.tar.gz
+served-linux-arm64-vX.Y.Z-full.tar.gz.sha256
+served-macos-amd64-vX.Y.Z.tar.gz
+served-macos-amd64-vX.Y.Z.tar.gz.sha256
+served-macos-arm64-vX.Y.Z.tar.gz
+served-macos-arm64-vX.Y.Z.tar.gz.sha256
+served-vX.Y.Z-source.tar.gz
+served-vX.Y.Z-source.tar.gz.sha256
 ```
 
 The Linux `binary` asset contains only the executable. The Linux `full.tar.gz` asset contains the
 executable, `served@.service`, installer, uninstaller, and both README files. The deterministic
-source archive is the input used by the AUR package. Each asset has its own SHA-256 sidecar file.
+source archive contains the buildable project source. Each asset has its own SHA-256 sidecar file.
 
 The macOS archive contains the executable, both README files, and the license. macOS binaries use
 ad-hoc code signatures and are not notarized. The workflow does not build musl or Windows targets.
@@ -397,7 +375,6 @@ make dist            # Package both host architectures
 make source-dist     # Create the deterministic source archive
 make shellcheck      # Check all repository shell scripts
 make systemd-check   # Validate the systemd template
-make aur-check       # Build and inspect both AUR packages (Arch Linux)
 make linux-check     # Run the Linux checks in Docker
 ```
 

@@ -63,34 +63,6 @@ README.md
 README.zh-CN.md
 ```
 
-## Nix 和 AUR
-
-只安装二进制：
-
-```bash
-nix profile install github:TunaFish2K/served
-```
-
-NixOS 配置先导入 `inputs.served.nixosModules.default`，再声明需要独立 manager 的账户：
-
-```nix
-services.served = {
-  enable = true;
-  users = [ "alice" "bob" ];
-};
-```
-
-模块会把二进制加入 `environment.systemPackages`，并为每个用户创建一个 system service。
-用户列表不能为空，不能包含 `root` 或重复项。
-
-`packaging/aur/` 中的 AUR 元数据生成两个包。`served` 只包含二进制；`served-systemd`
-依赖完全相同版本的二进制包，并安装可选的 systemd 模板。安装两个包后，按需启用实例：
-
-```bash
-sudo systemctl enable --now "served@$USER.service"
-sudo systemctl enable --now served@alice.service
-```
-
 以下 systemd 安装流程只适用于 Linux。仓库中的安装脚本位于 `scripts/`，system unit 模板
 位于 `systemd/`。脚本由拥有 manager 的普通用户执行，通过 `sudo` 安装共享的
 `/usr/local/bin/served` 和 `/etc/systemd/system/served@.service`，然后启用并启动
@@ -144,6 +116,10 @@ served history [name] -e <command>
                        指定编辑器命令，优先于 $EDITOR
 served history [name] --path
                        只打印选中持久化日志的路径
+served history [name] --stdout
+                       输出清理后的持久化或内存历史
+served history [name] --json
+                       用 JSON 输出清理后的历史和元数据
 served list            列出 manager 管理的服务
 ```
 
@@ -168,20 +144,21 @@ runner 会记录最近 60 秒内的非零退出和 worker 启动或运行错误�
 用户在服务重启退避期间尝试 attach，CLI 和 TUI 会显示崩溃循环警告。直接 CLI attach
 只在交互终端中询问 `Open latest.log? [y/N]`；TUI 使用 `y` 或 `Enter` 打开，`n` 或
 `Esc` 取消。只有当前运行启用了 `persist_logs` 时才有可打开的 `latest.log`，否则提示
-使用 TUI 历史浏览器或启用持久化。打开日志使用 `$EDITOR`，退出编辑器后 attach 仍返回
-原来的“服务未运行”错误，不会自动重试。该警告只在 attach 失败时出现，不改变服务列表
-状态。
+使用 TUI 历史浏览器或 `served history --stdout`。打开日志优先使用 `$EDITOR`；未配置时按
+`editor`、`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx` 的顺序查找。
+退出编辑器后 attach 仍返回原来的“服务未运行”错误，不会自动重试。该警告只在 attach
+失败时出现，不改变服务列表状态。
 
 按 `h` 后先选择 `latest` 或时间归档，再按 `Enter` 查看清理后的日志内容。内容页支持
 上下键、`j/k`、`PgUp/PgDn` 和 `g/G`，并在内容与 `tips:` 之间显示当前逻辑行位置
 `current/total`。总行数按清理后的 `str::lines()` 计算，视觉换行不会改变总数。历史页
 与 attach 分离，attach 不会回放旧的 PTY 控制状态。
 
-命令行 `served history` 不直接输出日志内容，而是打开选中的持久化原始日志文件。没有
-`--run` 时选择 `latest`；`-e/--editor COMMAND` 优先于 `$EDITOR`，编辑器命令可包含
-参数，日志路径会作为最后一个安全引用的参数传入。`--path` 只打印路径，并且与
-`--editor` 互斥。非持久化记录只有 TUI 内存副本，没有文件路径；命令行会提示使用 TUI
-或启用 `persist_logs`。
+命令行 `served history` 没有 `--run` 时选择 `latest`。没有输出参数时，它打开选中的持久化
+原始日志；`-e/--editor COMMAND` 优先于 `$EDITOR` 和自动探测结果。`--path` 只打印持久化
+路径。`--stdout` 输出清理后的内容，`--json` 输出内容以及服务、记录、存储、字节和行数
+元数据；两者都支持持久化与内存记录，也不会创建临时文件。`--path`、`--editor`、
+`--stdout`、`--json` 是互斥的输出模式。
 
 日志历史按每次进程启动分段，包括首次启动、自动重启和手动重启。日志由每个服务的
 runner 持有；manager 重启不会丢失 runner 内的历史。持久化日志位于：
@@ -266,36 +243,37 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 都进入终端第二屏。窄终端会把操作栏自动换成两行。
 
 主 TUI 不再编辑服务配置。`served edit` 会直接把 `.served.json` 交给外部编辑器：
-`-e/--editor COMMAND` 优先使用指定命令，否则使用 `$EDITOR`。命令可以带参数，配置
-路径会作为最后一个参数传入。`--path` 会先创建缺失模板，然后只打印配置的绝对路径，
-并且与 `--editor` 互斥。没有可用编辑器时，命令会给出明确错误。
+`-e/--editor COMMAND` 优先使用指定命令，其次使用 `$EDITOR`，最后按 `editor`、
+`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx` 的顺序查找可执行文件。
+命令可以带参数，配置路径会作为最后一个参数传入。`--path` 会先创建缺失模板，然后只打印
+配置的绝对路径，并且与 `--editor` 互斥。没有可用编辑器时，命令会给出明确错误。
 
 ## Tag 发布
 
 推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建
 macOS 和 Linux 的 amd64、arm64 原生产物。Linux 二进制最低需要 glibc 2.17；macOS amd64
-最低支持 10.12，arm64 最低支持 11.0。例如版本 `0.4.1` 会包含：
+最低支持 10.12，arm64 最低支持 11.0。发布 tag 为 `vX.Y.Z` 时，产物使用以下命名格式：
 
 ```text
-served-linux-amd64-v0.4.1-binary
-served-linux-amd64-v0.4.1-binary.sha256
-served-linux-amd64-v0.4.1-full.tar.gz
-served-linux-amd64-v0.4.1-full.tar.gz.sha256
-served-linux-arm64-v0.4.1-binary
-served-linux-arm64-v0.4.1-binary.sha256
-served-linux-arm64-v0.4.1-full.tar.gz
-served-linux-arm64-v0.4.1-full.tar.gz.sha256
-served-macos-amd64-v0.4.1.tar.gz
-served-macos-amd64-v0.4.1.tar.gz.sha256
-served-macos-arm64-v0.4.1.tar.gz
-served-macos-arm64-v0.4.1.tar.gz.sha256
-served-v0.4.1-source.tar.gz
-served-v0.4.1-source.tar.gz.sha256
+served-linux-amd64-vX.Y.Z-binary
+served-linux-amd64-vX.Y.Z-binary.sha256
+served-linux-amd64-vX.Y.Z-full.tar.gz
+served-linux-amd64-vX.Y.Z-full.tar.gz.sha256
+served-linux-arm64-vX.Y.Z-binary
+served-linux-arm64-vX.Y.Z-binary.sha256
+served-linux-arm64-vX.Y.Z-full.tar.gz
+served-linux-arm64-vX.Y.Z-full.tar.gz.sha256
+served-macos-amd64-vX.Y.Z.tar.gz
+served-macos-amd64-vX.Y.Z.tar.gz.sha256
+served-macos-arm64-vX.Y.Z.tar.gz
+served-macos-arm64-vX.Y.Z.tar.gz.sha256
+served-vX.Y.Z-source.tar.gz
+served-vX.Y.Z-source.tar.gz.sha256
 ```
 
 Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包，包含 `served`、
 `served@.service`、`install.sh`、`uninstall.sh` 和两个 README 文件。可重复生成的 source
-压缩包是 AUR 构建输入。每个产物都有自己的 SHA-256 sidecar 文件。
+压缩包包含可构建的项目源码。每个产物都有自己的 SHA-256 sidecar 文件。
 
 macOS 压缩包包含可执行文件、两个 README 和许可证。macOS 二进制使用 ad-hoc 签名，未进行
 notarization。当前 workflow 不构建 musl 或 Windows 目标。
@@ -336,7 +314,6 @@ make dist            # 打包当前系统的两种架构
 make source-dist     # 生成确定性的 source 压缩包
 make shellcheck      # 检查仓库中的 shell 脚本
 make systemd-check   # 验证 systemd 模板
-make aur-check       # 构建并检查两个 AUR 包（仅 Arch Linux）
 make linux-check     # 在 Docker 中运行完整 Linux 检查
 ```
 

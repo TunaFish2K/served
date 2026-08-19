@@ -113,9 +113,10 @@ enable your service to manage it here!
 JSON5 模板。已有文件会原样打开，served 不会重新格式化或重写它。编辑只会修改文件，
 不会自动应用到运行中的服务。
 
-`-e/--editor COMMAND` 覆盖 `$EDITOR`。命令可以包含参数，配置路径会作为最后一个参数
-追加。`--path` 会创建缺失模板，并只打印配置的绝对路径；它与 `--editor` 互斥。没有
-可用编辑器时，命令返回错误。
+编辑器按以下优先级解析：`-e/--editor COMMAND`、非空 `$EDITOR`，然后从 `PATH` 依次
+查找 `editor`、`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`。命令可以
+包含参数，配置路径会作为最后一个参数追加。`--path` 会创建缺失模板，并只打印配置的
+绝对路径；它与 `--editor` 互斥。没有可用编辑器时，命令返回错误。
 
 ### `served enable`
 
@@ -169,8 +170,8 @@ JSON5 模板。已有文件会原样打开，served 不会重新格式化或重�
 如果 attach 发现服务未运行，且该状态达到阈值，运行器会通过管理器返回结构化的
 attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录已持久化时询问
 `Open latest.log? [y/N]`。TUI 会在提示区询问，`y` 或 `Enter` 打开，`n` 或 `Esc` 取消。
-两者都使用 `$EDITOR`，不会为内存历史创建临时文件，编辑器退出后也不会重试 attach。
-非交互式 CLI 调用永远不会等待输入。
+两者都使用与 `served edit` 相同的编辑器解析顺序，不会为内存历史创建临时文件，编辑器
+退出后也不会重试 attach。非交互式 CLI 调用永远不会等待输入。
 
 ### `served list`
 
@@ -220,15 +221,18 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 - 当前记录为 `latest.log`；旧记录使用上一次运行的开始时间，格式为
   `YYYYMMDD-HHMMSS.log`，冲突时追加数字后缀。
 - 持久化存储保留 100 个归档和一个 `latest.log`。目录权限为 `0700`，文件权限为 `0600`。
-- `persist_logs: false` 时，当前记录和 100 个归档保存在运行器内存中。普通管理器重启
-  后仍可查看；显式停止服务或终止运行器会清除它们。已有磁盘记录仍可查看。
+- `persist_logs: false` 时，当前记录和 100 个归档保存在运行器内存中，每条记录保留最后
+  64 KiB。普通管理器重启和服务重启后仍可查看；终止运行器会清除它们。已有磁盘记录
+  仍可查看。
 - 持久化写入失败时记录 warning，并回退到内存，不停止服务。
 - TUI 保留独立的历史列表和内容页。内容页按清理后的逻辑行显示 `current/total`；
   视觉换行不会改变总数。Attach 只增加当前运行的清理快照，不回放归档历史或终端状态。
-- `served history [name]` 使用 `$EDITOR` 打开持久化 `latest.log`；`--run <id>` 选择
-  归档，`-e/--editor COMMAND` 优先于 `$EDITOR`，`--path` 只打印选中日志的路径。
-  `--path` 与 `--editor` 互斥。内存记录没有 CLI 路径，会提示使用 TUI 浏览器或开启
-  持久化。
+- `served history [name]` 默认选择 `latest`，`--run <id>` 选择归档。没有输出模式时，
+  命令按 `-e/--editor COMMAND`、`$EDITOR` 和系统编辑器的顺序打开持久化 raw 日志；
+  `--path` 只打印持久化路径。`--stdout` 输出清理后的内容；`--json` 输出 `service`、
+  `id`、`current`、`persisted`、`raw_bytes`、`total_lines` 和 `content`。这两种模式都支持
+  持久化和内存记录，并通过分页 IPC 读取，不创建临时文件。`--path`、`--editor`、
+  `--stdout` 和 `--json` 互斥。
 - 历史内容通过分页的管理器 IPC 读取，显示前会清理 ANSI 和不安全控制序列。
 
 ## TUI
@@ -305,10 +309,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 
 - GitHub Release 提供平台二进制、Linux systemd 完整包和确定性的 source archive；每个
   产物都有 SHA-256 sidecar。
-- AUR split package 中，`served` 只包含二进制，`served-systemd` 只包含模板并精确依赖同一
-  package release。包安装不会自动选择或启用用户实例。
-- Nix flake 提供四个平台的 `served` package。NixOS module 使用
-  `services.served.users` 声明非 root、非重复用户，并生成相互隔离的 system services。
+- 仓库不维护发行版包管理器的元数据、模块或兼容性承诺。外部打包可以使用平台二进制或
+  source archive，但不属于本项目的发行 gate。
 - 当前不提供 launchd、runit、s6 或 supervisord 安装包；这些 init 可以直接托管前台
   `served daemon`，专用集成需要另行设计。
 
@@ -318,6 +320,7 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - `sshd`、登录、网络等主机基础服务的可用性保障。
 - 兼容 Docker 的镜像或文件系统隔离。
 - 除 served 自身非特权 unit 以外的任意 root/system 服务管理。
+- 发行版包管理器元数据和模块。
 - 一个目录或一个 JSON 文件中配置多个服务。
 - 服务依赖或就绪检查。
 - 公共 `served` CLI 中独立的 `start`、`stop` 或 `reload` 命令。
@@ -343,8 +346,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 12. 未启用的服务目录不能由全局管理器控制。
 13. 全局 TUI 操作栏根据是否选中服务显示不同内容，并为两种 `tty` 模式显示 attach 和
     history。
-14. `served edit` 使用 `-e/--editor COMMAND` 优先于 `$EDITOR` 打开 `.served.json`，并把
-    配置路径作为最后一个参数追加。
+14. `served edit` 按 `-e/--editor COMMAND`、`$EDITOR` 和约定的 `PATH` 候选顺序打开
+    `.served.json`，并把配置路径作为最后一个参数追加。
 15. `served edit --path` 创建缺失的带注释模板，并只打印绝对路径；`--path` 与 `--editor`
     互斥。
 16. `served edit` 打开已有 `.served.json` 时不重写其中的源文本、注释或格式。
@@ -359,8 +362,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 22. 非持久化历史不创建日志文件；运行器仍在时，服务重启和普通管理器重启都保留历史。
 23. 历史内容按分页读取，报告准确的清理后逻辑行数；显示会移除 ANSI/控制序列，但不修改
     持久化 raw 文件。
-24. `served history` 使用 `-e/--editor` 优先于 `$EDITOR` 打开选中的持久化 raw 日志；
-    `--path` 只打印路径，内存记录清晰报告失败原因。
+24. `served history` 可以用编辑器或 `--path` 访问持久化 raw 日志；`--stdout` 和 `--json`
+    通过分页 IPC 输出持久化或内存记录的清理后内容，且所有输出模式互斥。
 25. 渲染后的 `served@.service` 通过 `systemd-analyze verify`，使用 `User=%i` 和用户 home，
     拒绝 root，不设置 `Group=`，并定义 `ExecStop`、`ExecReload`、`KillMode=process` 和状态
     75 的 relinquish 语义。
@@ -373,7 +376,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 29. 60 秒内发生三次启动失败或非成功退出时，失败的 attach 返回结构化崩溃循环诊断；窗口
     外的失败不计入。
 30. `persist_logs: true` 的崩溃循环服务会在 CLI 和 TUI attach 提示中提供当前 `latest.log`；
-    `persist_logs: false` 不创建临时文件，只报告内存历史选项。
+    `persist_logs: false` 不创建临时文件，并可通过 `served history --stdout` 或 `--json`
+    读取运行器内存历史。
 31. 关闭崩溃日志编辑器后，attach 仍然失败，且不会自动重试服务连接；非交互式 CLI attach
     永远不会等待输入。
 32. macOS 和 Linux 的 amd64、arm64 原生测试通过；每种宿主架构都能构建同操作系统的另一
@@ -387,6 +391,3 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 36. 安装器把当前用户的旧固定 system service 自动迁移到模板实例；可用时保留 runner，
     失败时明确报告受控停止。
 37. 卸载一个用户实例时，如果其他实例仍 enabled 或 active，共享二进制和模板保持不变。
-38. AUR 构建生成只含二进制的 `served` 和只含模板的 `served-systemd`；`.SRCINFO` 与
-    `PKGBUILD` 一致，source archive 哈希可重复。
-39. Nix package 在四个声明平台求值并构建；NixOS VM 验证两个用户实例的隔离。

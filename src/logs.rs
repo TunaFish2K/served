@@ -8,10 +8,12 @@ use std::{
 
 use chrono::Local;
 
-use crate::{
-    config::{DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES},
-    protocol::HistoryRecord,
-};
+use crate::config::{DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES};
+
+mod display;
+
+use display::{LineCounter, SanitizedTail, logical_line_count};
+pub use display::{attach_snapshot_from_bytes, sanitize_log};
 
 pub const MEMORY_LOG_LIMIT: usize = 64 * 1024;
 pub const MAX_ARCHIVED_LOGS: usize = 100;
@@ -19,6 +21,8 @@ pub const DEFAULT_CHUNK_LIMIT: u32 = 48 * 1024;
 pub const ATTACH_CACHE_LINES: usize = 48;
 
 const ATTACH_CACHE_MAX_BYTES: usize = 16 * 1024;
+const OUTPUT_TAIL_CHARS: usize = 2_000;
+const OUTPUT_TAIL_CACHE_BYTES: usize = 16 * 1024;
 
 const LATEST_FILE: &str = "latest.log";
 const STARTED_FILE: &str = ".latest.started";
@@ -29,6 +33,14 @@ const LINE_COUNT_SUFFIX: &str = ".lines";
 struct MemoryLog {
     id: String,
     bytes: VecDeque<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HistoryRecord {
+    pub id: String,
+    pub bytes: u64,
+    pub current: bool,
+    pub persisted: bool,
 }
 
 #[derive(Debug)]
@@ -43,6 +55,7 @@ pub struct LogStore {
     disk_bytes: u64,
     current_line_count: u64,
     line_counter: LineCounter,
+    output_tail: SanitizedTail,
     memory_archives: VecDeque<MemoryLog>,
     line_counts: HashMap<String, u64>,
 }
@@ -73,6 +86,7 @@ impl LogStore {
             disk_bytes: 0,
             current_line_count: 0,
             line_counter: LineCounter::default(),
+            output_tail: SanitizedTail::default(),
             memory_archives: VecDeque::new(),
             line_counts: HashMap::new(),
         }
@@ -91,6 +105,7 @@ impl LogStore {
         self.disk_bytes = 0;
         self.current_line_count = 0;
         self.line_counter = LineCounter::default();
+        self.output_tail = SanitizedTail::default();
         self.current_persisted = false;
         self.line_counts.remove("latest");
         self.line_counts.remove(LATEST_FILE);
@@ -126,6 +141,7 @@ impl LogStore {
         while self.current.len() > MEMORY_LOG_LIMIT {
             self.current.pop_front();
         }
+        self.output_tail.feed(bytes);
 
         self.disk_file.as_ref()?;
 
@@ -159,15 +175,7 @@ impl LogStore {
     }
 
     pub fn output_tail(&self) -> String {
-        let raw: Vec<u8> = self.current.iter().copied().collect();
-        let cleaned = sanitize_log(&raw);
-        let max_chars = 2000;
-        let length = cleaned.chars().count();
-        if length > max_chars {
-            cleaned.chars().skip(length - max_chars).collect()
-        } else {
-            cleaned
-        }
+        self.output_tail.render()
     }
 
     pub fn attach_snapshot(&self) -> Vec<u8> {
@@ -559,12 +567,6 @@ fn memory_chunk(bytes: &[u8], offset: u64, limit: usize, total_lines: u64) -> io
     })
 }
 
-fn logical_line_count(bytes: &[u8]) -> u64 {
-    let mut counter = LineCounter::default();
-    counter.feed(bytes);
-    counter.total_lines()
-}
-
 fn count_file_lines(path: &Path) -> io::Result<u64> {
     let mut file = File::open(path)?;
     let mut counter = LineCounter::default();
@@ -583,95 +585,6 @@ fn write_line_count(path: &Path, count: u64) -> io::Result<()> {
     options.write(true).create(true).truncate(true).mode(0o600);
     let mut file = options.open(path)?;
     writeln!(file, "{count}")
-}
-
-#[derive(Debug, Default)]
-struct LineCounter {
-    lines: u64,
-    has_content: bool,
-    pending_cr: bool,
-    escape: EscapeState,
-}
-
-#[derive(Debug, Default)]
-enum EscapeState {
-    #[default]
-    None,
-    Escape,
-    Csi,
-    Osc,
-    OscEscape,
-}
-
-impl LineCounter {
-    fn feed(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.feed_byte(byte);
-        }
-    }
-
-    fn feed_byte(&mut self, byte: u8) {
-        match self.escape {
-            EscapeState::None => match byte {
-                0x1b => self.escape = EscapeState::Escape,
-                0x9b => self.escape = EscapeState::Csi,
-                _ => self.feed_clean_byte(byte),
-            },
-            EscapeState::Escape => {
-                self.escape = match byte {
-                    b'[' => EscapeState::Csi,
-                    b']' => EscapeState::Osc,
-                    _ => EscapeState::None,
-                };
-            }
-            EscapeState::Csi => {
-                if (0x40..=0x7e).contains(&byte) {
-                    self.escape = EscapeState::None;
-                }
-            }
-            EscapeState::Osc => match byte {
-                0x07 => self.escape = EscapeState::None,
-                0x1b => self.escape = EscapeState::OscEscape,
-                _ => {}
-            },
-            EscapeState::OscEscape => {
-                self.escape = if byte == b'\\' {
-                    EscapeState::None
-                } else {
-                    EscapeState::Osc
-                };
-            }
-        }
-    }
-
-    fn feed_clean_byte(&mut self, byte: u8) {
-        if self.pending_cr {
-            self.pending_cr = false;
-            if byte == b'\n' {
-                return;
-            }
-        }
-
-        match byte {
-            b'\r' => {
-                self.lines = self.lines.saturating_add(1);
-                self.pending_cr = true;
-                self.has_content = false;
-            }
-            b'\n' => {
-                self.lines = self.lines.saturating_add(1);
-                self.has_content = false;
-            }
-            b'\t' | 0x20..=0x7e | 0x80..=0xff => {
-                self.has_content = true;
-            }
-            _ => {}
-        }
-    }
-
-    fn total_lines(&self) -> u64 {
-        self.lines.saturating_add(u64::from(self.has_content))
-    }
 }
 
 fn remove_if_exists(path: &Path) -> io::Result<()> {
@@ -697,96 +610,6 @@ fn valid_archive_id(value: &str) -> bool {
     value.ends_with(".log") && valid_archive_stem(value.trim_end_matches(".log"))
 }
 
-pub fn sanitize_log(bytes: &[u8]) -> String {
-    let mut clean = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == 0x1b {
-            index += 1;
-            if index < bytes.len() && bytes[index] == b']' {
-                index += 1;
-                while index < bytes.len() {
-                    if bytes[index] == 0x07 {
-                        index += 1;
-                        break;
-                    }
-                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
-                        index += 2;
-                        break;
-                    }
-                    index += 1;
-                }
-            } else if index < bytes.len() && bytes[index] == b'[' {
-                index += 1;
-                while index < bytes.len() {
-                    let final_byte = bytes[index];
-                    index += 1;
-                    if (0x40..=0x7e).contains(&final_byte) {
-                        break;
-                    }
-                }
-            } else if index < bytes.len() {
-                index += 1;
-            }
-            continue;
-        }
-        if byte == 0x9b {
-            index += 1;
-            while index < bytes.len() {
-                let final_byte = bytes[index];
-                index += 1;
-                if (0x40..=0x7e).contains(&final_byte) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if byte == b'\n' || byte == b'\r' || byte == b'\t' || (byte >= 0x20 && byte != 0x7f) {
-            clean.push(byte);
-        }
-        index += 1;
-    }
-    String::from_utf8_lossy(&clean).into_owned()
-}
-
-pub fn attach_snapshot_from_bytes(bytes: &[u8]) -> Vec<u8> {
-    let cleaned = normalize_line_endings(&sanitize_log(bytes));
-    let ended_with_newline = cleaned.ends_with('\n');
-    let mut lines: Vec<&str> = cleaned.split('\n').collect();
-    if ended_with_newline {
-        lines.pop();
-    }
-    let start = lines.len().saturating_sub(ATTACH_CACHE_LINES);
-    let mut snapshot = lines[start..].join("\r\n");
-    snapshot = tail_chars(&snapshot, ATTACH_CACHE_MAX_BYTES);
-    if !snapshot.is_empty() {
-        snapshot.push_str("\r\n");
-    }
-    snapshot.into_bytes()
-}
-
-fn normalize_line_endings(value: &str) -> String {
-    value.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-fn tail_chars(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-    let mut used = 0_usize;
-    let mut start = value.len();
-    for (index, character) in value.char_indices().rev() {
-        let length = character.len_utf8();
-        if used.saturating_add(length) > max_bytes {
-            break;
-        }
-        used += length;
-        start = index;
-    }
-    value[start..].to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,6 +619,37 @@ mod tests {
     fn sanitizer_removes_ansi_sequences_but_keeps_text() {
         assert_eq!(sanitize_log(b"\x1b[31mred\x1b[0m\n"), "red\n");
         assert_eq!(sanitize_log(b"a\0b\tc\n"), "ab\tc\n");
+    }
+
+    #[test]
+    fn incremental_output_tail_matches_full_buffer_sanitizing() {
+        let directory = tempdir().expect("tempdir");
+        let mut store = LogStore::new(directory.path().to_path_buf());
+        store.begin_run(false);
+        let chunks: [&[u8]; 4] = [
+            b"before \x1b[3",
+            b"1mred\x1b[0m\n",
+            b"title \x1b]0;split",
+            b" osc\x07 after\n",
+        ];
+        let raw: Vec<u8> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        for chunk in chunks {
+            store.append(chunk);
+        }
+
+        assert_eq!(store.output_tail(), sanitize_log(&raw));
+
+        let long = "中".repeat(2_100);
+        store.append(long.as_bytes());
+        let mut all = raw;
+        all.extend_from_slice(long.as_bytes());
+        let cleaned = sanitize_log(&all);
+        let length = cleaned.chars().count();
+        let expected: String = cleaned.chars().skip(length - 2_000).collect();
+        assert_eq!(store.output_tail(), expected);
     }
 
     #[test]

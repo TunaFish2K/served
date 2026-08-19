@@ -30,9 +30,6 @@ inputs=(
     REQUIREMENTS.md
     TECH-STACK.md
     CONTEXT.md
-    flake.nix
-    flake.lock
-    nix
     rust-toolchain.toml
     docs
     scripts

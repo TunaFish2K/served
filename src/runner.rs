@@ -1,32 +1,32 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fs,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
-    path::{Path, PathBuf},
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
-use nix::unistd::setsid;
-use tokio::{
-    net::{UnixListener, UnixStream},
-    sync::{mpsc, oneshot},
-};
-use tracing::{info, warn};
+use anyhow::Result;
+use tokio::sync::{mpsc, oneshot, watch};
+use tracing::warn;
 
 use crate::{
+    ipc::HandoffStream,
     logs::LogStore,
     process,
-    protocol::{HandoffStream, ServiceState, framed, into_handoff, receive_json, send_json},
     runner_protocol::{
-        LaunchSpec, RUNNER_PROTOCOL_VERSION, RunnerMetadata, RunnerRequest, RunnerResponse,
-        RunnerStatus,
+        LaunchSpec, RunnerHistoryRecord, RunnerMetadata, RunnerRequest, RunnerResponse,
+        RunnerServiceState as ServiceState, RunnerStatus,
     },
-    worker::{WORKER_EVENT_CAPACITY, WorkerCommand, WorkerEvent, spawn_service},
+    worker::{WorkerCommand, WorkerEvent, spawn_service},
 };
 
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const CRASH_THRESHOLD: usize = 3;
+
+mod server;
+
+pub use server::run;
 
 enum RunnerCommand {
     Request {
@@ -93,10 +93,16 @@ struct RunnerState {
     attach_token: Option<String>,
     failures: FailureTracker,
     events: mpsc::Sender<WorkerEvent>,
+    status_updates: watch::Sender<RunnerStatus>,
 }
 
 impl RunnerState {
-    fn new(name: String, socket_path: PathBuf, events: mpsc::Sender<WorkerEvent>) -> Self {
+    fn new(
+        name: String,
+        socket_path: PathBuf,
+        events: mpsc::Sender<WorkerEvent>,
+        status_updates: watch::Sender<RunnerStatus>,
+    ) -> Self {
         let metadata_path = socket_path.with_file_name("runner.json");
         Self {
             name,
@@ -111,6 +117,7 @@ impl RunnerState {
             attach_token: None,
             failures: FailureTracker::default(),
             events,
+            status_updates,
         }
     }
 
@@ -143,6 +150,9 @@ impl RunnerState {
             RunnerRequest::Status => Ok(RunnerResponse::Status {
                 status: self.status(),
             }),
+            RunnerRequest::WatchStatus => {
+                Err("status watch requires its dedicated streaming path".to_owned())
+            }
             RunnerRequest::Attach => Err("attach requires a raw socket handoff".to_owned()),
             RunnerRequest::Resize { token, cols, rows } => {
                 self.resize(token, cols, rows).await?;
@@ -153,7 +163,15 @@ impl RunnerState {
                     .logs
                     .as_ref()
                     .map(LogStore::records)
-                    .unwrap_or_default(),
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|record| RunnerHistoryRecord {
+                        id: record.id,
+                        bytes: record.bytes,
+                        current: record.current,
+                        persisted: record.persisted,
+                    })
+                    .collect(),
             }),
             RunnerRequest::HistoryChunk { id, offset, limit } => {
                 let logs = self
@@ -297,6 +315,7 @@ impl RunnerState {
         };
         if worker.send(WorkerCommand::Attach { stream }).await.is_err() {
             self.reset_attach(&token);
+            self.publish_status();
         }
     }
 
@@ -372,6 +391,17 @@ impl RunnerState {
                 .map(|path| path.display().to_string()),
             spec: self.spec.clone(),
         }
+    }
+
+    fn publish_status(&mut self) {
+        let status = self.status();
+        self.status_updates.send_if_modified(|current| {
+            if *current == status {
+                return false;
+            }
+            *current = status;
+            true
+        });
     }
 
     fn handle_event(&mut self, event: WorkerEvent) {
@@ -453,6 +483,7 @@ impl RunnerState {
                 }
             }
         }
+        self.publish_status();
     }
 
     fn write_metadata(&self) {
@@ -479,201 +510,22 @@ impl RunnerState {
     }
 }
 
-pub async fn run(name: String, socket_path: PathBuf) -> Result<()> {
-    let _ = setsid();
-    let Some(parent) = socket_path.parent() else {
-        bail!("runner socket has no parent directory");
-    };
-    fs::create_dir_all(parent).context("create runner directory")?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-        .context("restrict runner directory")?;
-    prepare_socket(&socket_path).await?;
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("bind runner socket {}", socket_path.display()))?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
-        .context("set runner socket permissions")?;
-
-    let (events, mut event_receiver) = mpsc::channel(WORKER_EVENT_CAPACITY);
-    let (commands, mut command_receiver) = mpsc::channel(64);
-    let mut state = RunnerState::new(name.clone(), socket_path.clone(), events);
-    info!(service = %name, "served runner is ready");
-
-    let result = loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, _) = accepted.context("accept runner connection")?;
-                let commands = commands.clone();
-                let name = name.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle_connection(stream, commands, name).await {
-                        warn!(%error, "runner connection ended with error");
-                    }
-                });
-            }
-            Some(command) = command_receiver.recv() => match command {
-                RunnerCommand::Request { request, reply } => {
-                    let result = state.handle_request(request).await;
-                    let _ = reply.send(result);
-                }
-                RunnerCommand::PrepareAttach { reply } => {
-                    let _ = reply.send(state.prepare_attach());
-                }
-                RunnerCommand::AttachStream { token, stream } => {
-                    state.attach_stream(token, stream).await;
-                }
-                RunnerCommand::Exit => break Ok(()),
-            },
-            Some(event) = event_receiver.recv() => state.handle_event(event),
-            else => break Ok(()),
-        }
-    };
-
-    let _ = state.stop().await;
-    let _ = fs::remove_file(&socket_path);
-    result
-}
-
-async fn prepare_socket(socket_path: &Path) -> Result<()> {
-    if let Ok(metadata) = fs::symlink_metadata(socket_path) {
-        if !metadata.file_type().is_socket() {
-            bail!(
-                "runner socket path is not a socket: {}",
-                socket_path.display()
-            );
-        }
-        match UnixStream::connect(socket_path).await {
-            Ok(_) => bail!("runner socket is already in use: {}", socket_path.display()),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                ) =>
-            {
-                fs::remove_file(socket_path).context("remove stale runner socket")?;
-            }
-            Err(error) => return Err(error).context("check existing runner socket"),
-        }
-    }
-    Ok(())
-}
-
-async fn handle_connection(
-    stream: UnixStream,
-    commands: mpsc::Sender<RunnerCommand>,
-    expected_name: String,
-) -> Result<()> {
-    let mut frame = framed(stream);
-    let hello = receive_json::<RunnerRequest>(&mut frame).await?;
-    match hello {
-        RunnerRequest::Hello { version, name }
-            if version == RUNNER_PROTOCOL_VERSION && name == expected_name =>
-        {
-            send_json(
-                &mut frame,
-                &RunnerResponse::Hello {
-                    version: RUNNER_PROTOCOL_VERSION,
-                    name: expected_name.clone(),
-                },
-            )
-            .await?;
-        }
-        RunnerRequest::Hello { version, name: _ } if version != RUNNER_PROTOCOL_VERSION => {
-            send_json(
-                &mut frame,
-                &RunnerResponse::Error {
-                    message: format!("unsupported runner protocol version {version}"),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-        RunnerRequest::Hello { name, .. } => {
-            send_json(
-                &mut frame,
-                &RunnerResponse::Error {
-                    message: format!("runner belongs to service {name:?}, not {expected_name:?}"),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-        _ => {
-            send_json(
-                &mut frame,
-                &RunnerResponse::Error {
-                    message: "runner handshake required".to_owned(),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-
-    loop {
-        let request = match receive_json::<RunnerRequest>(&mut frame).await {
-            Ok(request) => request,
-            Err(_) => return Ok(()),
-        };
-        if matches!(request, RunnerRequest::Attach) {
-            let (reply, receiver) = oneshot::channel();
-            commands
-                .send(RunnerCommand::PrepareAttach { reply })
-                .await
-                .context("prepare runner attach")?;
-            match receiver.await.context("receive runner attach response")? {
-                Ok(token) => {
-                    send_json(
-                        &mut frame,
-                        &RunnerResponse::Attach {
-                            token: token.clone(),
-                        },
-                    )
-                    .await?;
-                    let stream = into_handoff(frame)?;
-                    commands
-                        .send(RunnerCommand::AttachStream { token, stream })
-                        .await
-                        .context("send runner attach stream")?;
-                }
-                Err(AttachError::Message(message)) => {
-                    send_json(&mut frame, &RunnerResponse::Error { message }).await?;
-                }
-                Err(AttachError::CrashLoop {
-                    name,
-                    recent_failures,
-                    latest_log,
-                }) => {
-                    send_json(
-                        &mut frame,
-                        &RunnerResponse::AttachUnavailable {
-                            name,
-                            recent_failures,
-                            window_seconds: CRASH_WINDOW.as_secs(),
-                            latest_log,
-                        },
-                    )
-                    .await?;
-                }
-            }
-            return Ok(());
-        }
-
-        let (reply, receiver) = oneshot::channel();
-        let stop = matches!(request, RunnerRequest::Stop);
-        commands
-            .send(RunnerCommand::Request { request, reply })
-            .await
-            .context("send runner request")?;
-        let response = receiver.await.context("receive runner response")?;
-        let response = match response {
-            Ok(response) => response,
-            Err(message) => RunnerResponse::Error { message },
-        };
-        send_json(&mut frame, &response).await?;
-        if stop {
-            commands.send(RunnerCommand::Exit).await.ok();
-            return Ok(());
-        }
+fn initial_status(name: &str) -> RunnerStatus {
+    RunnerStatus {
+        name: name.to_owned(),
+        runner_pid: std::process::id(),
+        state: ServiceState::Stopped,
+        pid: None,
+        pid_start_time: None,
+        tty: false,
+        restart: "never".to_owned(),
+        persist_logs: false,
+        attach_active: false,
+        output_tail: String::new(),
+        recent_failures: 0,
+        window_seconds: CRASH_WINDOW.as_secs(),
+        latest_log: None,
+        spec: None,
     }
 }
 
@@ -693,5 +545,30 @@ fn restart_name(policy: crate::config::RestartPolicy) -> &'static str {
         crate::config::RestartPolicy::Never => "never",
         crate::config::RestartPolicy::OnFailure => "on-failure",
         crate::config::RestartPolicy::Always => "always",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_watchers_are_not_notified_when_the_value_is_unchanged() {
+        let (events, _) = mpsc::channel(1);
+        let (status_updates, statuses) = watch::channel(initial_status("api"));
+        let mut state = RunnerState::new(
+            "api".to_owned(),
+            PathBuf::from("/tmp/api.sock"),
+            events,
+            status_updates,
+        );
+
+        state.publish_status();
+        assert!(!statuses.has_changed().expect("status channel open"));
+
+        state.state = ServiceState::Running;
+        state.pid = Some(42);
+        state.publish_status();
+        assert!(statuses.has_changed().expect("status channel open"));
     }
 }

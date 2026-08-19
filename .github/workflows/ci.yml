@@ -69,7 +69,18 @@ jobs:
           fi
 
       - name: Run native checks
-        run: make check
+        shell: bash
+        run: |
+          set -o pipefail
+          log="$(mktemp)"
+          if make check 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          details="$(tail -n 60 "$log" | tr '\n' ' ')"
+          details="${details//'%'/'%25'}"
+          details="${details//$'\r'/'%0D'}"
+          printf '::error title=Native checks failed::%s\n' "$details"
+          exit 1
 
       - name: Validate system service template
         if: matrix.os == 'linux'

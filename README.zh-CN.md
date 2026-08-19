@@ -6,7 +6,7 @@
 不运行容器。前台 manager 可以交给任意进程守护程序托管；仓库中的 systemd unit 只是可选
 的 Linux 集成。
 
-Release 支持 macOS 和 Linux/glibc，并分别提供 amd64/x64 和 arm64 二进制。
+Release 支持 Linux/glibc，并提供 amd64/x64 和 arm64 二进制。
 
 ## 适用范围
 
@@ -22,8 +22,8 @@ served 不是 Docker 容器运行时，也不提供 root 服务管理、命名�
 
 ## 部署流程
 
-下载与操作系统和 CPU 架构匹配的 Release 包，把 `served` 放到 `PATH` 中。配置进程守护程序，
-以目标用户身份和该用户正常的 `HOME` 运行以下前台命令：
+下载与 Linux CPU 架构匹配的 Release 包，把 `served` 放到 `PATH` 中。配置进程守护程序，以
+目标用户身份和该用户正常的 `HOME` 运行以下前台命令：
 
 ```bash
 served daemon
@@ -250,9 +250,9 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 
 ## Tag 发布
 
-推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建
-macOS 和 Linux 的 amd64、arm64 原生产物。Linux 二进制最低需要 glibc 2.17；macOS amd64
-最低支持 10.12，arm64 最低支持 11.0。发布 tag 为 `vX.Y.Z` 时，产物使用以下命名格式：
+推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建 Linux
+amd64、arm64 产物。二进制最低需要 glibc 2.17。发布 tag 为 `vX.Y.Z` 时，产物使用以下
+命名格式：
 
 ```text
 served-linux-amd64-vX.Y.Z-binary
@@ -263,10 +263,6 @@ served-linux-arm64-vX.Y.Z-binary
 served-linux-arm64-vX.Y.Z-binary.sha256
 served-linux-arm64-vX.Y.Z-full.tar.gz
 served-linux-arm64-vX.Y.Z-full.tar.gz.sha256
-served-macos-amd64-vX.Y.Z.tar.gz
-served-macos-amd64-vX.Y.Z.tar.gz.sha256
-served-macos-arm64-vX.Y.Z.tar.gz
-served-macos-arm64-vX.Y.Z.tar.gz.sha256
 served-vX.Y.Z-source.tar.gz
 served-vX.Y.Z-source.tar.gz.sha256
 ```
@@ -275,8 +271,7 @@ Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包
 `served@.service`、`install.sh`、`uninstall.sh` 和两个 README 文件。可重复生成的 source
 压缩包包含可构建的项目源码。每个产物都有自己的 SHA-256 sidecar 文件。
 
-macOS 压缩包包含可执行文件、两个 README 和许可证。macOS 二进制使用 ad-hoc 签名，未进行
-notarization。当前 workflow 不构建 musl 或 Windows 目标。
+当前 workflow 不构建 macOS、musl 或 Windows 目标。
 
 ## 安全边界
 
@@ -305,7 +300,7 @@ notarization。当前 workflow 不构建 musl 或 Windows 目标。
 应优先使用 Release 完整安装包。
 
 ```bash
-make bootstrap       # 安装当前系统的 amd64 和 arm64 Rust target
+make bootstrap       # 安装 Linux amd64 和 arm64 Rust target
 make check           # 格式、Clippy 和本机测试
 make msrv-check      # 使用 Rust 1.85 编译全部 target
 make build-cross     # 构建当前系统的另一种架构
@@ -319,9 +314,9 @@ make linux-check     # 在 Docker 中运行完整 Linux 检查
 
 `make run` 使用 `.dev/` 下的隔离 `HOME` 启动 manager。另开终端后，可以运行
 `make cli ARGS="list"` 或其他 served 命令。Linux 交叉发行固定使用 Zig 0.14.1 和
-cargo-zigbuild 0.21.8。构建流程不跨操作系统：macOS 生成两个 macOS 目标，Linux 生成两个
-Linux 目标。Docker 检查固定使用 Rust 1.85；本机构建和 CI 默认使用 stable，也可以通过
-`RUST_TOOLCHAIN` 选择已经安装的 rustup 工具链。
+cargo-zigbuild 0.21.8。构建要求 Linux，并覆盖两种 Linux 架构。Docker 检查固定使用 Rust
+1.85；本机构建和 CI 默认使用 stable，也可以通过 `RUST_TOOLCHAIN` 选择已经安装的 rustup
+工具链。
 
 核心需求记录在 [REQUIREMENTS.md](REQUIREMENTS.md)，技术决策记录在
 [TECH-STACK.md](TECH-STACK.md)。

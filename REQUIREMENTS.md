@@ -17,7 +17,7 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 
 ## 部署边界
 
-- macOS 和 Linux/glibc 分别提供 amd64、arm64 Release 产物。
+- Linux/glibc 提供 amd64、arm64 Release 产物。
 - 进程守护程序必须以安装用户身份、该用户正常的 `HOME` 和前台 `served daemon` 启动
   manager。
 - 通用优雅停止接口是 `served shutdown`；保留 runner 的 manager 切换接口是
@@ -380,10 +380,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
     读取运行器内存历史。
 31. 关闭崩溃日志编辑器后，attach 仍然失败，且不会自动重试服务连接；非交互式 CLI attach
     永远不会等待输入。
-32. macOS 和 Linux 的 amd64、arm64 原生测试通过；每种宿主架构都能构建同操作系统的另一
-    架构。
-33. Linux amd64、arm64 发行二进制最高依赖 GLIBC 2.17；macOS amd64、arm64 分别声明
-    10.12 和 11.0 deployment target，并通过 ad-hoc 签名校验。
+32. Linux amd64、arm64 原生测试通过；每种宿主架构都能构建另一种 Linux 架构。
+33. Linux amd64、arm64 发行二进制最高依赖 GLIBC 2.17。
 34. `served daemon` 可由非 systemd 守护程序前台托管；`served shutdown` 优雅停止所有
     runner，`served daemon --handoff` 替换 manager 并保留服务 PID。
 35. 两个 systemd 用户实例同时运行时，各自 socket 归对应用户所有；停止一个实例不会影响

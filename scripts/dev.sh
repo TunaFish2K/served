@@ -15,12 +15,12 @@ fail() {
     exit 1
 }
 
+require_linux_host() {
+    [[ "$(uname -s)" == "Linux" ]] || fail "served development requires Linux"
+}
+
 host_targets() {
-    case "$(uname -s)" in
-        Darwin) printf '%s\n' x86_64-apple-darwin aarch64-apple-darwin ;;
-        Linux) printf '%s\n' x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu ;;
-        *) fail "supported development hosts are macOS and Linux" ;;
-    esac
+    printf '%s\n' x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 }
 
 bootstrap() {
@@ -30,22 +30,22 @@ bootstrap() {
     done < <(host_targets)
     rustup component add --toolchain "$rust_toolchain" rustfmt clippy
 
-    if [[ "$(uname -s)" == "Linux" ]]; then
-        if [[ ! -x "$cargo_zigbuild" ]] ||
-            [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
-            "${cargo_for_dev[@]}" install --locked --version 0.21.8 cargo-zigbuild
-        fi
-        if command -v zig >/dev/null 2>&1; then
-            zig_version="$(zig version)"
-        elif python3 -m ziglang version >/dev/null 2>&1; then
-            zig_version="$(python3 -m ziglang version)"
-        else
-            fail "install Zig 0.14.1 and rerun make bootstrap"
-        fi
-        [[ "$zig_version" == "0.14.1" ]] || fail \
-            "Zig 0.14.1 is required, found $zig_version"
+    if [[ ! -x "$cargo_zigbuild" ]] ||
+        [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
+        "${cargo_for_dev[@]}" install --locked --version 0.21.8 cargo-zigbuild
     fi
+    if command -v zig >/dev/null 2>&1; then
+        zig_version="$(zig version)"
+    elif python3 -m ziglang version >/dev/null 2>&1; then
+        zig_version="$(python3 -m ziglang version)"
+    else
+        fail "install Zig 0.14.1 and rerun make bootstrap"
+    fi
+    [[ "$zig_version" == "0.14.1" ]] || fail \
+        "Zig 0.14.1 is required, found $zig_version"
 }
+
+require_linux_host
 
 case "$command_name" in
     bootstrap)

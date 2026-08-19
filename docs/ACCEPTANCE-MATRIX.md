@@ -38,8 +38,8 @@
 | 29 | `cargo test` | crash-loop attach 集成测试和结构化协议 round-trip |
 | 30 | `cargo test` | crash-loop attach 与 memory history `--stdout`/`--json` 集成路径 |
 | 31 | `cargo test` | 非交互 direct attach 集成路径和 TUI prompt model tests |
-| 32 | `release CI` | 四个原生 runner 和同系统另一架构构建矩阵 |
-| 33 | `release CI` | `scripts/verify-release-binary.sh` 的 glibc、deployment target 和签名检查 |
+| 32 | `release CI` | 两个 Linux 原生 runner 和另一架构构建矩阵 |
+| 33 | `release CI` | `scripts/verify-release-binary.sh` 的 glibc 检查 |
 | 34 | `cargo test` | supervisor lifecycle CLI parser、handoff、shutdown 和 relinquish tests |
 | 35 | Linux release smoke | 两个 `served@<user>` 实例的 socket 和生命周期隔离 |
 | 36 | Linux release smoke | `scripts/install.sh` 的旧 fixed unit 迁移路径 |

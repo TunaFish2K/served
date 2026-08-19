@@ -2,7 +2,7 @@
 
 状态：实现基线。
 
-本文记录 V1 的实现选择。产品面向个人开发者在 macOS 或 Linux 主机上部署个人非关键服务。
+本文记录 V1 的实现选择。产品面向个人开发者在 Linux 主机上部署个人非关键服务。
 每个 manager 只服务一个普通用户，但同一主机可以运行多个相互隔离的 manager。“极简”
 表示操作面和所有权边界简单，不表示依赖数量绝对最少。
 
@@ -22,7 +22,7 @@ service，但不替代 systemd，也不提供容器隔离、root 服务管理或
 | 服务命令 | `/bin/sh -c <command>` | 工作目录是服务目录 |
 | 无 PTY 的进程 | `tokio::process` 和异步管道 | `.served.json` 使用 `tty: false` 时启用 |
 | 有 PTY 的进程 | `portable-pty` | 默认路径；master 始终由 worker 持有 |
-| 进程身份 | Linux `/proc`；macOS `sysinfo` | Linux 保留既有 tick 元数据格式；macOS 使用安全 API 获取启动时间 |
+| 进程身份 | Linux `/proc` | 保留既有 tick 元数据格式 |
 | 本地时间戳 | `chrono` | 为归档日志生成可读的本地运行名称 |
 
 管理器以前台进程运行。外部守护程序必须使用安装用户身份、规范 home 和固定 HOME 路径。
@@ -117,11 +117,10 @@ specifier。状态 75 表示 relinquish 成功且 supervisor 不应重启旧 uni
 ## 构建与打包
 
 - 推送匹配的 `v<semver>` tag 后，GitHub release workflow 自动运行。
-- `Makefile` 统一本机构建、测试、隔离运行、同系统交叉编译和 Docker Linux 检查。
-- macOS 使用 Rust/Clang 构建 amd64、arm64，deployment target 分别为 10.12、11.0。
+- `Makefile` 统一本机构建、测试、隔离运行、跨架构编译和 Docker Linux 检查。
 - Linux 使用 Zig 0.14.1 和 cargo-zigbuild 0.21.8 构建 amd64、arm64，固定 glibc 2.17。
-- CI 在四种原生 GitHub runner 上运行测试，并从每种宿主架构构建另一架构。
-- Linux 完整安装包包含可选 systemd 集成；macOS 包包含 ad-hoc 签名、未 notarize 的二进制。
+- CI 在两种 Linux 原生 GitHub runner 上运行测试，并从每种宿主架构构建另一架构。
+- Linux 完整安装包包含可选 systemd 集成。
 - 每个产物都有自己的 SHA-256 sidecar，命名方式是在原文件名后追加 `.sha256`。
 - Release 额外生成确定性的 source archive，作为通用源码发行产物。
 - 完整安装包包含 glibc 链接的二进制、`served@.service` 模板、`install.sh`、`uninstall.sh` 和
@@ -129,7 +128,7 @@ specifier。状态 75 表示 relinquish 成功且 supervisor 不应重启旧 uni
 - 仓库不维护发行版包管理器元数据或模块；外部包不属于项目的兼容和发布 gate。
 - shell 脚本负责共享文件安装、所有活动实例 handoff、`daemon-reload`、enable/start，以及
   旧固定 system service 和旧 user-service 迁移。Rust 不调用 `systemctl` 或 D-Bus。
-- V1 支持 macOS 和 Linux/glibc 的 amd64、arm64，不支持跨操作系统构建、musl 或 Windows。
+- V1 支持 Linux/glibc 的 amd64、arm64，不支持 macOS、musl 或 Windows。
 
 ## 依赖策略
 

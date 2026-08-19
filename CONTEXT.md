@@ -41,9 +41,8 @@
 
 ## 已确认的决策
 
-- macOS 和 Linux/glibc 都支持 amd64、arm64。每个宿主系统支持本机和同系统另一架构构建，
-  不提供跨操作系统构建。外部守护程序以前台 `served daemon` 托管 manager；systemd 只是
-  Linux 的可选安装方式。
+- Linux/glibc 支持 amd64、arm64。每种宿主架构都能构建另一种 Linux 架构。外部守护程序
+  以前台 `served daemon` 托管 manager；systemd 只是可选安装方式。
 - 直接 attach 进入备用屏幕，清屏并启用 raw mode。detach、EOF 或错误发生后，恢复 shell
   屏幕和终端模式。
 - TUI attach 继续使用 TUI 已持有的备用屏幕。它为服务会话清屏，detach 后完整重绘

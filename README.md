@@ -6,7 +6,7 @@
 use. It manages host processes directly and does not run containers. The foreground manager can
 run under any process supervisor; the included systemd unit is an optional Linux integration.
 
-Release binaries support macOS and Linux with glibc on amd64/x64 and arm64.
+Release binaries support Linux with glibc on amd64/x64 and arm64.
 
 ## What served Does
 
@@ -32,9 +32,9 @@ services, or any service that you need to maintain the host.
 
 ## Quick Deployment
 
-Download the release package for the host operating system and architecture, then put `served` in a
-directory on `PATH`. Configure your process supervisor to run this foreground command as the target
-user with that user's normal `HOME`:
+Download the release package for the Linux host architecture, then put `served` in a directory on
+`PATH`. Configure your process supervisor to run this foreground command as the target user with
+that user's normal `HOME`:
 
 ```bash
 served daemon
@@ -301,10 +301,9 @@ exits unexpectedly, systemd starts it again and the surviving runners are adopte
 
 ## Release Downloads
 
-Push a `v<semver>` tag that matches the version in `Cargo.toml` to create a GitHub
-Release. The workflow builds and tests native macOS and Linux binaries for amd64 and arm64. Linux
-release binaries require glibc 2.17 or later. macOS requires 10.12 or later on amd64 and 11.0 or
-later on arm64.
+Push a `v<semver>` tag that matches the version in `Cargo.toml` to create a GitHub Release. The
+workflow builds and tests Linux binaries for amd64 and arm64. Release binaries require glibc 2.17
+or later.
 
 For a release tag `vX.Y.Z`, the assets follow this naming scheme:
 
@@ -317,10 +316,6 @@ served-linux-arm64-vX.Y.Z-binary
 served-linux-arm64-vX.Y.Z-binary.sha256
 served-linux-arm64-vX.Y.Z-full.tar.gz
 served-linux-arm64-vX.Y.Z-full.tar.gz.sha256
-served-macos-amd64-vX.Y.Z.tar.gz
-served-macos-amd64-vX.Y.Z.tar.gz.sha256
-served-macos-arm64-vX.Y.Z.tar.gz
-served-macos-arm64-vX.Y.Z.tar.gz.sha256
 served-vX.Y.Z-source.tar.gz
 served-vX.Y.Z-source.tar.gz.sha256
 ```
@@ -329,8 +324,7 @@ The Linux `binary` asset contains only the executable. The Linux `full.tar.gz` a
 executable, `served@.service`, installer, uninstaller, and both README files. The deterministic
 source archive contains the buildable project source. Each asset has its own SHA-256 sidecar file.
 
-The macOS archive contains the executable, both README files, and the license. macOS binaries use
-ad-hoc code signatures and are not notarized. The workflow does not build musl or Windows targets.
+The workflow does not build macOS, musl, or Windows targets.
 
 ## Security and Limits
 
@@ -366,7 +360,7 @@ These commands build and check served itself. You do not need a Rust toolchain t
 project. Use a full release package for personal deployment.
 
 ```bash
-make bootstrap       # Install same-OS amd64 and arm64 targets
+make bootstrap       # Install Linux amd64 and arm64 targets
 make check           # Format, clippy, and native tests
 make msrv-check      # Compile every target with Rust 1.85
 make build-cross     # Build the other host architecture
@@ -380,9 +374,9 @@ make linux-check     # Run the Linux checks in Docker
 
 `make run` starts an isolated manager with `HOME` under `.dev/`. In another terminal, use
 `make cli ARGS="list"` or another served command against that manager. Linux cross releases use
-Zig 0.14.1 and cargo-zigbuild 0.21.8. Cross-operating-system builds are not supported: macOS builds
-the two macOS targets, and Linux builds the two Linux targets. The Docker check runs on Rust 1.85;
-local builds and CI use stable unless `RUST_TOOLCHAIN` selects another installed rustup toolchain.
+Zig 0.14.1 and cargo-zigbuild 0.21.8. Builds require Linux and cover both Linux architectures. The
+Docker check runs on Rust 1.85; local builds and CI use stable unless `RUST_TOOLCHAIN` selects
+another installed rustup toolchain.
 
 Core requirements are in [REQUIREMENTS.md](REQUIREMENTS.md). Technical decisions are in
 [TECH-STACK.md](TECH-STACK.md).

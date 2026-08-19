@@ -18,20 +18,10 @@ jobs:
         include:
           - name: Linux amd64
             runner: ubuntu-24.04
-            os: linux
             cross_target: aarch64-unknown-linux-gnu
           - name: Linux arm64
             runner: ubuntu-24.04-arm
-            os: linux
             cross_target: x86_64-unknown-linux-gnu
-          - name: macOS amd64
-            runner: macos-15-intel
-            os: macos
-            cross_target: aarch64-apple-darwin
-          - name: macOS arm64
-            runner: macos-15
-            os: macos
-            cross_target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -57,7 +47,6 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-ci-
 
       - name: Install Linux cross tools
-        if: matrix.os == 'linux'
         shell: bash
         run: |
           sudo apt-get update
@@ -69,25 +58,12 @@ jobs:
           fi
 
       - name: Run native checks
-        shell: bash
-        run: |
-          set -o pipefail
-          log="$(mktemp)"
-          if make check 2>&1 | tee "$log"; then
-            exit 0
-          fi
-          details="$(tail -n 60 "$log" | tr '\n' ' ')"
-          details="${details//'%'/'%25'}"
-          details="${details//$'\r'/'%0D'}"
-          printf '::error title=Native checks failed::%s\n' "$details"
-          exit 1
+        run: make check
 
       - name: Validate system service template
-        if: matrix.os == 'linux'
         run: make systemd-check
 
       - name: Check shell scripts
-        if: matrix.os == 'linux'
         run: make shellcheck
 
       - name: Build native release binary
@@ -104,16 +80,8 @@ jobs:
         run: file "target/${{ matrix.cross_target }}/release/served"
 
   msrv:
-    name: Rust 1.85 on ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux
-            runner: ubuntu-24.04
-          - name: macOS
-            runner: macos-15
-    runs-on: ${{ matrix.runner }}
+    name: Rust 1.85
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out source

@@ -26,9 +26,6 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
-
 [dev-dependencies]
 assert_cmd = "2"
 tempfile = "3"

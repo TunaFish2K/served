@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
-    fs,
-    os::unix::fs::{PermissionsExt, symlink},
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -11,12 +12,14 @@ use anyhow::{Context, Result, bail};
 use tokio::{sync::mpsc, task::JoinHandle, time::sleep};
 use tracing::{info, warn};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    config::{LoadedService, load_service},
+    config::{LoadedService, RestartPolicy, ServiceConfig, load_service},
     paths::ServedPaths,
     process,
     protocol::{
-        HandoffStream, HistoryRecord, Request, Response, ServiceInfo,
+        HandoffStream, HistoryRecord, Request, Response, RunSpec, ServiceInfo, ServiceKind,
         ServiceState as PublicServiceState, Target, into_handoff, receive_json, send_json,
     },
     runner_protocol::{
@@ -26,7 +29,14 @@ use crate::{
 
 const RUNNER_START_ATTEMPTS: usize = 100;
 const RUNNER_START_DELAY: Duration = Duration::from_millis(20);
+const TRANSIENT_DEFINITION_VERSION: u32 = 1;
 pub const SUPERVISOR_RELINQUISH_EXIT_CODE: i32 = 75;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TransientDefinition {
+    version: u32,
+    spec: LaunchSpec,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonExit {
@@ -56,6 +66,7 @@ enum PrepareAttachError {
 
 struct ManagedService {
     definition: LoadedService,
+    kind: ServiceKind,
     runner_socket: PathBuf,
     status: RunnerStatus,
     watcher_generation: u64,
@@ -87,8 +98,13 @@ impl ManagerState {
         }
     }
 
-    async fn restore_enabled(&mut self) {
+    async fn restore_services(&mut self) {
+        self.restore_enabled().await;
+        self.restore_transients().await;
         self.cleanup_orphan_runners().await;
+    }
+
+    async fn restore_enabled(&mut self) {
         let directory = self.paths.registry_dir();
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -111,7 +127,9 @@ impl ManagerState {
                 Ok(service) if service.config.name == name => {
                     if self.services.contains_key(&name) {
                         warn!(service = %name, "ignoring duplicate enabled service");
-                    } else if let Err(error) = self.ensure_service(service).await {
+                    } else if let Err(error) =
+                        self.ensure_service(service, ServiceKind::Enabled).await
+                    {
                         warn!(service = %name, %error, "cannot restore enabled service");
                     }
                 }
@@ -125,7 +143,86 @@ impl ManagerState {
         }
     }
 
-    async fn ensure_service(&mut self, service: LoadedService) -> Result<(), String> {
+    async fn restore_transients(&mut self) {
+        let entries = match fs::read_dir(self.paths.runners_dir()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                warn!(%error, "cannot scan transient service definitions");
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if validate_target_name(&name).is_err() {
+                continue;
+            }
+            let path = self.paths.transient_definition(&name);
+            if !path.is_file() {
+                continue;
+            }
+            if self.services.contains_key(&name) {
+                warn!(service = %name, "enabled service overrides conflicting transient definition");
+                remove_transient_files(&self.paths, &name);
+                continue;
+            }
+            let definition = match read_transient_definition(&path) {
+                Ok(definition) => definition,
+                Err(error) => {
+                    warn!(service = %name, %error, "discarding invalid transient definition");
+                    self.cleanup_transient_runner(&name).await;
+                    continue;
+                }
+            };
+            let service = match definition.spec.clone().into_loaded() {
+                Ok(service) => service,
+                Err(error) => {
+                    warn!(service = %name, %error, "discarding invalid transient launch spec");
+                    self.cleanup_transient_runner(&name).await;
+                    continue;
+                }
+            };
+            if service.config.name != name
+                || service.config.validate().is_err()
+                || fs::canonicalize(&service.directory).ok().as_ref() != Some(&service.directory)
+                || self
+                    .services
+                    .values()
+                    .any(|managed| managed.definition.directory == service.directory)
+            {
+                warn!(service = %name, "discarding inconsistent transient definition");
+                self.cleanup_transient_runner(&name).await;
+                continue;
+            }
+            if !runner_identity_alive(&self.paths.runner_metadata(&name)) {
+                warn!(service = %name, "discarding transient definition without a live runner");
+                self.cleanup_transient_runner(&name).await;
+                continue;
+            }
+            match self
+                .fetch_runner_status(&self.paths.runner_socket(&name), &name)
+                .await
+            {
+                Ok(status) if status.spec.as_ref() == Some(&definition.spec) => {
+                    if let Err(error) = self.ensure_service(service, ServiceKind::Temporary).await {
+                        warn!(service = %name, %error, "cannot restore transient service");
+                    }
+                }
+                Ok(_) => {
+                    warn!(service = %name, "discarding transient definition that does not match its runner");
+                    self.cleanup_transient_runner(&name).await;
+                }
+                Err(error) => {
+                    warn!(service = %name, %error, "live transient runner is temporarily unavailable");
+                }
+            }
+        }
+    }
+
+    async fn ensure_service(
+        &mut self,
+        service: LoadedService,
+        kind: ServiceKind,
+    ) -> Result<(), String> {
         let name = service.config.name.clone();
         validate_target_name(&name)?;
         let runner_socket = self.ensure_runner_socket(&name).await?;
@@ -162,6 +259,7 @@ impl ManagerState {
             name,
             ManagedService {
                 definition: service,
+                kind,
                 runner_socket,
                 status,
                 watcher_generation,
@@ -235,6 +333,7 @@ impl ManagerState {
                 services: self.list_services(),
             }),
             Request::Enable { directory } => self.enable(PathBuf::from(directory)).await,
+            Request::Run { spec } => self.run_temporary(spec).await,
             Request::Disable { target } => self.disable(target).await,
             Request::Restart { target } => self.restart(target).await,
             Request::Attach { .. } => Err("attach requires a raw socket handoff".to_owned()),
@@ -260,11 +359,11 @@ impl ManagerState {
     }
 
     async fn history_list(&mut self, target: Target) -> std::result::Result<Response, String> {
-        let (name, _) = self.resolve_target(&target)?;
+        let (name, _, _) = self.resolve_target(&target)?;
         let service = self
             .services
             .get(&name)
-            .ok_or_else(|| format!("service {name:?} is not enabled"))?;
+            .ok_or_else(|| format!("service {name:?} is not managed"))?;
         match crate::runner_protocol::request(
             &service.runner_socket,
             &name,
@@ -296,11 +395,11 @@ impl ManagerState {
         offset: u64,
         limit: u32,
     ) -> std::result::Result<Response, String> {
-        let (name, _) = self.resolve_target(&target)?;
+        let (name, _, _) = self.resolve_target(&target)?;
         let service = self
             .services
             .get(&name)
-            .ok_or_else(|| format!("service {name:?} is not enabled"))?;
+            .ok_or_else(|| format!("service {name:?} is not managed"))?;
         match crate::runner_protocol::request(
             &service.runner_socket,
             &name,
@@ -338,6 +437,16 @@ impl ManagerState {
     async fn enable(&mut self, directory: PathBuf) -> std::result::Result<Response, String> {
         let service =
             load_service(&directory, &self.base_environment).map_err(|error| error.to_string())?;
+        if self
+            .services
+            .values()
+            .any(|managed| managed.definition.directory == service.directory)
+        {
+            return Err(format!(
+                "service directory {} is already managed",
+                service.directory.display()
+            ));
+        }
         let link = self.paths.registry_dir().join(&service.config.name);
         if fs::symlink_metadata(&link).is_ok() {
             return Err(format!(
@@ -345,9 +454,19 @@ impl ManagerState {
                 service.config.name
             ));
         }
+        if self
+            .paths
+            .transient_definition(&service.config.name)
+            .exists()
+        {
+            return Err(format!(
+                "service name {:?} is already managed",
+                service.config.name
+            ));
+        }
         symlink(&service.directory, &link)
             .map_err(|error| format!("create enable link {}: {error}", link.display()))?;
-        if let Err(error) = self.ensure_service(service).await {
+        if let Err(error) = self.ensure_service(service, ServiceKind::Enabled).await {
             return match fs::remove_file(&link) {
                 Ok(()) => Err(error),
                 Err(rollback_error) => Err(format!(
@@ -360,34 +479,117 @@ impl ManagerState {
         Ok(Response::Ok)
     }
 
+    async fn run_temporary(&mut self, spec: RunSpec) -> std::result::Result<Response, String> {
+        let restart = RestartPolicy::parse(&spec.restart)
+            .ok_or_else(|| format!("invalid restart policy {:?}", spec.restart))?;
+        if spec.argv.first().is_none_or(String::is_empty) {
+            return Err("temporary service program must not be empty".to_owned());
+        }
+        let directory = PathBuf::from(&spec.directory);
+        if !directory.exists() {
+            return Err(format!(
+                "service directory does not exist: {}",
+                directory.display()
+            ));
+        }
+        if !directory.is_dir() {
+            return Err(format!(
+                "service directory is not a directory: {}",
+                directory.display()
+            ));
+        }
+        let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
+        let config = ServiceConfig {
+            name: spec.name,
+            command: shell_command(&spec.argv),
+            tty: spec.tty,
+            sync_rows_cols: spec.sync_rows_cols,
+            restart,
+            persist_logs: spec.persist_logs,
+            log_max_bytes: spec.log_max_bytes,
+            log_max_files: spec.log_max_files,
+            env: spec.env,
+        };
+        config.validate().map_err(|error| error.to_string())?;
+        if self.services.contains_key(&config.name)
+            || fs::symlink_metadata(self.paths.registry_dir().join(&config.name)).is_ok()
+            || self.paths.transient_definition(&config.name).exists()
+        {
+            return Err(format!("service name {:?} is already managed", config.name));
+        }
+        if self
+            .services
+            .values()
+            .any(|managed| managed.definition.directory == directory)
+        {
+            return Err(format!(
+                "service directory {} is already managed",
+                directory.display()
+            ));
+        }
+        let mut environment = self.base_environment.clone();
+        for (key, value) in &config.env {
+            environment.insert(key.clone(), value.clone());
+        }
+        let service = LoadedService {
+            directory,
+            config,
+            environment,
+        };
+        let name = service.config.name.clone();
+        let launch = LaunchSpec::from_loaded(&service);
+        write_transient_definition(&self.paths, &name, &launch)?;
+        if let Err(error) = self.ensure_service(service, ServiceKind::Temporary).await {
+            self.cleanup_transient_runner(&name).await;
+            return Err(error);
+        }
+        info!(service = %name, "temporary service started");
+        Ok(Response::Ok)
+    }
+
     async fn disable(&mut self, target: Target) -> std::result::Result<Response, String> {
-        let (name, _) = self.resolve_target(&target)?;
+        let (name, _, kind) = self.resolve_target(&target)?;
         let socket = self
             .services
             .get(&name)
             .map(|service| service.runner_socket.clone())
-            .ok_or_else(|| format!("service {name:?} is not enabled"))?;
+            .ok_or_else(|| format!("service {name:?} is not managed"))?;
         stop_runner(&socket, &name).await?;
-        let link = self.paths.registry_dir().join(&name);
-        fs::remove_file(&link).map_err(|error| format!("remove enable link: {error}"))?;
+        match kind {
+            ServiceKind::Enabled => {
+                let link = self.paths.registry_dir().join(&name);
+                fs::remove_file(&link).map_err(|error| format!("remove enable link: {error}"))?;
+            }
+            ServiceKind::Temporary => remove_transient_files(&self.paths, &name),
+        }
         if let Some(service) = self.services.remove(&name) {
             service.watcher.abort();
         }
         let _ = fs::remove_dir(self.paths.runner_dir(&name));
-        info!(service = %name, "service disabled");
+        info!(service = %name, "service removed");
         Ok(Response::Ok)
     }
 
     async fn restart(&mut self, target: Target) -> std::result::Result<Response, String> {
-        let (name, directory) = self.resolve_target(&target)?;
-        let service =
-            load_service(&directory, &self.base_environment).map_err(|error| error.to_string())?;
-        if service.config.name != name {
-            return Err(format!(
-                "restart cannot rename enabled service from {name:?} to {:?}; disable it first",
-                service.config.name
-            ));
-        }
+        let (name, directory, kind) = self.resolve_target(&target)?;
+        let service = match kind {
+            ServiceKind::Enabled => {
+                let service = load_service(&directory, &self.base_environment)
+                    .map_err(|error| error.to_string())?;
+                if service.config.name != name {
+                    return Err(format!(
+                        "restart cannot rename enabled service from {name:?} to {:?}; disable it first",
+                        service.config.name
+                    ));
+                }
+                service
+            }
+            ServiceKind::Temporary => self
+                .services
+                .get(&name)
+                .map(|service| service.definition.clone())
+                .ok_or_else(|| format!("service {name:?} is not managed"))?,
+        };
         let socket = self.ensure_runner_socket(&name).await?;
         let spec = LaunchSpec::from_loaded(&service);
         let response = crate::runner_protocol::request(
@@ -416,6 +618,7 @@ impl ManagerState {
             name.clone(),
             ManagedService {
                 definition: service,
+                kind,
                 runner_socket: socket,
                 status,
                 watcher_generation,
@@ -428,27 +631,32 @@ impl ManagerState {
         Ok(Response::Ok)
     }
 
-    fn resolve_target(&self, target: &Target) -> std::result::Result<(String, PathBuf), String> {
+    fn resolve_target(
+        &self,
+        target: &Target,
+    ) -> std::result::Result<(String, PathBuf, ServiceKind), String> {
         match target {
             Target::Name(name) => {
                 validate_target_name(name)?;
-                let link = self.paths.registry_dir().join(name);
-                if fs::symlink_metadata(&link).is_err() {
-                    return Err(format!("service {name:?} is not enabled"));
-                }
-                let directory = fs::canonicalize(link).map_err(|error| error.to_string())?;
-                Ok((name.clone(), directory))
+                let service = self
+                    .services
+                    .get(name)
+                    .ok_or_else(|| format!("service {name:?} is not managed"))?;
+                Ok((
+                    name.clone(),
+                    service.definition.directory.clone(),
+                    service.kind,
+                ))
             }
             Target::Directory(directory) => {
                 let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
-                let service = load_service(&directory, &self.base_environment)
-                    .map_err(|error| error.to_string())?;
-                let link = self.paths.registry_dir().join(&service.config.name);
-                let linked = fs::canonicalize(&link).map_err(|error| error.to_string())?;
-                if linked != directory {
-                    return Err(format!("service {:?} is not enabled", service.config.name));
-                }
-                Ok((service.config.name, directory))
+                self.services
+                    .iter()
+                    .find(|(_, service)| service.definition.directory == directory)
+                    .map(|(name, service)| (name.clone(), directory.clone(), service.kind))
+                    .ok_or_else(|| {
+                        format!("no managed service for directory {}", directory.display())
+                    })
             }
         }
     }
@@ -458,7 +666,7 @@ impl ManagerState {
         name: String,
     ) -> std::result::Result<AttachSetup, PrepareAttachError> {
         let service = self.services.get(&name).ok_or_else(|| {
-            PrepareAttachError::Message(format!("service {name:?} is not enabled"))
+            PrepareAttachError::Message(format!("service {name:?} is not managed"))
         })?;
         let socket = service.runner_socket.clone();
         let status = self
@@ -529,7 +737,7 @@ impl ManagerState {
         let service = self
             .services
             .get(&name)
-            .ok_or_else(|| format!("service {name:?} is not enabled"))?;
+            .ok_or_else(|| format!("service {name:?} is not managed"))?;
         match crate::runner_protocol::request(
             &service.runner_socket,
             &name,
@@ -547,15 +755,18 @@ impl ManagerState {
         let services: Vec<_> = self
             .services
             .iter()
-            .map(|(name, service)| (name.clone(), service.runner_socket.clone()))
+            .map(|(name, service)| (name.clone(), service.runner_socket.clone(), service.kind))
             .collect();
         let mut first_error = None;
-        for (name, socket) in services {
+        for (name, socket, kind) in services {
             if let Err(error) = stop_runner(&socket, &name).await {
                 warn!(service = %name, %error, "cannot stop runner during manager shutdown");
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
+            }
+            if kind == ServiceKind::Temporary {
+                remove_transient_files(&self.paths, &name);
             }
         }
         for service in self.services.drain().map(|(_, service)| service) {
@@ -590,7 +801,8 @@ impl ManagerState {
                     return;
                 }
                 let definition = service.definition.clone();
-                match self.ensure_service(definition).await {
+                let kind = service.kind;
+                match self.ensure_service(definition, kind).await {
                     Ok(()) => warn!(service = %name, "recreated unavailable runner"),
                     Err(recovery_error) => {
                         warn!(service = %name, %error, %recovery_error, "runner unavailable");
@@ -614,7 +826,10 @@ impl ManagerState {
             if validate_target_name(&name).is_err() {
                 continue;
             }
-            if fs::symlink_metadata(self.paths.registry_dir().join(&name)).is_ok() {
+            if self.services.contains_key(&name)
+                || fs::symlink_metadata(self.paths.registry_dir().join(&name)).is_ok()
+                || self.paths.transient_definition(&name).is_file()
+            {
                 continue;
             }
             if let Err(error) = stop_runner(&self.paths.runner_socket(&name), &name).await {
@@ -632,6 +847,7 @@ impl ManagerState {
             .map(|service| ServiceInfo {
                 name: service.definition.config.name.clone(),
                 directory: service.definition.directory.display().to_string(),
+                kind: service.kind,
                 state: public_service_state(&service.status.state),
                 pid: service.status.pid,
                 tty: service.definition.config.tty,
@@ -644,6 +860,92 @@ impl ManagerState {
         services.sort_by(|left, right| left.name.cmp(&right.name));
         services
     }
+
+    async fn cleanup_transient_runner(&self, name: &str) {
+        let socket = self.paths.runner_socket(name);
+        if socket.exists() || runner_identity_alive(&self.paths.runner_metadata(name)) {
+            if let Err(error) = stop_runner(&socket, name).await {
+                warn!(service = %name, %error, "cannot stop discarded transient runner");
+                if runner_identity_alive(&self.paths.runner_metadata(name)) {
+                    return;
+                }
+            }
+        }
+        remove_transient_files(&self.paths, name);
+        remove_stale_runner_files(&self.paths, name);
+        let _ = fs::remove_dir(self.paths.runner_dir(name));
+    }
+}
+
+fn shell_command(argv: &[String]) -> String {
+    argv.iter()
+        .map(|argument| format!("'{}'", argument.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn write_transient_definition(
+    paths: &ServedPaths,
+    name: &str,
+    spec: &LaunchSpec,
+) -> Result<(), String> {
+    let directory = paths.runner_dir(name);
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("create transient runtime directory: {error}"))?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("restrict transient runtime directory: {error}"))?;
+    let path = paths.transient_definition(name);
+    let temporary = path.with_extension("json.tmp");
+    let definition = TransientDefinition {
+        version: TRANSIENT_DEFINITION_VERSION,
+        spec: spec.clone(),
+    };
+    let bytes = serde_json::to_vec_pretty(&definition)
+        .map_err(|error| format!("encode transient definition: {error}"))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|error| {
+            format!(
+                "write transient definition {}: {error}",
+                temporary.display()
+            )
+        })?;
+    file.write_all(&bytes).map_err(|error| {
+        format!(
+            "write transient definition {}: {error}",
+            temporary.display()
+        )
+    })?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("restrict transient definition: {error}"))?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| format!("publish transient definition {}: {error}", path.display()))?;
+    Ok(())
+}
+
+fn read_transient_definition(path: &Path) -> Result<TransientDefinition, String> {
+    let definition: TransientDefinition = serde_json::from_slice(
+        &fs::read(path)
+            .map_err(|error| format!("read transient definition {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("decode transient definition {}: {error}", path.display()))?;
+    if definition.version != TRANSIENT_DEFINITION_VERSION {
+        return Err(format!(
+            "unsupported transient definition version {}",
+            definition.version
+        ));
+    }
+    Ok(definition)
+}
+
+fn remove_transient_files(paths: &ServedPaths, name: &str) {
+    let path = paths.transient_definition(name);
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("json.tmp"));
 }
 
 fn public_service_state(state: &RunnerServiceState) -> PublicServiceState {
@@ -681,6 +983,7 @@ async fn stop_all_runners(paths: &ServedPaths) -> Result<(), String> {
         let socket = paths.runner_socket(&name);
         let metadata = paths.runner_metadata(&name);
         if !socket.exists() && !runner_identity_alive(&metadata) {
+            remove_transient_files(paths, &name);
             remove_stale_runner_files(paths, &name);
             let _ = fs::remove_dir(paths.runner_dir(&name));
             continue;
@@ -688,6 +991,7 @@ async fn stop_all_runners(paths: &ServedPaths) -> Result<(), String> {
         if let Err(error) = stop_runner(&socket, &name).await {
             if !runner_identity_alive(&metadata) {
                 remove_stale_runner_files(paths, &name);
+                remove_transient_files(paths, &name);
                 let _ = fs::remove_dir(paths.runner_dir(&name));
                 continue;
             }
@@ -697,6 +1001,7 @@ async fn stop_all_runners(paths: &ServedPaths) -> Result<(), String> {
             }
             continue;
         }
+        remove_transient_files(paths, &name);
         for _ in 0..RUNNER_START_ATTEMPTS {
             if !socket.exists() {
                 break;
@@ -803,4 +1108,69 @@ pub async fn request_relinquish(paths: ServedPaths) -> Result<()> {
     Err(anyhow::anyhow!(
         "manager did not release its socket after relinquish"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn shell_command_preserves_argv_without_shell_expansion() {
+        let command = shell_command(&[
+            "printf".to_owned(),
+            "<%s>|<%s>|<%s>|<%s>".to_owned(),
+            "hello world".to_owned(),
+            "single'quote".to_owned(),
+            "$HOME".to_owned(),
+            "; echo injected".to_owned(),
+        ]);
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .expect("execute quoted argv");
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout,
+            b"<hello world>|<single'quote>|<$HOME>|<; echo injected>"
+        );
+    }
+
+    #[test]
+    fn transient_definition_round_trips_with_private_permissions() {
+        let root = tempdir().expect("tempdir");
+        let paths = ServedPaths::from_home(root.path());
+        let service = LoadedService {
+            directory: root.path().to_path_buf(),
+            config: ServiceConfig {
+                name: "temporary".to_owned(),
+                command: "'true'".to_owned(),
+                tty: true,
+                sync_rows_cols: true,
+                restart: RestartPolicy::Never,
+                persist_logs: false,
+                log_max_bytes: 1024,
+                log_max_files: 3,
+                env: Default::default(),
+            },
+            environment: Default::default(),
+        };
+        let spec = LaunchSpec::from_loaded(&service);
+
+        write_transient_definition(&paths, "temporary", &spec).expect("write definition");
+        let path = paths.transient_definition("temporary");
+        let restored = read_transient_definition(&path).expect("read definition");
+
+        assert_eq!(restored.spec, spec);
+        assert_eq!(
+            fs::metadata(path)
+                .expect("definition metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 }

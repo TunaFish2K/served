@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::model::HistoryView;
-use crate::protocol::{HistoryRecord, ServiceInfo, ServiceState};
+use crate::protocol::{HistoryRecord, ServiceInfo, ServiceKind, ServiceState};
 
 pub(super) fn draw_main(
     frame: &mut Frame<'_>,
@@ -36,17 +36,16 @@ pub(super) fn draw_main(
         .map(|service| {
             let state = state_name(&service.state);
             ListItem::new(format!(
-                "{:<18} {:<11} {}",
-                service.name, state, service.directory
+                "{:<18} {:<11} {:<9} {}",
+                service.name,
+                state,
+                kind_name(&service.kind),
+                service.directory
             ))
         })
         .collect();
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("enabled services"),
-        )
+        .block(Block::default().borders(Borders::ALL).title("services"))
         .highlight_style(
             Style::default()
                 .fg(Color::Yellow)
@@ -82,6 +81,13 @@ fn state_name(state: &ServiceState) -> &'static str {
         ServiceState::Restarting => "restarting",
         ServiceState::Stopped => "stopped",
         ServiceState::Failed => "failed",
+    }
+}
+
+fn kind_name(kind: &ServiceKind) -> &'static str {
+    match kind {
+        ServiceKind::Enabled => "enabled",
+        ServiceKind::Temporary => "temporary",
     }
 }
 

@@ -49,7 +49,7 @@ pub async fn run_daemon(paths: ServedPaths) -> Result<DaemonExit> {
     let (commands, mut command_receiver) = mpsc::channel(64);
     let (runner_updates, mut runner_update_receiver) = mpsc::channel(256);
     let mut state = ManagerState::new(paths, manager_environment(), runner_updates);
-    state.restore_enabled().await;
+    state.restore_services().await;
     info!("served manager is ready");
 
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;

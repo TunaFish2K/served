@@ -38,11 +38,20 @@
   `served daemon` 时也使用相同的 `$HOME` 路径。主动覆盖 `HOME` 不在支持范围内。
 - **旧版 served 环境文件**：`.served.json` 旁边可选的 `.env.served`。它是 dotenv 兼容
   回退输入；项目 `.env` 不属于 served 配置。
+- **已启用服务**：`kind=enabled` 的服务。`.served.json` 和启用链接定义该服务。manager
+  启动时恢复该服务。
+- **临时服务**：`kind=temporary` 的服务。`served run` 的 argv 和选项定义该服务。该服务
+  不写项目配置或启用链接。manager 只用私有 runtime 描述接管活动 runner。
 
 ## 已确认的决策
 
 - Linux/glibc 支持 amd64、arm64。每种宿主架构都能构建另一种 Linux 架构。外部守护程序
   以前台 `served daemon` 托管 manager；systemd 只是可选安装方式。
+- `served run [options] -- <program> [args...]` 创建临时服务。该命令忽略 `.served.json` 和
+  `.env.served`。它使用 manager 环境快照，并应用 CLI `--env` 覆盖。它按原始 argv 边界
+  执行命令。
+- 临时服务在显式 disable 前保持可管理。manager handoff、relinquish 和异常崩溃会保留
+  runner。正常 shutdown 和无活动 runner 的恢复路径会删除私有 runtime 描述。
 - 直接 attach 进入备用屏幕，清屏并启用 raw mode。detach、EOF 或错误发生后，恢复 shell
   屏幕和终端模式。
 - TUI attach 继续使用 TUI 已持有的备用屏幕。它为服务会话清屏，detach 后完整重绘
@@ -85,14 +94,14 @@
   runner 和服务仍按固定 HOME 路径隔离。共享升级会 handoff 所有活动实例。
 - GitHub Release、source archive 和可选 systemd 完整包是仓库维护的发行边界。发行版
   包管理器元数据和模块由外部打包者维护，不属于兼容性承诺；其他 init 暂不提供专用包。
-- 每个启用服务在 `$HOME/.local/state/served/runtime/runners/<name>/` 下拥有一个 runner。
+- 每个受管服务在 `$HOME/.local/state/served/runtime/runners/<name>/` 下拥有一个 runner。
   manager 失败或收到非预期信号时，不会停止 runner 或服务。明确的 shutdown、disable 和
   服务 restart 会停止它。
 - runner 状态包含有上限的内存历史、重启退避和近期崩溃窗口。manager 重启不会清除这些
   状态。已有 attach 流是 manager 代理，在 manager 替换时会断开。
 - manager 维护 runner 状态缓存，`served list` 和 TUI 列表只读取缓存。新 runner 通过
-  additive v1 `WatchStatus` 长连接推送初始状态和后续变化；旧 v1 runner 不认识该请求时，
-  manager 自动退回每秒一次的 `Status` 轮询。该兼容路径不改变公共 manager v6 wire shape。
+  additive v1 `WatchStatus` 长连接推送初始状态和后续变化。旧 v1 runner 不认识该请求时，
+  manager 自动退回每秒一次的 `Status` 轮询。runner 协议继续保持 additive v1。
 - TTY 和管道服务共用一个 worker supervisor。进程退出、stop、restart、attach、resize、
   进程组终止和输出分发只有一套状态机；PTY 和 pipe 只保留各自的进程与 I/O 适配代码。
 - framed Unix transport、公共 manager 协议和私有 runner 协议分别拥有独立模块。runner wire
@@ -100,13 +109,14 @@
 
 ## 兼容性
 
-`Request::Attach { name }` 仍然使用服务名称。manager 根据启用服务配置选择 PTY 或管道
-relay。协议版本 3 增加精确的清理后历史行数；版本 4 增加结构化崩溃循环 attach 诊断；
-版本 5 增加 manager handoff/shutdown 请求；版本 6 为 handoff 增加目标可执行文件绝对路径，
-并增加只退出 manager 的 relinquish 请求。成功 attach 仍返回 opaque token，尺寸控制使用
-单独 framed connection 上的 `Request::Resize` 消息。Runner IPC 使用独立的 additive v1
-协议，因此 manager 升级可以接管已有 runner。新 manager 会先尝试状态订阅，并兼容只支持
-请求式状态查询的旧 v1 runner。相关握手阶段会拒绝版本不匹配；raw PTY 字节不会与 control
-frame 混合。
+`Request::Attach { name }` 仍然使用服务名称。manager 根据受管服务定义选择 PTY 或管道
+relay。协议版本 3 增加精确的清理后历史行数。版本 5 增加结构化崩溃循环 attach 诊断，
+以及 manager handoff 和 shutdown 请求。版本 6 为 handoff 增加目标可执行文件的绝对路径，
+并增加 relinquish 请求。版本 7 增加 `Run` 和服务类型。
+
+成功 attach 仍返回 opaque token。尺寸控制使用单独 framed connection 上的
+`Request::Resize` 消息。Runner IPC 使用独立的 additive v1 协议。manager 升级后仍可接管
+已有 runner。新 manager 先尝试状态订阅，也兼容只支持请求式状态查询的旧 v1 runner。
+握手阶段会拒绝版本不匹配。raw PTY 字节不会与 control frame 混合。
 
 历史请求使用同一 manager IPC，并且需要当前的 manager 二进制。

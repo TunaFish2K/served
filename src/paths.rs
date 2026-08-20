@@ -65,6 +65,10 @@ impl ServedPaths {
     pub fn runner_metadata(&self, name: &str) -> PathBuf {
         self.runner_dir(name).join("runner.json")
     }
+
+    pub fn transient_definition(&self, name: &str) -> PathBuf {
+        self.runner_dir(name).join("transient.json")
+    }
 }
 
 #[cfg(test)]
@@ -102,6 +106,10 @@ mod tests {
         assert_eq!(
             paths.runner_socket("api"),
             Path::new("/tmp/served-home/.local/state/served/runtime/runners/api/runner.sock")
+        );
+        assert_eq!(
+            paths.transient_definition("api"),
+            Path::new("/tmp/served-home/.local/state/served/runtime/runners/api/transient.json")
         );
     }
 }

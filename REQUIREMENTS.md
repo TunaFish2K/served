@@ -24,21 +24,26 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
   `served daemon --handoff`；跨 supervisor 迁移使用 `served daemon --relinquish`。
 - Linux systemd 完整安装包提供 `install.sh`。脚本由目标安装用户运行，在需要时调用
   `sudo`，并启用运行 manager 的 `served@<user>.service`。
-- 项目服务必须先有自己的目录和 `.served.json`，再运行 `served enable`。
+- 持久启用的项目服务必须先有自己的目录和 `.served.json`，再运行 `served enable`。
+- 用户可以用 `served run -- <program> [args...]` 创建临时服务。临时服务不要求项目配置文件。
 - `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
 - 项目文件或配置更新后，使用 `served restart` 应用变化。
 - 服务异常时，使用 `served attach`、`served history` 或持久化日志排查。
 
 ## 核心模型
 
-- 一个服务对应一个目录。
-- 目录包含 JSON5 服务定义文件 `.served.json`。
+- 一个受管服务对应一个目录。同一目录同时最多有一个受管服务。
+- 受管服务分为 `enabled` 和 `temporary`。已启用服务由 `.served.json` 和启用链接定义。
+  临时服务由 `served run` 的命令行参数定义。
+- 已启用服务的目录必须包含 JSON5 服务定义文件 `.served.json`。临时服务忽略该文件。
 - 服务定义可以用 `env` 对象设置服务专用的字面量环境变量。
 - 同一目录中的 `.env.served` 只作为旧版 dotenv 回退输入；新模板不会创建它。
 - 项目 `.env` 与 served 无关，served 永远不会读取它。
-- 服务工作目录始终是配置目录。
-- 管理器通过用户拥有的启用链接发现服务。
-- 服务名来自 JSON 的 `name` 字段，且在所有启用服务中必须全局唯一。
+- 服务工作目录始终是创建服务时的当前目录。
+- 管理器通过用户拥有的启用链接发现已启用服务。管理器通过私有 runtime 描述接管仍有
+  活动 runner 的临时服务。
+- 服务名在所有受管服务中必须全局唯一。已启用服务的名称来自 JSON。临时服务的名称来自
+  `--name` 或清洗后的当前目录名。
 - 已启用服务需要改名时，先 `disable`，再修改名称，最后重新 `enable`。
 
 启用注册表为：
@@ -97,7 +102,8 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 
 ### `served`
 
-打开全局服务管理 TUI。它列出管理器已知的所有启用服务，与当前工作目录无关。
+打开全局服务管理 TUI。它列出管理器已知的所有受管服务及其 `enabled` 或 `temporary` 类型。
+与当前工作目录无关。
 
 如果当前目录包含尚未启用的服务配置，TUI 可以显示如下提示：
 
@@ -105,7 +111,7 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 enable your service to manage it here!
 ```
 
-未启用的服务不能由管理器控制。
+未启用且未通过 `served run` 创建的目录不能由管理器控制。
 
 ### `served edit`
 
@@ -130,19 +136,40 @@ JSON5 模板。已有文件会原样打开，served 不会重新格式化或重�
 
 没有独立的 `start` 命令。
 
+### `served run [options] -- <program> [args...]`
+
+在当前目录创建临时服务。manager 必须已经运行。该命令不得读取或创建 `.served.json` 和
+`.env.served`，也不得创建启用链接。创建成功后，该命令必须只输出服务名并返回。
+
+- `--name` 可选，默认使用清洗后的当前目录名。
+- 默认启用 TTY 和 PTY 尺寸同步。`--no-tty` 和 `--no-sync-rows-cols` 分别关闭这两个选项。
+- `--restart` 接受 `never`、`on-failure`、`always`，默认 `never`。
+- `--persist-logs` 默认关闭。`--log-max-bytes` 和 `--log-max-files` 的默认值与配置文件相同。
+- `--env KEY=VALUE` 可以重复。字面量值覆盖 manager 环境快照中的同名键。一个键重复出现
+  时，最后一个值生效。
+- `--` 后必须至少有一个 UTF-8 参数。参数必须保持原始边界。served 不得解释 shell
+  元字符。需要 shell 语法时，用户必须显式传入 `sh -c`。
+
+临时服务必须支持 list、TUI、attach、history、restart 和 disable。进程退出后，服务必须
+保持 `stopped` 状态。manager handoff、relinquish 或异常崩溃后，新 manager 必须接管仍在
+运行的 runner。显式 shutdown、正常停止 manager 或主机重启后不得恢复临时服务。
+
 ### `served disable [name]`
 
-删除启用链接并停止服务。不带名称时使用当前目录；提供名称后，可以从任意目录控制该
-启用服务。
+停止并移除服务。不带名称时使用当前目录。提供名称后，可以从任意目录控制受管服务。
+已启用服务同时删除启用链接。临时服务删除私有 runtime 描述。两种服务都保留持久化日志。
 
 没有独立的 `stop` 命令。
 
 ### `served restart [name]`
 
-不带名称时操作当前服务目录。提供名称后，可以从任意目录操作对应的启用服务。
+不带名称时操作当前服务目录。提供名称后，可以从任意目录操作对应的受管服务。
 
-重启总是重新读取当前 `.served.json` 和旧版环境回退文件，完成校验后再停止并启动服务。
-没有独立的 `reload` 操作。
+重启已启用服务时，manager 必须重新读取当前 `.served.json` 和旧版环境回退文件。manager
+必须先完成校验，再停止并启动服务。没有独立的 `reload` 操作。
+
+重启临时服务时，manager 必须使用创建时保存的命令、选项和环境。需要修改这些值时，用户
+必须先 disable，再重新执行 `served run`。
 
 校验必须在停止旧进程前完成。JSON5、`env` 或旧版 `.env.served` 无效时，保持当前运行的
 服务不变，并报告错误。
@@ -150,7 +177,7 @@ JSON5 模板。已有文件会原样打开，served 不会重新格式化或重�
 ### `served attach [name]`
 
 直接连接运行中的 PTY 或管道服务，不打开服务管理 TUI。不带名称时，先规范化当前目录，
-再匹配对应的启用服务。提供名称后，可以从任意目录连接启用服务。
+再匹配对应的受管服务。提供名称后，可以从任意目录连接受管服务。
 
 目标服务必须正在运行。命令使用当前终端的 raw mode，并进入终端备用屏幕。进入后先显示
 当前运行的 48 行清理快照，再流式显示实时输出。会话结束后恢复原来的 shell 屏幕和终端
@@ -175,7 +202,7 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 
 ### `served list`
 
-列出当前由管理器运行的服务。
+列出当前由管理器管理的服务。每个服务必须显示 `kind=enabled` 或 `kind=temporary`。
 
 ## 进程生命周期
 
@@ -239,7 +266,7 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 
 全局 TUI 提供：
 
-- 启用服务列表和当前状态；
+- 受管服务列表、类型和当前状态；
 - restart 操作；
 - disable 操作；
 - 面向 PTY 和管道服务的 attach 操作；
@@ -271,9 +298,9 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - socket 只允许该用户访问。
 - 所有受管服务使用与管理器相同的用户身份。
 - 不提供 root 模式、提权、容器隔离、namespace 策略、资源限制、依赖图或健康检查协议。
-- 每个启用服务拥有独立运行器。管理器接管机制允许 manager 崩溃或被守护程序重启时保留
-  runner 和服务进程；systemd 集成额外使用 `KillMode=process`。明确的 shutdown、
-  disable 或服务 restart 会停止对应运行器。
+- 每个受管服务拥有独立运行器。manager 崩溃或被守护程序重启时，接管机制会保留 runner
+  和服务进程。systemd 集成还使用 `KillMode=process`。明确的 shutdown、disable 或服务
+  restart 会停止对应运行器。
 - `served daemon` 与 system service 使用同一组固定的 HOME 路径。第二个 daemon 遇到已
   占用的 socket 时会拒绝接管。
 
@@ -353,8 +380,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 16. `served edit` 打开已有 `.served.json` 时不重写其中的源文本、注释或格式。
 17. `served attach <name>` 进入运行中的 PTY 服务，不打开 TUI；`Ctrl-C` 退出会话但保持
     服务运行。
-18. `served attach` 根据当前目录解析启用服务；未启用目录会被拒绝，运行中的管道服务
-    可以只读方式 attach。
+18. `served attach` 根据当前目录解析受管服务。未启用且未通过 `served run` 创建的目录会被
+    拒绝。运行中的管道服务可以只读方式 attach。
 19. 直接 attach 进入和退出备用屏幕并恢复 shell；TUI attach 返回完整重绘的管理器页面。
 20. 多个管道观察者都能收到实时 raw 输出，管道输入不会到达受管服务。
 21. 持久化历史写入 `latest.log`，按上一次运行的开始时间归档，并通过 TUI 和管理器读取
@@ -389,3 +416,9 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 36. 安装器把当前用户的旧固定 system service 自动迁移到模板实例；可用时保留 runner，
     失败时明确报告受控停止。
 37. 卸载一个用户实例时，如果其他实例仍 enabled 或 active，共享二进制和模板保持不变。
+38. `served run -- <program> [args...]` 在没有有效配置文件时创建临时服务。该命令完整保留
+    argv 边界，继承 manager 环境，并应用 CLI `--env` 覆盖。
+39. 临时服务出现在 list 和 TUI 中。它支持 attach、history、restart 和按名称或目录
+    disable。名称或目录冲突不得改变已有服务。
+40. manager 异常退出后，新 manager 接管临时服务的 runner，且服务 PID 不变。正常
+    shutdown 停止服务并删除私有 runtime 描述。主机重启后不得自动启动该服务。

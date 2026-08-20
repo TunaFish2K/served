@@ -17,7 +17,7 @@ service，但不替代 systemd，也不提供容器隔离、root 服务管理或
 | 语言 | Rust stable | 第一方代码使用 `#![forbid(unsafe_code)]` |
 | 构建 | Cargo，提交 `Cargo.lock` | 一个 package，一个 `served` 二进制 |
 | 异步运行时 | Tokio | Unix socket 服务、进程监督和定时器 |
-| 管理模型 | Manager actor，以及每个启用服务一个独立 runner 进程 | 管理器持有状态缓存并负责 IPC/注册表；运行器负责子进程生命周期和输出 |
+| 管理模型 | Manager actor，以及每个受管服务一个独立 runner 进程 | 管理器持有状态缓存，并负责 IPC 和注册表。runner 负责子进程生命周期和输出 |
 | Worker 模型 | 一套事件驱动 supervisor，外加 PTY 和 pipe 适配器 | 统一处理退出、重启、stop、attach、resize、进程组终止和输出分发 |
 | 服务命令 | `/bin/sh -c <command>` | 工作目录是服务目录 |
 | 无 PTY 的进程 | `tokio::process` 和异步管道 | `.served.json` 使用 `tty: false` 时启用 |
@@ -40,6 +40,8 @@ specifier。状态 75 表示 relinquish 成功且 supervisor 不应重启旧 uni
   不会由 shell source。
 - 管理器捕获启动环境，再叠加旧版 `.env.served`，最后为每个服务叠加 JSON5 字面量 `env`。
 - 启用注册表是 `$HOME/.config/served/enabled/<name>` 下的符号链接。
+- 临时服务不写启用注册表。私有 runtime 描述位于 runner 目录中。manager 只在 runner
+  仍活动时恢复临时服务。
 - 可选服务历史存储在 `$HOME/.local/state/served/logs/<name>` 下。持久化运行记录是完整
   raw 文件；内存运行记录每次保留 64 KiB 尾部。
 - 活动持久化文件为 `latest.log`；`.latest.started` 保存其开始标签，旧 latest 文件会被
@@ -55,11 +57,12 @@ specifier。状态 75 表示 relinquish 成功且 supervisor 不应重启旧 uni
   直接充当 wire DTO。
 - 历史读取使用管理器代理的运行器列表请求和分页 chunk 读取。因此客户端不需要直接访问
   状态目录，较大的文件也不会超过单个 frame。协议版本 3 为每个历史 chunk 增加精确的
-  清理后逻辑行数，用于 TUI 位置行。管理器协议版本 5 增加结构化崩溃循环 attach 诊断和
-  handoff/shutdown；当前版本 6 为 handoff 增加目标可执行文件路径，并增加 relinquish。
-  运行器 IPC 使用独立的 additive v1。新 runner 支持 `WatchStatus` 长连接，先发送当前状态，
-  再发送变化；manager 对旧 v1 runner 自动退回每秒一次的 `Status` 查询。列表请求只读取
-  manager 缓存，不在请求路径中逐个探测 runner。
+  清理后逻辑行数，用于 TUI 位置行。管理器协议版本 5 增加结构化崩溃循环 attach 诊断、
+  handoff 和 shutdown。版本 6 为 handoff 增加目标可执行文件路径，并增加 relinquish。
+  当前版本 7 增加 `Run` 请求和服务类型。
+- 运行器 IPC 使用独立的 additive v1。新 runner 支持 `WatchStatus` 长连接。连接先发送当前
+  状态，再发送变化。manager 对旧 v1 runner 自动退回每秒一次的 `Status` 查询。列表请求
+  只读取 manager 缓存，不在请求路径中逐个探测 runner。
 - Attach 会把已经认证的连接切换为 raw 字节流。PTY 服务使用一个双向 writer；管道服务
   将 raw stdout/stderr 广播给多个只读观察者，并丢弃它们的输入。每个 attach relay 先从
   运行器取得当前运行的清理快照，再接收实时输出。快照为 48 个逻辑行，最多 16 KiB。
@@ -76,9 +79,9 @@ specifier。状态 75 表示 relinquish 成功且 supervisor 不应重启旧 uni
   最后一个参数追加。所有编辑入口依次使用显式 `-e/--editor`、`$EDITOR`，或从 `PATH`
   查找 `editor`、`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`。
 - `rand` 用于每次 TUI 启动时非加密地随机选择 tips。
-- TUI 首屏是全局启用服务列表。它显示状态，并提供 restart、disable、attach、history 和
-  唯一的一行 `tips:`。上下文操作栏始终位于 tips 下方，窄终端时换成两行；PTY 和管道
-  服务都显示 attach。
+- TUI 首屏是全局受管服务列表。它显示服务类型和状态，也提供 restart、disable、attach 和
+  history。首屏只显示一行 `tips:`。上下文操作栏始终位于 tips 下方。窄终端使用两行
+  操作栏。PTY 和管道服务都显示 attach。
 - `served edit` 只在 `.served.json` 缺失时创建带注释的 JSON5 模板，再直接打开文件。已有
   源文本保持不变；`--path` 只创建模板和报告路径，不启动编辑器。
 - `h` 历史页面先列出记录，再分页加载清理后的内容。页面显示简单的 `current/total`

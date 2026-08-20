@@ -1,9 +1,10 @@
 # served 验收矩阵
 
-状态：v0.4.1 兼容重写基线。
+状态：v0.6.0 验收基线。
 
-本文把 `REQUIREMENTS.md` 的 37 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元或
-集成测试；`release CI` 表示必须在目标操作系统或打包环境中执行，不能用单台开发机结果替代。
+本文把 `REQUIREMENTS.md` 的 40 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元
+测试或集成测试。`release CI` 必须在目标操作系统或打包环境中执行。单台开发机的结果不能
+替代该 gate。
 
 | 场景 | Gate | 主要证据 |
 | --- | --- | --- |
@@ -18,7 +19,7 @@
 | 9 | `cargo test` | `manager_smoke::pty_service_accepts_one_attach_session` |
 | 10 | `cargo test` | `manager_smoke::manager_crash_keeps_runner_and_service_alive_for_adoption` |
 | 11 | `cargo test` | TUI model/render tests；随机选择由 `rand` 启动路径执行 |
-| 12 | `cargo test` | `client::rejects_directory_without_enabled_service` |
+| 12 | `cargo test` | `client::rejects_directory_without_managed_service` |
 | 13 | `cargo test` | `tui::main_footer_describes_available_actions`、`tui::main_render_keeps_tip_and_contextual_footer` |
 | 14 | `cargo test` | editor 优先级、`PATH` 候选顺序和 CLI parser tests |
 | 15 | `cargo test` | `cli::edit_path_creates_template_without_editor`、Clap 冲突定义 |
@@ -44,10 +45,13 @@
 | 35 | Linux release smoke | 两个 `served@<user>` 实例的 socket 和生命周期隔离 |
 | 36 | Linux release smoke | `scripts/install.sh` 的旧 fixed unit 迁移路径 |
 | 37 | Linux release smoke | `scripts/uninstall.sh` 的共享文件保留路径 |
+| 38 | `cargo test` | CLI run parser、argv quoting 和 `manager_smoke::run_creates_a_full_temporary_service_without_reading_config_files` |
+| 39 | `cargo test` | 临时服务的 list/attach/history/restart/disable 与冲突集成路径 |
+| 40 | `cargo test` | `manager_smoke::manager_crash_preserves_a_temporary_service_for_adoption` |
 
 ## 重写兼容 gate
 
-- `protocol::manager_request_keeps_the_v6_wire_shape` 固定公共 manager v6 JSON。
+- `protocol::manager_request_keeps_the_v7_wire_shape` 固定公共 manager v7 JSON。
 - `runner_protocol::runner_status_keeps_the_v1_wire_shape` 固定既有 runner v1 status JSON。
 - `runner_protocol::watch_status_is_an_additive_v1_request` 固定新增订阅仍属于 additive v1。
 - `manager::watcher::falls_back_to_status_polling_for_an_older_v1_runner` 验证旧 runner 回退。

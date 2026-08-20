@@ -110,7 +110,7 @@ fn service_name_for_directory(services: &[ServiceInfo], directory: &Path) -> Res
         .map(|service| service.name.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no enabled service for current directory {}",
+                "no managed service for current directory {}",
                 directory.display()
             )
         })
@@ -132,12 +132,13 @@ pub async fn expect_ok(paths: &ServedPaths, command: Request) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ServiceState;
+    use crate::protocol::{ServiceKind, ServiceState};
 
     fn service(directory: &str, name: &str) -> ServiceInfo {
         ServiceInfo {
             name: name.to_owned(),
             directory: directory.to_owned(),
+            kind: ServiceKind::Enabled,
             state: ServiceState::Running,
             pid: Some(42),
             tty: true,
@@ -158,10 +159,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_directory_without_enabled_service() {
+    fn rejects_directory_without_managed_service() {
         let services = vec![service("/srv/api", "api")];
         let error = service_name_for_directory(&services, Path::new("/srv/worker"))
             .expect_err("directory must not resolve");
-        assert!(error.to_string().contains("no enabled service"));
+        assert!(error.to_string().contains("no managed service"));
     }
 }

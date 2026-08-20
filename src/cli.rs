@@ -1,13 +1,16 @@
-use std::{io::ErrorKind, path::Path, process};
+use std::{collections::BTreeMap, io::ErrorKind, path::Path, process};
 
 use crate::{
     client,
-    config::{CONFIG_FILE, write_template},
+    config::{
+        CONFIG_FILE, DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES, default_service_name,
+        write_template,
+    },
     editor,
     logs::DEFAULT_CHUNK_LIMIT,
     manager,
     paths::ServedPaths,
-    protocol::{HistoryRecord, Request, Response, Target},
+    protocol::{HistoryRecord, Request, Response, RunSpec, ServiceKind, Target},
     runner, tui,
 };
 use anyhow::{Context, Result, bail};
@@ -57,11 +60,41 @@ enum Command {
     },
     /// Enable the current service directory and start it.
     Enable,
-    /// Disable the current service, or an enabled service by name.
+    /// Create a temporary service from command-line options and start it.
+    Run {
+        /// Service name. Defaults to the current directory name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Use pipes instead of allocating a PTY.
+        #[arg(long)]
+        no_tty: bool,
+        /// Keep the initial PTY size instead of following an attach client.
+        #[arg(long)]
+        no_sync_rows_cols: bool,
+        /// Restart policy after the process exits.
+        #[arg(long, default_value = "never", value_parser = ["never", "on-failure", "always"])]
+        restart: String,
+        /// Persist complete raw output under the served state directory.
+        #[arg(long)]
+        persist_logs: bool,
+        /// Maximum bytes in one persistent log segment.
+        #[arg(long, default_value_t = DEFAULT_LOG_MAX_BYTES)]
+        log_max_bytes: u64,
+        /// Number of archived persistent log segments to retain.
+        #[arg(long, default_value_t = DEFAULT_LOG_MAX_FILES)]
+        log_max_files: u32,
+        /// Add or replace one literal environment value.
+        #[arg(long, value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Program and arguments. Use an explicit `sh -c` for shell syntax.
+        #[arg(last = true, required = true, num_args = 1..)]
+        argv: Vec<String>,
+    },
+    /// Disable the current service, or a managed service by name.
     Disable { name: Option<String> },
-    /// Restart the current service, or an enabled service by name.
+    /// Restart the current service, or a managed service by name.
     Restart { name: Option<String> },
-    /// Attach directly to the current service, or an enabled service by name.
+    /// Attach directly to the current service, or a managed service by name.
     Attach { name: Option<String> },
     /// Read service output history, open its raw file, or print its path.
     History {
@@ -84,7 +117,7 @@ enum Command {
         #[arg(long, conflicts_with_all = ["editor", "path", "stdout"])]
         json: bool,
     },
-    /// Print enabled services known to the manager.
+    /// Print services known to the manager.
     List,
 }
 
@@ -134,6 +167,35 @@ pub async fn run() -> Result<()> {
                     )
                     .await
                 }
+                Some(Command::Run {
+                    name,
+                    no_tty,
+                    no_sync_rows_cols,
+                    restart,
+                    persist_logs,
+                    log_max_bytes,
+                    log_max_files,
+                    env,
+                    argv,
+                }) => {
+                    let directory = std::env::current_dir().context("read current directory")?;
+                    let name = name.unwrap_or_else(|| default_service_name(&directory));
+                    let spec = RunSpec {
+                        directory: directory.display().to_string(),
+                        name: name.clone(),
+                        argv,
+                        tty: !no_tty,
+                        sync_rows_cols: !no_sync_rows_cols,
+                        restart,
+                        persist_logs,
+                        log_max_bytes,
+                        log_max_files,
+                        env: parse_environment(env)?,
+                    };
+                    client::expect_ok(&paths, Request::Run { spec }).await?;
+                    println!("{name}");
+                    Ok(())
+                }
                 Some(Command::Disable { name }) => {
                     let target = client::target(name, std::env::current_dir()?);
                     client::expect_ok(&paths, Request::Disable { target }).await
@@ -168,9 +230,10 @@ async fn print_list(paths: &ServedPaths) -> Result<()> {
     };
     for service in services {
         println!(
-            "{:<18} {:<11} pid={:<7} tty={} restart={} {}",
+            "{:<18} {:<11} kind={:<9} pid={:<7} tty={} restart={} {}",
             service.name,
             format_state(&service.state),
+            format_kind(&service.kind),
             service
                 .pid
                 .map(|pid| pid.to_string())
@@ -181,6 +244,20 @@ async fn print_list(paths: &ServedPaths) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn parse_environment(values: Vec<String>) -> Result<BTreeMap<String, String>> {
+    let mut environment = BTreeMap::new();
+    for value in values {
+        let (key, value) = value
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --env value; expected KEY=VALUE"))?;
+        if key.is_empty() || key.contains('\0') {
+            bail!("invalid environment key {key:?}");
+        }
+        environment.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(environment)
 }
 
 async fn print_history(
@@ -417,6 +494,13 @@ fn format_state(state: &crate::protocol::ServiceState) -> &'static str {
     }
 }
 
+fn format_kind(kind: &ServiceKind) -> &'static str {
+    match kind {
+        ServiceKind::Enabled => "enabled",
+        ServiceKind::Temporary => "temporary",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +520,70 @@ mod tests {
             with_name.command,
             Some(Command::Attach { name: Some(name) }) if name == "api"
         ));
+    }
+
+    #[test]
+    fn run_requires_an_argv_and_accepts_full_service_options() {
+        let command = Cli::try_parse_from([
+            "served",
+            "run",
+            "--name",
+            "worker",
+            "--no-tty",
+            "--no-sync-rows-cols",
+            "--restart",
+            "on-failure",
+            "--persist-logs",
+            "--log-max-bytes",
+            "1024",
+            "--log-max-files",
+            "4",
+            "--env",
+            "PORT=8080",
+            "--env",
+            "EMPTY=",
+            "--",
+            "printf",
+            "%s",
+            "hello world",
+        ])
+        .expect("parse run");
+        assert!(matches!(
+            command.command,
+            Some(Command::Run {
+                name: Some(name),
+                no_tty: true,
+                no_sync_rows_cols: true,
+                restart,
+                persist_logs: true,
+                log_max_bytes: 1024,
+                log_max_files: 4,
+                env,
+                argv,
+            }) if name == "worker"
+                && restart == "on-failure"
+                && env == ["PORT=8080", "EMPTY="]
+                && argv == ["printf", "%s", "hello world"]
+        ));
+        assert!(Cli::try_parse_from(["served", "run"]).is_err());
+        assert!(Cli::try_parse_from(["served", "run", "printf"]).is_err());
+        assert!(
+            Cli::try_parse_from(["served", "run", "--restart", "sometimes", "--", "true"]).is_err()
+        );
+    }
+
+    #[test]
+    fn run_environment_values_are_literal_and_last_duplicate_wins() {
+        let environment = parse_environment(vec![
+            "A=first".to_owned(),
+            "A=last=value".to_owned(),
+            "EMPTY=".to_owned(),
+        ])
+        .expect("parse environment");
+        assert_eq!(environment.get("A").map(String::as_str), Some("last=value"));
+        assert_eq!(environment.get("EMPTY").map(String::as_str), Some(""));
+        assert!(parse_environment(vec!["MISSING".to_owned()]).is_err());
+        assert!(parse_environment(vec!["=value".to_owned()]).is_err());
     }
 
     #[test]

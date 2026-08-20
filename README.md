@@ -54,6 +54,12 @@ After the manager is running:
 2. Run `served edit` to create and edit `.served.json`.
 3. Run `served enable` to enable and start the project service.
 
+To run a temporary service without project configuration, use `served run`:
+
+```bash
+served run -- python app.py
+```
+
 Check the service after installation:
 
 ```bash
@@ -91,6 +97,8 @@ served edit            Open .served.json in an external editor
 served edit -e <cmd>   Use the specified editor command
 served edit --path     Create a missing template and print its path
 served enable          Enable and start the current service
+served run [options] -- <program> [args...]
+                       Create a temporary service without project configuration
 served disable [name]  Disable the current or named service
 served restart [name]  Restart the current or named service
 served attach [name]   Attach to the current or named service
@@ -114,6 +122,42 @@ any directory.
 Use `served disable` when you no longer want to manage a project. Use `served restart`
 after you change its configuration. served does not provide separate service-level `start`,
 `stop`, or `reload` commands.
+
+### Temporary Services
+
+`served run` creates a managed temporary service in the current directory. The manager must already
+be running. The command does not read or create `.served.json` or `.env.served`. It does not create
+an enabled registry link. After creation, the command prints the service name and exits.
+
+```bash
+served run --name api --no-tty --restart on-failure \
+  --env PORT=8080 -- python app.py --verbose
+```
+
+The service name defaults to a sanitized form of the current directory name. By default, served
+allocates a TTY and syncs its size with an attach client. The default restart policy is `never`.
+Logs remain in memory by default. `--restart` accepts `never`, `on-failure`, or `always`.
+
+Use `--no-tty` or `--no-sync-rows-cols` to disable the TTY options. Use `--persist-logs` to keep raw
+logs on disk. `--log-max-bytes` and `--log-max-files` use the same defaults as `.served.json`.
+
+Each `--env KEY=VALUE` option overrides the manager environment snapshot. If a key occurs more than
+once, the last value applies.
+
+Service names must be unique across all managed services. A directory can have only one managed
+service. `served run` rejects a conflict without changing the existing service.
+
+Arguments after `--` keep their exact boundaries. served does not interpret shell syntax in these
+arguments. Use an explicit `sh -c` when a command requires pipes, redirects, or expansion.
+
+The TUI and `served list` show temporary services. You can attach to these services, read their
+history, restart them, or disable them. After the program exits, the service remains stopped. You
+can still read its history or restart it. `served disable` removes the private runtime definition.
+It keeps persistent logs.
+
+A manager handoff, relinquish, or unexpected crash keeps a live temporary service available for
+adoption. The manager validates its runner with a private runtime definition. Shutdown and a normal
+manager stop remove this definition. After a host reboot, the manager does not restore the service.
 
 ## Service Configuration
 
@@ -184,7 +228,7 @@ TTY services provide a writable PTY attach. Pipe services provide a read-only at
 can have multiple read-only observers. Both modes use the terminal's alternate screen.
 
 Run `served attach [name]` to attach without opening the service TUI. Without a name, served
-uses the enabled service for the current directory. With a name, served can attach from any directory.
+uses the managed service for the current directory. With a name, served can attach from any directory.
 The target service must be running.
 
 An attach session first shows the latest 48 cleaned logical lines from the current run. It then
@@ -331,10 +375,11 @@ The workflow does not build macOS, musl, or Windows targets.
 - The manager runs as a normal user. The manager socket is readable and writable by that user.
 - A process supervisor starts the foreground manager as the installation user. The systemd unit is
   one supported Linux configuration.
-- Each enabled service has an independent runner. The manager adopts it through a private runner
+- Each managed service has an independent runner. The manager adopts it through a private runner
   socket.
-- After a manager restart, the manager scans the enabled registry and adopts existing
-  runners first.
+- After an unexpected manager restart, the manager scans the enabled registry and temporary runtime
+  definitions for live runners. It adopts matching runners without restarting their service
+  processes.
 - A runner at `$HOME/.local/state/served/runtime/runners/<name>/` owns the service process,
   PTY, log cache, restart state, and crash-loop window. A manager crash does not stop these items.
 - `served shutdown` performs a graceful shutdown for all runners. `served disable` and

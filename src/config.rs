@@ -57,6 +57,23 @@ impl RestartPolicy {
             Self::Always => true,
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "never" => Some(Self::Never),
+            "on-failure" => Some(Self::OnFailure),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::OnFailure => "on-failure",
+            Self::Always => "always",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,22 +141,8 @@ impl ServiceConfig {
     }
 
     pub fn template(directory: &Path) -> Self {
-        let name = directory
-            .file_name()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("service")
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || "._-".contains(character) {
-                    character
-                } else {
-                    '-'
-                }
-            })
-            .collect();
         Self {
-            name,
+            name: default_service_name(directory),
             command: "./run.sh".to_owned(),
             tty: true,
             sync_rows_cols: true,
@@ -150,6 +153,23 @@ impl ServiceConfig {
             env: BTreeMap::new(),
         }
     }
+}
+
+pub fn default_service_name(directory: &Path) -> String {
+    directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("service")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || "._-".contains(character) {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -364,6 +384,15 @@ mod tests {
         assert!(RestartPolicy::OnFailure.should_restart(false));
         assert!(!RestartPolicy::OnFailure.should_restart(true));
         assert!(RestartPolicy::Always.should_restart(true));
+    }
+
+    #[test]
+    fn default_name_sanitizes_the_directory_component() {
+        assert_eq!(
+            default_service_name(Path::new("/srv/My temporary service!")),
+            "My-temporary-service-"
+        );
+        assert_eq!(default_service_name(Path::new("/")), "service");
     }
 
     #[test]

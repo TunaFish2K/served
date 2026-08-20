@@ -1,4 +1,4 @@
-use std::io;
+use std::{collections::BTreeMap, io};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,29 @@ pub use crate::ipc::{
     Frame, HandoffStream, MAX_FRAME_LENGTH, framed, into_handoff, receive_json, send_json,
 };
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceKind {
+    Enabled,
+    Temporary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSpec {
+    pub directory: String,
+    pub name: String,
+    pub argv: Vec<String>,
+    pub tty: bool,
+    #[serde(rename = "syncRowsCols")]
+    pub sync_rows_cols: bool,
+    pub restart: String,
+    pub persist_logs: bool,
+    pub log_max_bytes: u64,
+    pub log_max_files: u32,
+    pub env: BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Target {
@@ -24,6 +46,9 @@ pub enum Request {
     List,
     Enable {
         directory: String,
+    },
+    Run {
+        spec: RunSpec,
     },
     Disable {
         target: Target,
@@ -75,6 +100,7 @@ pub enum ServiceState {
 pub struct ServiceInfo {
     pub name: String,
     pub directory: String,
+    pub kind: ServiceKind,
     pub state: ServiceState,
     pub pid: Option<u32>,
     pub tty: bool,
@@ -274,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_request_keeps_the_v6_wire_shape() {
+    fn manager_request_keeps_the_v7_wire_shape() {
         assert_eq!(
             serde_json::to_value(Request::HistoryChunk {
                 target: Target::Directory("/srv/api".to_owned()),
@@ -292,6 +318,66 @@ mod tests {
                 }
             })
         );
+
+        assert_eq!(
+            serde_json::to_value(Request::Run {
+                spec: RunSpec {
+                    directory: "/srv/api".to_owned(),
+                    name: "api".to_owned(),
+                    argv: vec![
+                        "printf".to_owned(),
+                        "%s".to_owned(),
+                        "hello world".to_owned()
+                    ],
+                    tty: false,
+                    sync_rows_cols: true,
+                    restart: "never".to_owned(),
+                    persist_logs: false,
+                    log_max_bytes: 1024,
+                    log_max_files: 3,
+                    env: BTreeMap::from([("PORT".to_owned(), "8080".to_owned())]),
+                },
+            })
+            .expect("serialize run request"),
+            serde_json::json!({
+                "Run": {
+                    "spec": {
+                        "directory": "/srv/api",
+                        "name": "api",
+                        "argv": ["printf", "%s", "hello world"],
+                        "tty": false,
+                        "syncRowsCols": true,
+                        "restart": "never",
+                        "persist_logs": false,
+                        "log_max_bytes": 1024,
+                        "log_max_files": 3,
+                        "env": { "PORT": "8080" }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn service_kind_keeps_the_v7_wire_shape() {
+        let service = ServiceInfo {
+            name: "scratch".to_owned(),
+            directory: "/srv/scratch".to_owned(),
+            state: ServiceState::Running,
+            kind: ServiceKind::Temporary,
+            tty: true,
+            restart: "never".to_owned(),
+            persist_logs: false,
+            pid: Some(42),
+            attach_active: false,
+            output_tail: String::new(),
+        };
+
+        let value = serde_json::to_value(Response::Services {
+            services: vec![service],
+        })
+        .expect("serialize services");
+        assert_eq!(value["Services"]["services"][0]["kind"], "temporary");
     }
 
     #[tokio::test]

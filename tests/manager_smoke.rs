@@ -13,7 +13,7 @@ use served::{
     client,
     manager::SUPERVISOR_RELINQUISH_EXIT_CODE,
     paths::ServedPaths,
-    protocol::{Request, Response, ServiceState, Target},
+    protocol::{Request, Response, RunSpec, ServiceKind, ServiceState, Target},
 };
 use tempfile::{Builder, TempDir};
 use tokio::{
@@ -28,6 +28,235 @@ impl Drop for DaemonGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[tokio::test]
+async fn run_creates_a_full_temporary_service_without_reading_config_files() {
+    let root = test_root();
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("temporary-project");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    fs::write(service_dir.join(".served.json"), "{ invalid json\n").expect("invalid config");
+    fs::write(service_dir.join(".env.served"), "FROM_FILE=must-not-load\n")
+        .expect("legacy environment");
+
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .env("MANAGER_ONLY", "daemon-value")
+        .env("OVERRIDE", "daemon-value")
+        .spawn()
+        .expect("spawn manager");
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+
+    let script = concat!(
+        "test \"$MANAGER_ONLY\" = daemon-value && ",
+        "test \"$OVERRIDE\" = cli-value && ",
+        "test -z \"${FROM_FILE+x}\" && ",
+        "printf 'temporary-ready\\n'; sleep 60"
+    );
+    let run = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args([
+            "run",
+            "--name",
+            "temporary",
+            "--no-tty",
+            "--no-sync-rows-cols",
+            "--persist-logs",
+            "--log-max-bytes",
+            "4096",
+            "--log-max-files",
+            "2",
+            "--env",
+            "OVERRIDE=cli-value",
+            "--",
+            "sh",
+            "-c",
+            script,
+        ])
+        .current_dir(&service_dir)
+        .env("HOME", &home)
+        .env("MANAGER_ONLY", "client-value")
+        .output()
+        .expect("run temporary service");
+    assert!(run.status.success(), "run failed: {run:?}");
+    assert_eq!(run.stdout, b"temporary\n");
+    wait_for_state(&paths, "temporary", ServiceState::Running).await;
+    wait_for_output_tail(&paths, "temporary", "temporary-ready").await;
+    let original_pid = service_pid(&paths, "temporary").await;
+
+    let handoff = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["daemon", "--handoff"])
+        .env("HOME", &home)
+        .output()
+        .expect("handoff temporary service manager");
+    assert!(handoff.status.success(), "handoff failed: {handoff:?}");
+    wait_for_state(&paths, "temporary", ServiceState::Running).await;
+    assert_eq!(service_pid(&paths, "temporary").await, original_pid);
+
+    let Response::Services { services } = client::request(&paths, Request::List)
+        .await
+        .expect("list services")
+    else {
+        panic!("unexpected list response");
+    };
+    let temporary = services
+        .iter()
+        .find(|service| service.name == "temporary")
+        .expect("temporary service");
+    assert_eq!(temporary.kind, ServiceKind::Temporary);
+    assert!(!temporary.tty);
+    assert!(temporary.persist_logs);
+    assert_eq!(temporary.restart, "never");
+    assert!(!paths.registry_dir().join("temporary").exists());
+    assert_eq!(
+        fs::metadata(paths.transient_definition("temporary"))
+            .expect("transient definition")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let mut session = client::attach(&paths, "temporary".to_owned())
+        .await
+        .expect("attach temporary service");
+    let output = read_until(&mut session.stream, b"temporary-ready").await;
+    assert!(
+        output
+            .windows(15)
+            .any(|window| window == b"temporary-ready")
+    );
+    drop(session);
+    assert!(
+        history_records(&paths, "temporary")
+            .await
+            .iter()
+            .any(|record| record.current && record.persisted)
+    );
+
+    let collision = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["run", "--name", "other", "--", "true"])
+        .current_dir(&service_dir)
+        .env("HOME", &home)
+        .output()
+        .expect("run directory collision");
+    assert!(!collision.status.success());
+    assert!(String::from_utf8_lossy(&collision.stderr).contains("already managed"));
+
+    let other_dir = root.path().join("other-project");
+    fs::create_dir(&other_dir).expect("other service directory");
+    let name_collision = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["run", "--name", "temporary", "--", "true"])
+        .current_dir(&other_dir)
+        .env("HOME", &home)
+        .output()
+        .expect("run name collision");
+    assert!(!name_collision.status.success());
+    assert!(String::from_utf8_lossy(&name_collision.stderr).contains("already managed"));
+
+    let restart = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("restart")
+        .current_dir(&service_dir)
+        .env("HOME", &home)
+        .output()
+        .expect("restart temporary service by directory");
+    assert!(restart.status.success(), "restart failed: {restart:?}");
+    wait_for_state(&paths, "temporary", ServiceState::Running).await;
+    let restarted_pid = service_pid(&paths, "temporary").await;
+    assert_ne!(restarted_pid, original_pid);
+
+    let disable = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("disable")
+        .current_dir(&service_dir)
+        .env("HOME", &home)
+        .output()
+        .expect("disable temporary service by directory");
+    assert!(disable.status.success(), "disable failed: {disable:?}");
+    wait_for_process_exit(restarted_pid).await;
+    assert!(!paths.transient_definition("temporary").exists());
+    assert!(paths.logs_dir().join("temporary").exists());
+}
+
+#[tokio::test]
+async fn manager_crash_preserves_a_temporary_service_for_adoption() {
+    let root = test_root();
+    let home = root.path().join("home");
+    let config_home = home.join(".config");
+    let runtime_dir = home.join(".local/state/served/runtime");
+    let state_home = home.join(".local/state");
+    let service_dir = root.path().join("temporary-adoption");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&runtime_dir).expect("runtime");
+    fs::create_dir_all(&service_dir).expect("service");
+    let paths = ServedPaths {
+        config_home,
+        runtime_dir,
+        state_home,
+    };
+
+    let mut first = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn first manager");
+    wait_for_path(&paths.socket_path()).await;
+    client::expect_ok(
+        &paths,
+        Request::Run {
+            spec: RunSpec {
+                directory: service_dir.display().to_string(),
+                name: "temporary-adoption".to_owned(),
+                argv: vec!["sleep".to_owned(), "60".to_owned()],
+                tty: false,
+                sync_rows_cols: true,
+                restart: "never".to_owned(),
+                persist_logs: false,
+                log_max_bytes: 1024,
+                log_max_files: 3,
+                env: Default::default(),
+            },
+        },
+    )
+    .await
+    .expect("run temporary service");
+    wait_for_state(&paths, "temporary-adoption", ServiceState::Running).await;
+    let pid = service_pid(&paths, "temporary-adoption").await;
+
+    first.kill().expect("kill first manager");
+    first.wait().expect("reap first manager");
+    assert!(process_exists(pid));
+    assert!(paths.transient_definition("temporary-adoption").exists());
+
+    let replacement = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .expect("spawn replacement manager");
+    let _guard = DaemonGuard(replacement);
+    wait_for_path(&paths.socket_path()).await;
+    wait_for_state(&paths, "temporary-adoption", ServiceState::Running).await;
+    assert_eq!(service_pid(&paths, "temporary-adoption").await, pid);
+
+    let shutdown = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("shutdown")
+        .env("HOME", &home)
+        .output()
+        .expect("shutdown replacement manager");
+    assert!(shutdown.status.success(), "shutdown failed: {shutdown:?}");
+    wait_for_process_exit(pid).await;
+    assert!(!paths.transient_definition("temporary-adoption").exists());
 }
 
 #[tokio::test]

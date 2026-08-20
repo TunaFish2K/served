@@ -42,6 +42,12 @@ manager 启动后：
 2. 运行 `served edit` 创建并编辑 `.served.json`。
 3. 运行 `served enable` 启用并启动项目服务。
 
+如需运行不使用项目配置的临时服务，请使用 `served run`：
+
+```bash
+served run -- python app.py
+```
+
 安装后可以用以下命令确认服务状态：
 
 ```bash
@@ -106,6 +112,8 @@ served edit            用外部编辑器打开当前目录的 .served.json
 served edit -e <cmd>   指定编辑器命令，优先于 $EDITOR
 served edit --path     创建缺失模板后只打印 .served.json 路径
 served enable          启用当前目录并立即运行
+served run [选项] -- <程序> [参数...]
+                       不使用项目配置创建临时服务
 served disable [name]  禁用当前服务，或按名称禁用
 served restart [name]  重启当前服务，或按名称重启
 served attach [name]   直接 attach 当前服务，或按名称 attach
@@ -123,11 +131,43 @@ served history [name] --json
 served list            列出 manager 管理的服务
 ```
 
+`served run` 在当前目录创建临时服务。manager 必须已经运行。该命令不读取或创建
+`.served.json` 和 `.env.served`，也不创建启用链接。创建成功后，该命令输出服务名并退出。
+
+```bash
+served run --name api --no-tty --restart on-failure \
+  --env PORT=8080 -- python app.py --verbose
+```
+
+服务名默认使用清洗后的当前目录名。served 默认分配 TTY。served 默认根据 attach 客户端
+同步 PTY 尺寸。默认重启策略是 `never`。日志默认只保存在内存中。`--restart` 接受
+`never`、`on-failure` 或 `always`。
+
+`--no-tty` 和 `--no-sync-rows-cols` 可以关闭对应的 TTY 选项。`--persist-logs` 把 raw 日志
+写入磁盘。`--log-max-bytes` 和 `--log-max-files` 的默认值与 `.served.json` 相同。
+
+每个 `--env KEY=VALUE` 都会覆盖 manager 环境快照中的同名键。一个键重复出现时，最后一个
+值生效。
+
+服务名在所有受管服务中必须唯一。一个目录只能有一个受管服务。发生名称或目录冲突时，
+`served run` 会返回错误。该命令不会修改已有服务。
+
+`--` 后的参数保持原始边界。served 不解释这些参数中的 shell 语法。命令需要管道、重定向
+或变量展开时，请显式使用 `sh -c`。
+
+TUI 和 `served list` 都会显示临时服务。临时服务也支持 attach、history、restart 和
+disable。程序退出后，服务保持 `stopped` 状态。此时仍可查看历史或重启服务。
+`served disable` 删除私有 runtime 描述。它不会删除持久化日志。
+
+manager handoff、relinquish 和异常崩溃都会保留 runner。新的 manager 可以接管仍在运行的
+临时服务。manager 使用私有 runtime 描述验证 runner。shutdown 和正常停止 manager 会删除
+该描述。主机重启后，manager 不会恢复该服务。
+
 安装的 systemd 服务使用 `systemctl reload "served@$USER.service"` 做 manager handoff。
 `systemctl restart` 和 `systemctl stop` 是该账户的明确生命周期操作，会停止其 runner。
 manager 异常退出后，systemd 会启动新 manager 并接管仍在运行的 runner。
 
-`served attach` 不会启动服务管理 TUI。省略名称时使用当前目录对应的已启用服务；提供
+`served attach` 不会启动服务管理 TUI。省略名称时使用当前目录对应的受管服务；提供
 名称时可以从任意目录 attach。目标服务必须正在运行。attach 会话进入终端第二屏，先显示
 当前运行最近 48 个逻辑行的清理快照，再接入实时输出。快照最多约 16 KiB，不会发送给
 服务，也不是 PTY 屏幕状态回放。退出时恢复原来的 shell 或 TUI 画面。
@@ -278,7 +318,8 @@ Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包
 - manager 以普通用户身份运行，socket 设置为用户可读写。
 - 进程守护程序以安装用户身份启动前台 manager；systemd unit 是一种 Linux 配置。每个服务
   由独立 runner 持有，manager 通过私有 runner socket 接管它。
-- manager 重启后，enabled registry 会被重新扫描，并优先接管已有 runner。
+- manager 异常重启后会扫描启用注册表和临时服务的 runtime 描述。manager 只接管仍在运行的
+  runner，并保留服务 PID。
 - runner 位于 `$HOME/.local/state/served/runtime/runners/<name>/`，持有服务进程、PTY、
   日志缓存、自动重启状态和 crash-loop 窗口。manager 异常退出不会停止它们。
 - `served shutdown` 通过 graceful shutdown 停止所有 runner；`served disable` 和

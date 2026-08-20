@@ -36,12 +36,13 @@ use model::{CrashLogPrompt, CrashPromptAction, HistoryView, crash_prompt_action}
 use view::{draw_history_content, draw_history_list, draw_main};
 
 #[cfg(test)]
-use crate::protocol::{ServiceInfo, ServiceState};
+use crate::protocol::{ServiceInfo, ServiceKind, ServiceState};
 #[cfg(test)]
 use view::{history_position, main_footer};
 
 const TIPS: &[&str] = &[
     "one directory, one .served.json, one working directory",
+    "served run creates a temporary service without project configuration",
     "the manager starts enabled services after a user-session restart",
     "tty:false services support read-only attach",
     "restart validates the new files before stopping the old process",
@@ -629,6 +630,7 @@ mod tests {
         ServiceInfo {
             name: "api".to_owned(),
             directory: "/tmp/api".to_owned(),
+            kind: ServiceKind::Enabled,
             state: ServiceState::Running,
             pid: Some(42),
             tty,
@@ -725,6 +727,13 @@ mod tests {
         assert!(text.contains("q/Esc quit"));
         assert!(!text.contains("recent output"));
         assert!(!text.contains("ready"));
+
+        let mut temporary = service_info(false);
+        temporary.kind = ServiceKind::Temporary;
+        terminal
+            .draw(|frame| draw_main(frame, &[temporary], 0, "render tip", ""))
+            .expect("draw temporary service");
+        assert!(buffer_text(&terminal).contains("temporary"));
     }
 
     #[test]

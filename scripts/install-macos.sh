@@ -98,8 +98,11 @@ render_plist() {
     cp "$template_source" "$rendered_plist"
     plutil -replace Label -string "$label" "$rendered_plist"
     plutil -replace UserName -string "$user_name" "$rendered_plist"
-    plutil -replace ProgramArguments.0 -string "$user_shell" "$rendered_plist"
-    plutil -replace ProgramArguments.2 -string "exec $binary_target daemon" "$rendered_plist"
+    plutil -remove ProgramArguments "$rendered_plist"
+    plutil -insert ProgramArguments -array "$rendered_plist"
+    plutil -insert ProgramArguments -string "$user_shell" -append "$rendered_plist"
+    plutil -insert ProgramArguments -string -lc -append "$rendered_plist"
+    plutil -insert ProgramArguments -string "exec $binary_target daemon" -append "$rendered_plist"
     plutil -replace WorkingDirectory -string "$user_home" "$rendered_plist"
     plutil -replace EnvironmentVariables.HOME -string "$user_home" "$rendered_plist"
     plutil -replace EnvironmentVariables.USER -string "$user_name" "$rendered_plist"
@@ -110,7 +113,9 @@ render_plist() {
     plutil -lint "$rendered_plist" >/dev/null
     [[ "$(plutil -extract Label raw -o - "$rendered_plist" 2>/dev/null)" = "$label" &&
         "$(plutil -extract UserName raw -o - "$rendered_plist" 2>/dev/null)" = "$user_name" &&
+        "$(plutil -extract ProgramArguments raw -o - "$rendered_plist" 2>/dev/null)" = "3" &&
         "$(plutil -extract ProgramArguments.0 raw -o - "$rendered_plist" 2>/dev/null)" = "$user_shell" &&
+        "$(plutil -extract ProgramArguments.1 raw -o - "$rendered_plist" 2>/dev/null)" = "-lc" &&
         "$(plutil -extract ProgramArguments.2 raw -o - "$rendered_plist" 2>/dev/null)" = "exec $binary_target daemon" &&
         "$(plutil -extract WorkingDirectory raw -o - "$rendered_plist" 2>/dev/null)" = "$user_home" &&
         "$(plutil -extract EnvironmentVariables.HOME raw -o - "$rendered_plist" 2>/dev/null)" = "$user_home" &&

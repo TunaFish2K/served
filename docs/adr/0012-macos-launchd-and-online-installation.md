@@ -24,8 +24,10 @@ Linux 完整包已经使用 systemd system service 托管普通用户 manager，
   launchd 当作 manager 进程组的一部分清理。
 - macOS 安装器由目标普通用户运行并在内部调用 `sudo`。它使用 `plutil` 渲染和校验 plist，
   记录所有活动 served LaunchDaemon，替换共享文件后逐个执行 manager handoff。
-- plist 需要重载时，安装器先 disable 实例并让 manager relinquish，再 bootout、bootstrap、
-  enable。新 manager 接管保留的 runner。任何失败都会恢复旧文件和原活动实例。
+- plist 需要重载时，安装器先 disable 实例并移除 root 管理的每用户 keepalive 标记，再让
+  manager relinquish。manager 退出后，安装器执行 bootout，然后恢复标记并 enable、bootstrap，
+  防止 launchd 在 bootout 前抢先重启 manager。新 manager 接管保留的 runner。任何失败都会
+  恢复旧文件、keepalive 标记和原活动实例。
 - macOS 卸载只移除当前用户实例并保留用户数据。其他实例存在时保留共享二进制；没有其他
   实例时，再单独确认是否删除二进制。
 - Linux 和 macOS 共用在线引导脚本。脚本检测系统与架构，解析 GitHub 最新稳定 Release，

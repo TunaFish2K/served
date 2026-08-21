@@ -6,17 +6,20 @@ binary_source="$script_dir/served"
 template_source="$script_dir/served.plist"
 binary_target="/usr/local/bin/served"
 daemon_dir="/Library/LaunchDaemons"
+keepalive_dir="/Library/Application Support/served"
 label_prefix="io.github.tunafish2k.served"
 user_name="$(id -un)"
 user_uid="$(id -u)"
 label="${label_prefix}.${user_uid}"
 plist_target="${daemon_dir}/${label}.plist"
+keepalive_target="${keepalive_dir}/${user_uid}"
 user_home=""
 user_shell=""
 rendered_plist=""
 backup_dir=""
 had_binary=0
 had_plist=0
+had_keepalive=0
 target_loaded=0
 binary_changed=1
 plist_changed=1
@@ -73,6 +76,7 @@ resolve_account() {
 
     ((EUID != 0)) || fatal "run install.sh as an installation user, not root; it uses sudo internally"
     [[ "$user_name" != root ]] || fatal "served managers must not run as root"
+    [[ "$user_uid" =~ ^[0-9]+$ ]] || fatal "installation user ID is not numeric"
     [[ "$user_name" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] ||
         fatal "installation user name is not safe for a launchd service: $user_name"
     command -v dscl >/dev/null 2>&1 || fatal "dscl is required to resolve the installation account"
@@ -108,6 +112,7 @@ render_plist() {
     plutil -replace EnvironmentVariables.USER -string "$user_name" "$rendered_plist"
     plutil -replace EnvironmentVariables.LOGNAME -string "$user_name" "$rendered_plist"
     plutil -replace EnvironmentVariables.SHELL -string "$user_shell" "$rendered_plist"
+    plutil -replace KeepAlive -json "{\"PathState\":{\"$keepalive_target\":true}}" "$rendered_plist"
     plutil -replace StandardOutPath -string "$state_dir/manager.stdout.log" "$rendered_plist"
     plutil -replace StandardErrorPath -string "$state_dir/manager.stderr.log" "$rendered_plist"
     plutil -lint "$rendered_plist" >/dev/null
@@ -122,6 +127,7 @@ render_plist() {
         "$(plutil -extract EnvironmentVariables.USER raw -o - "$rendered_plist" 2>/dev/null)" = "$user_name" &&
         "$(plutil -extract EnvironmentVariables.LOGNAME raw -o - "$rendered_plist" 2>/dev/null)" = "$user_name" &&
         "$(plutil -extract EnvironmentVariables.SHELL raw -o - "$rendered_plist" 2>/dev/null)" = "$user_shell" &&
+        "$(plutil -extract "KeepAlive.PathState.$keepalive_target" raw -o - "$rendered_plist" 2>/dev/null)" = "true" &&
         "$(plutil -extract StandardOutPath raw -o - "$rendered_plist" 2>/dev/null)" = "$state_dir/manager.stdout.log" &&
         "$(plutil -extract StandardErrorPath raw -o - "$rendered_plist" 2>/dev/null)" = "$state_dir/manager.stderr.log" ]] ||
         fatal "rendered launchd property list does not match the installation account"
@@ -141,6 +147,15 @@ inspect_installation() {
     if path_exists "$plist_target"; then
         [[ -f "$plist_target" && ! -L "$plist_target" ]] ||
             fatal "installation target is not a regular file: $plist_target"
+    fi
+    if path_exists "$keepalive_dir"; then
+        [[ -d "$keepalive_dir" && ! -L "$keepalive_dir" ]] ||
+            fatal "launchd keepalive directory is not a regular directory: $keepalive_dir"
+    fi
+    if path_exists "$keepalive_target"; then
+        [[ -f "$keepalive_target" && ! -L "$keepalive_target" ]] ||
+            fatal "launchd keepalive target is not a regular file: $keepalive_target"
+        had_keepalive=1
     fi
     path_exists "$binary_target" && had_binary=1
     path_exists "$plist_target" && had_plist=1
@@ -189,6 +204,18 @@ backup_files() {
     ((had_plist == 0)) || root_cmd cp -p "$plist_target" "$backup_dir/served.plist"
 }
 
+enable_keepalive() {
+    root_cmd install -d -m 755 "$keepalive_dir"
+    root_cmd chown root:wheel "$keepalive_dir"
+    root_cmd touch "$keepalive_target"
+    root_cmd chown root:wheel "$keepalive_target"
+    root_cmd chmod 644 "$keepalive_target"
+}
+
+disable_keepalive() {
+    root_cmd rm -f "$keepalive_target"
+}
+
 install_files() {
     root_cmd install -d -m 755 "$(dirname "$binary_target")"
     root_cmd install -d -m 755 "$daemon_dir"
@@ -200,6 +227,7 @@ install_files() {
         root_cmd install -m 644 "$rendered_plist" "$plist_target"
         root_cmd chown root:wheel "$plist_target"
     fi
+    enable_keepalive
 }
 
 wait_for_manager() {
@@ -245,9 +273,11 @@ handoff_instance() {
 reload_target_plist() {
     target_reloaded=1
     root_cmd launchctl disable "system/$label"
+    disable_keepalive
     root_cmd -u "$user_name" env HOME="$user_home" \
         "$binary_target" daemon --relinquish >/dev/null
     root_cmd launchctl bootout "system/$label"
+    enable_keepalive
     root_cmd launchctl enable "system/$label"
     root_cmd launchctl bootstrap system "$plist_target"
     root_cmd launchctl kickstart "system/$label"
@@ -269,6 +299,12 @@ restore_files() {
     else
         root_cmd rm -f "$plist_target" || failed=1
     fi
+    if ((had_keepalive)); then
+        enable_keepalive || failed=1
+    else
+        disable_keepalive || failed=1
+        root_cmd rmdir "$keepalive_dir" >/dev/null 2>&1 || true
+    fi
     return "$failed"
 }
 
@@ -281,9 +317,13 @@ restore_instances() {
         root_cmd launchctl bootout "system/$label" || failed=1
     elif ((target_reloaded && target_loaded)); then
         root_cmd launchctl disable "system/$label" || failed=1
+        disable_keepalive || failed=1
         root_cmd -u "$user_name" env HOME="$user_home" \
             "$binary_target" daemon --relinquish >/dev/null 2>&1 || true
         root_cmd launchctl bootout "system/$label" >/dev/null 2>&1 || true
+        if ((had_keepalive)); then
+            enable_keepalive || failed=1
+        fi
         root_cmd launchctl enable "system/$label" || failed=1
         root_cmd launchctl bootstrap system "$plist_target" || failed=1
         root_cmd launchctl kickstart "system/$label" || failed=1
@@ -361,7 +401,7 @@ resolve_account
 render_plist
 inspect_installation
 
-if ((binary_changed == 0 && plist_changed == 0 && had_plist)); then
+if ((binary_changed == 0 && plist_changed == 0 && had_plist && had_keepalive)); then
     printf 'served is already installed at %s\n' "$binary_target"
     ((target_loaded)) || printf '%s remains unloaded\n' "$label"
     exit 0

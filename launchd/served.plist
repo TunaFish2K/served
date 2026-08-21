@@ -26,7 +26,13 @@
         <string>@SERVED_SHELL@</string>
     </dict>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>PathState</key>
+        <dict>
+            <key>@SERVED_KEEPALIVE@</key>
+            <true/>
+        </dict>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>1</integer>
     <key>ExitTimeOut</key>

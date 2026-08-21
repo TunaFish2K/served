@@ -29,7 +29,7 @@ expected = {
         "LOGNAME": "@SERVED_USER@",
         "SHELL": "@SERVED_SHELL@",
     },
-    "KeepAlive": True,
+    "KeepAlive": {"PathState": {"@SERVED_KEEPALIVE@": True}},
     "ThrottleInterval": 1,
     "ExitTimeOut": 30,
     "Umask": 0o77,

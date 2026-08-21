@@ -6,6 +6,8 @@ binary_target="/usr/local/bin/served"
 label_prefix="io.github.tunafish2k.served"
 label="${label_prefix}.$(id -u)"
 plist_target="/Library/LaunchDaemons/${label}.plist"
+keepalive_dir="/Library/Application Support/served"
+keepalive_target="$keepalive_dir/$(id -u)"
 other_label="${label_prefix}.999999"
 other_plist="/Library/LaunchDaemons/${other_label}.plist"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/served-macos-smoke.XXXXXX")"
@@ -23,7 +25,8 @@ cleanup() {
     if ((owns_install)); then
         "$binary_target" disable "$service_name" >/dev/null 2>&1 || true
         sudo launchctl bootout "system/$label" >/dev/null 2>&1 || true
-        sudo rm -f "$plist_target" "$other_plist" "$binary_target"
+        sudo rm -f "$plist_target" "$other_plist" "$binary_target" "$keepalive_target"
+        sudo rmdir "$keepalive_dir" >/dev/null 2>&1 || true
     fi
     rm -rf "$test_root"
 }
@@ -31,7 +34,7 @@ trap cleanup EXIT
 
 [[ "$(uname -s)" == Darwin ]] || fail "macOS install smoke test requires macOS"
 [[ -f "$archive" ]] || fail "usage: tests/macos_install_smoke.sh FULL_ARCHIVE"
-[[ ! -e "$binary_target" && ! -e "$plist_target" && ! -e "$other_plist" ]] ||
+[[ ! -e "$binary_target" && ! -e "$plist_target" && ! -e "$other_plist" && ! -e "$keepalive_target" ]] ||
     fail "refusing to replace an existing served installation on the smoke-test host"
 
 tar -C "$test_root" -xzf "$archive"
@@ -43,6 +46,7 @@ package_dir="$test_root/$(basename "$archive" .tar.gz)"
 owns_install=1
 "$binary_target" list >/dev/null
 sudo launchctl print "system/$label" >/dev/null
+[[ -f "$keepalive_target" ]] || fail "macOS installer did not create its launchd keepalive marker"
 
 mkdir -p "$service_dir"
 cat > "$service_dir/.served.json" <<EOF
@@ -115,6 +119,7 @@ sudo chown root:wheel "$other_plist"
 "$package_dir/uninstall.sh" --yes
 [[ -e "$binary_target" && ! -e "$plist_target" ]] ||
     fail "macOS uninstaller removed a binary still shared by another instance"
+[[ ! -e "$keepalive_target" ]] || fail "macOS uninstaller kept a stale launchd keepalive marker"
 sudo rm -f "$other_plist"
 
 "$package_dir/install.sh" --yes
@@ -122,6 +127,7 @@ sudo rm -f "$other_plist"
 owns_install=0
 [[ ! -e "$binary_target" && ! -e "$plist_target" && ! -e "$other_plist" ]] ||
     fail "macOS uninstaller left shared installation files behind"
+[[ ! -e "$keepalive_target" ]] || fail "macOS uninstaller left its launchd keepalive marker behind"
 [[ -d "$HOME/.local/state/served" ]] || fail "macOS uninstaller removed user state"
 
 printf 'macOS install smoke checks passed\n'

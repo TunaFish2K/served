@@ -3,11 +3,13 @@ set -euo pipefail
 
 binary_target="/usr/local/bin/served"
 daemon_dir="/Library/LaunchDaemons"
+keepalive_dir="/Library/Application Support/served"
 label_prefix="io.github.tunafish2k.served"
 user_name="$(id -un)"
 user_uid="$(id -u)"
 label="${label_prefix}.${user_uid}"
 plist_target="${daemon_dir}/${label}.plist"
+keepalive_target="${keepalive_dir}/${user_uid}"
 assume_yes=0
 was_loaded=0
 
@@ -93,6 +95,9 @@ if ! root_cmd rm -f "$plist_target"; then
     fi
     fatal "could not remove ${plist_target}; the previous LaunchDaemon was restored"
 fi
+root_cmd rm -f "$keepalive_target" ||
+    fatal "served integration was removed, but its launchd keepalive marker remains: $keepalive_target"
+root_cmd rmdir "$keepalive_dir" >/dev/null 2>&1 || true
 
 other_plists=""
 for candidate in "$daemon_dir"/"${label_prefix}."*.plist; do

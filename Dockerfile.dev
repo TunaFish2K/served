@@ -14,7 +14,7 @@ RUN apt-get update \
         shellcheck \
         systemd \
     && python3 -m pip install --break-system-packages --no-cache-dir "ziglang==${ZIG_VERSION}" \
-    && cargo install --locked --version "${CARGO_ZIGBUILD_VERSION}" cargo-zigbuild \
+    && cargo install --force --locked --version "${CARGO_ZIGBUILD_VERSION}" cargo-zigbuild \
     && rustup component add clippy rustfmt \
     && rm -rf /var/lib/apt/lists/*
 

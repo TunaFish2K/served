@@ -103,7 +103,7 @@ jobs:
           python3 -m pip install --user --break-system-packages ziglang==0.16.0
           if [[ ! -x "$CARGO_HOME/bin/cargo-zigbuild" ]] ||
              [[ "$("$CARGO_HOME/bin/cargo-zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.23.0" ]]; then
-            cargo install --locked --version 0.23.0 cargo-zigbuild
+            cargo install --force --locked --version 0.23.0 cargo-zigbuild
           fi
 
       - name: Run native checks

@@ -33,7 +33,7 @@ bootstrap() {
     if [[ "$(uname -s)" == "Linux" ]]; then
         if [[ ! -x "$cargo_zigbuild" ]] ||
             [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.23.0" ]]; then
-            "${cargo_for_dev[@]}" install --locked --version 0.23.0 cargo-zigbuild
+            "${cargo_for_dev[@]}" install --force --locked --version 0.23.0 cargo-zigbuild
         fi
         if [[ "$(python3 -m ziglang version 2>/dev/null || true)" == "0.16.0" ]]; then
             zig_version="$(python3 -m ziglang version)"

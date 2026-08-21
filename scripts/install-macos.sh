@@ -214,6 +214,19 @@ wait_for_manager() {
     return 1
 }
 
+report_manager_failure() {
+    local state_dir="$user_home/.local/state/served"
+    local log_path
+
+    printf 'launchd state for %s:\n' "$label" >&2
+    root_cmd launchctl print "system/$label" >&2 || true
+    for log_path in "$state_dir/manager.stdout.log" "$state_dir/manager.stderr.log"; do
+        [[ -f "$log_path" ]] || continue
+        printf '%s (last 50 lines):\n' "$log_path" >&2
+        tail -n 50 "$log_path" >&2 || true
+    done
+}
+
 handoff_instance() {
     local instance_user="$1"
     local instance_home="$2"
@@ -362,7 +375,10 @@ fi
 
 backup_files
 install_files || abort_install "could not install the shared binary and launchd property list"
-activate_or_upgrade || abort_install "could not activate all served LaunchDaemon instances"
+if ! activate_or_upgrade; then
+    report_manager_failure
+    abort_install "could not activate all served LaunchDaemon instances"
+fi
 
 if ((had_plist && target_loaded == 0)); then
     printf '%s remains unloaded; start it with: sudo launchctl bootstrap system %s\n' \

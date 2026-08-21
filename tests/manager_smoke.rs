@@ -1334,7 +1334,7 @@ async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
         sleep(Duration::from_millis(20)).await;
     }
     assert!(daemon.try_wait().expect("recheck manager").is_some());
-    assert!(!paths.runner_socket("handoff").exists());
+    wait_for_absent(&paths.runner_socket("handoff")).await;
 }
 
 #[tokio::test]

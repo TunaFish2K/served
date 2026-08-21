@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@SERVED_LABEL@</string>
+    <key>UserName</key>
+    <string>@SERVED_USER@</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@SERVED_SHELL@</string>
+        <string>-lc</string>
+        <string>exec @SERVED_BIN@ daemon</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>@SERVED_HOME@</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>@SERVED_HOME@</string>
+        <key>USER</key>
+        <string>@SERVED_USER@</string>
+        <key>LOGNAME</key>
+        <string>@SERVED_USER@</string>
+        <key>SHELL</key>
+        <string>@SERVED_SHELL@</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@SERVED_STDOUT@</string>
+    <key>StandardErrorPath</key>
+    <string>@SERVED_STDERR@</string>
+</dict>
+</plist>

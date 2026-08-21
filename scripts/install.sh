@@ -31,6 +31,7 @@ instance_enabled=0
 target_active=0
 target_enabled=0
 handoff_preserved=0
+assume_yes=0
 declare -a active_instances=()
 
 fatal() {
@@ -43,6 +44,7 @@ path_exists() {
 }
 
 require_interactive() {
+    ((assume_yes)) && return 0
     [[ -t 0 && -t 1 ]] || fatal "interactive terminal required for $1"
 }
 
@@ -50,6 +52,7 @@ confirm_yes() {
     local prompt="$1"
     local answer
 
+    ((assume_yes)) && return 0
     while true; do
         printf '%s [Y/n] ' "$prompt" >&2
         if ! IFS= read -r answer; then
@@ -437,6 +440,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+case "${1:-}" in
+    "") ;;
+    --yes) assume_yes=1 ;;
+    *) fatal "usage: install.sh [--yes]" ;;
+esac
+
 require_target_user
 [[ -f "$script_dir/served" ]] || fatal "served binary is missing from the package"
 [[ -f "$script_dir/served@.service" ]] || fatal "served@.service is missing from the package"
@@ -447,6 +456,22 @@ if [[ -d "$binary_target" || -d "$template_target" || -d "$legacy_system_target"
 fi
 
 inspect_installation
+render_units
+if ((had_binary && had_template && legacy_system_present == 0 && legacy_user_present == 0)) &&
+    cmp -s "$script_dir/served" "$binary_target" &&
+    cmp -s "$staging_dir/served@.service" "$template_target"; then
+    printf 'served is already installed at %s\n' "$binary_target"
+    if ((instance_active)); then
+        printf '%s is active\n' "$instance_name"
+    else
+        printf '%s remains stopped; start it with: sudo systemctl start %s\n' \
+            "$instance_name" "$instance_name"
+    fi
+    if ((instance_enabled == 0)); then
+        printf 'enable it at boot with: sudo systemctl enable %s\n' "$instance_name"
+    fi
+    exit 0
+fi
 if ((shared_upgrade || legacy_system_present || legacy_user_present)); then
     require_interactive "served installation or migration"
     if confirm_yes "Install the shared served binary and systemd template for ${user_name}?"; then
@@ -460,7 +485,6 @@ if ((shared_upgrade || legacy_system_present || legacy_user_present)); then
 fi
 
 backup_files
-render_units
 install_files || abort_install "could not install the shared binary and systemd template"
 
 if ((legacy_system_present || legacy_user_present)); then

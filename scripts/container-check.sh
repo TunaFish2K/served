@@ -15,5 +15,5 @@ for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
     else
         arch="arm64"
     fi
-    scripts/verify-release-binary.sh "$arch" "$binary"
+    scripts/verify-release-binary.sh linux "$arch" "$binary"
 done

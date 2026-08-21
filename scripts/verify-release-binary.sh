@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-arch="${1:-}"
-binary="${2:-}"
+os="${1:-}"
+arch="${2:-}"
+binary="${3:-}"
 
 fail() {
     printf 'error: %s\n' "$1" >&2
@@ -11,11 +12,30 @@ fail() {
 
 [[ -f "$binary" ]] || fail "release binary does not exist: $binary"
 
-case "$arch" in
-    amd64) file "$binary" | grep -Eq 'ELF 64-bit.*(x86-64|x86_64)' ;;
-    arm64) file "$binary" | grep -Eq 'ELF 64-bit.*(aarch64|ARM aarch64)' ;;
-    *) fail "usage: scripts/verify-release-binary.sh amd64|arm64 PATH" ;;
+case "$os/$arch" in
+    linux/amd64) file "$binary" | grep -Eq 'ELF 64-bit.*(x86-64|x86_64)' ;;
+    linux/arm64) file "$binary" | grep -Eq 'ELF 64-bit.*(aarch64|ARM aarch64)' ;;
+    macos/amd64) file "$binary" | grep -Eq 'Mach-O 64-bit.*x86_64' ;;
+    macos/arm64) file "$binary" | grep -Eq 'Mach-O 64-bit.*arm64' ;;
+    *) fail "usage: scripts/verify-release-binary.sh macos|linux amd64|arm64 PATH" ;;
 esac
+
+if [[ "$os" == "macos" ]]; then
+    codesign --verify --strict "$binary"
+    command -v vtool >/dev/null 2>&1 || fail "vtool is required to verify macOS deployment targets"
+    minimum="$(
+        vtool -show-build "$binary" \
+            | awk '$1 == "minos" || $1 == "version" { print $2; exit }'
+    )"
+    if [[ "$arch" == "amd64" ]]; then
+        expected="10.12"
+    else
+        expected="11.0"
+    fi
+    [[ "$minimum" == "$expected" ]] ||
+        fail "$binary has macOS deployment target ${minimum:-unknown}, expected $expected"
+    exit 0
+fi
 
 required="$(
     readelf -W --version-info --dyn-syms "$binary" \

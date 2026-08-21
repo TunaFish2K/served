@@ -7,8 +7,8 @@ Attach 和输出历史设计目前没有待定决策。
 终端回放。ADR 0007 定义 attach 时的崩溃循环诊断和可选持久化日志提示。ADR 0008 定义
 独立运行器、管理器接管和 systemd handoff。ADR 0009 定义多用户 systemd 模板、共享文件
 和旧安装迁移。ADR 0010 定义事件驱动的 runner 状态、旧 v1 runner 回退和统一
-worker supervisor。目前仍不承诺 launchd、runit、s6 或其他 init 集成；需要实际需求后再
-分别设计对应包。
+worker supervisor。ADR 0012 定义 macOS LaunchDaemon、共享升级和统一在线安装入口。目前
+仍不承诺 runit、s6 或其他 init 集成；需要实际需求后再分别设计对应包。
 
 ADR 0011 定义无项目配置的临时服务、私有 runtime 描述和 manager v7 协议边界。该功能
 当前没有待定决策。

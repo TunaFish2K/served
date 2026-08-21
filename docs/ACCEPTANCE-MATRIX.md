@@ -1,8 +1,8 @@
 # served 验收矩阵
 
-状态：v0.6.0 验收基线。
+状态：当前开发版验收基线。
 
-本文把 `REQUIREMENTS.md` 的 40 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元
+本文把 `REQUIREMENTS.md` 的 44 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元
 测试或集成测试。`release CI` 必须在目标操作系统或打包环境中执行。单台开发机的结果不能
 替代该 gate。
 
@@ -39,8 +39,8 @@
 | 29 | `cargo test` | crash-loop attach 集成测试和结构化协议 round-trip |
 | 30 | `cargo test` | crash-loop attach 与 memory history `--stdout`/`--json` 集成路径 |
 | 31 | `cargo test` | 非交互 direct attach 集成路径和 TUI prompt model tests |
-| 32 | `release CI` | 两个 Linux 原生 runner 和另一架构构建矩阵 |
-| 33 | `release CI` | `scripts/verify-release-binary.sh` 的 glibc 检查 |
+| 32 | `release CI` | macOS/Linux 双架构原生 runner 和同系统另一架构构建矩阵 |
+| 33 | `release CI` | glibc 上限、macOS deployment target 和 ad-hoc 签名检查 |
 | 34 | `cargo test` | supervisor lifecycle CLI parser、handoff、shutdown 和 relinquish tests |
 | 35 | Linux release smoke | 两个 `served@<user>` 实例的 socket 和生命周期隔离 |
 | 36 | Linux release smoke | `scripts/install.sh` 的旧 fixed unit 迁移路径 |
@@ -48,6 +48,10 @@
 | 38 | `cargo test` | CLI run parser、argv quoting 和 `manager_smoke::run_creates_a_full_temporary_service_without_reading_config_files` |
 | 39 | `cargo test` | 临时服务的 list/attach/history/restart/disable 与冲突集成路径 |
 | 40 | `cargo test` | `manager_smoke::manager_crash_preserves_a_temporary_service_for_adoption` |
+| 41 | `make launchd-check`、macOS release smoke | `plutil`、身份、HOME 和生命周期字段检查 |
+| 42 | macOS release smoke | 活动 LaunchDaemon handoff、PID 保留、未加载状态和失败回滚 |
+| 43 | macOS release smoke | 当前实例卸载、用户数据与其他实例共享文件保留 |
+| 44 | `make installer-check` | 平台资产选择、checksum 失败和 `install.sh --yes` mock 测试 |
 
 ## 重写兼容 gate
 

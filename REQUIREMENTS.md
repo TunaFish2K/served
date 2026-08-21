@@ -3,8 +3,8 @@
 状态：产品需求草案。
 
 `served` 是轻量的宿主机服务管理工具。它帮助个人开发者把个人非关键服务部署为长期运行
-的服务。前台 manager 由安装用户选择的进程守护程序托管；systemd system unit 是可选的
-Linux 集成，不是核心运行时依赖。
+的服务。前台 manager 由安装用户选择的进程守护程序托管；systemd system unit 和 macOS
+LaunchDaemon 是可选集成，不是核心运行时依赖。
 
 个人非关键服务停止后，不会影响主机的登录和基础维护能力。机器人、Webhook、个人 API
 和 Worker 适合使用 served。`sshd`、登录和网络等基础服务不适合使用 served。
@@ -17,13 +17,17 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 
 ## 部署边界
 
-- Linux/glibc 提供 amd64、arm64 Release 产物。
+- Linux/glibc 和 macOS 都提供 amd64、arm64 Release 产物。
 - 进程守护程序必须以安装用户身份、该用户正常的 `HOME` 和前台 `served daemon` 启动
   manager。
 - 通用优雅停止接口是 `served shutdown`；保留 runner 的 manager 切换接口是
   `served daemon --handoff`；跨 supervisor 迁移使用 `served daemon --relinquish`。
 - Linux systemd 完整安装包提供 `install.sh`。脚本由目标安装用户运行，在需要时调用
   `sudo`，并启用运行 manager 的 `served@<user>.service`。
+- macOS 完整安装包提供 LaunchDaemon 安装器。它安装
+  `io.github.tunafish2k.served.<uid>`，开机后以目标安装用户身份运行 manager。
+- 统一在线脚本检测 Linux/macOS 与 amd64/arm64，下载最新稳定 full 包和 SHA-256 sidecar，
+  校验后安装。重复运行同一命令执行升级。
 - 持久启用的项目服务必须先有自己的目录和 `.served.json`，再运行 `served enable`。
 - 用户可以用 `served run -- <program> [args...]` 创建临时服务。临时服务不要求项目配置文件。
 - `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
@@ -294,6 +298,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
   覆盖。
 - 可选 systemd 模板使用 `User=%i`，不覆盖该用户主组，拒绝 root 实例，并使用用户 home
   作为工作目录。它不依赖 system manager 的 `%h` 展开，并在 `multi-user.target` 启用。
+- 可选 LaunchDaemon 使用 `UserName` 和安装用户 home，不设置 `GroupName`。它由 system
+  launchd 托管，不依赖用户登录会话，并设置 `AbandonProcessGroup` 保留独立 runner。
 - TUI 和命令通过 `$HOME/.local/state/served/runtime/served.sock` 通信。
 - socket 只允许该用户访问。
 - 所有受管服务使用与管理器相同的用户身份。
@@ -332,13 +338,46 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - 卸载后若还有其他 enabled 或 active 模板实例，必须保留共享二进制和模板。没有其他实例
   时，再用独立的 `y/N` 提示决定是否删除共享文件。
 
+## 可选 LaunchDaemon 安装生命周期
+
+- macOS 安装脚本由目标普通用户运行，并在内部调用 `sudo`。它安装共享的
+  `/usr/local/bin/served` 和 `/Library/LaunchDaemons/io.github.tunafish2k.served.<uid>.plist`，
+  不修改 shell 配置。
+- 安装器从 Directory Service 解析 UID、规范 home 和登录 shell，并在修改文件前拒绝 root、
+  无效账户、缺失 home 或不可执行 shell。
+- plist 使用 `UserName`、`WorkingDirectory`、显式 HOME、登录 shell、`KeepAlive`、30 秒退出
+  超时、私有 umask 和 `AbandonProcessGroup`。文件必须是 `root:wheel`、`0644`，并通过
+  `plutil` 校验。
+- 主机首次安装当前用户实例时，安装器清除 disabled override，bootstrap 并启动实例。已有但
+  未加载的实例在升级后保持未加载。
+- 共享二进制升级前记录所有活动 served LaunchDaemon。文件替换后，安装器以每个实例用户及
+  HOME 执行 manager handoff，manager 和受管服务 PID 保持不变。
+- 当前用户 plist 改变时，安装器先 disable 并让 manager relinquish，再 bootout、bootstrap、
+  enable 和 kickstart。新 manager 接管保留的 runner。
+- 二进制、plist、handoff 或 launchctl 操作失败时，安装器恢复旧文件，并把已升级的活动实例
+  handoff 回稳定路径下的旧二进制。
+- 卸载只 bootout、disable 和删除当前用户 plist，保留配置与状态。其他 LaunchDaemon 存在时
+  保留共享二进制；没有其他实例时，再用独立 `y/N` 确认是否删除二进制。
+- manager stdout/stderr 写入安装用户的 served state 目录。macOS 隐私保护可能要求用户为
+  `/usr/local/bin/served` 授予 Full Disk Access，或把项目放在不受保护的目录。
+
+## 统一在线安装生命周期
+
+- 在线脚本只支持 Linux systemd 与 macOS launchd 的 amd64、arm64 主机。其他 Linux
+  supervisor 继续使用 binary 资产手动安装。
+- 脚本通过 GitHub 最新稳定 Release 选择 full 包，在临时目录下载 archive 和对应 SHA-256
+  sidecar。checksum 失败时不得执行包内安装器或修改系统文件。
+- 校验成功后，脚本以显式 `--yes` 调用包内安装器。相同文件重复安装是无操作；新版本沿用
+  平台安装器的 handoff 和回滚语义。
+- 不提供 `served update`、预发布选择、指定版本、后台检查或自动更新任务。
+
 ## 发行包边界
 
-- GitHub Release 提供平台二进制、Linux systemd 完整包和确定性的 source archive；每个
-  产物都有 SHA-256 sidecar。
+- GitHub Release 提供 Linux/macOS 平台二进制、systemd/LaunchDaemon 完整包和确定性的
+  source archive；每个产物都有 SHA-256 sidecar。
 - 仓库不维护发行版包管理器的元数据、模块或兼容性承诺。外部打包可以使用平台二进制或
   source archive，但不属于本项目的发行 gate。
-- 当前不提供 launchd、runit、s6 或 supervisord 安装包；这些 init 可以直接托管前台
+- 当前不提供 runit、s6 或 supervisord 安装包；这些 init 可以直接托管前台
   `served daemon`，专用集成需要另行设计。
 
 ## V1 不做的事
@@ -353,7 +392,7 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - 公共 `served` CLI 中独立的 `start`、`stop` 或 `reload` 命令。
 - 任意位置的 `.env.served` 文件。
 - 自动发现无关进程或端口。
-- launchd、runit、s6、supervisord 等守护程序的安装器或配置生成器。
+- runit、s6、supervisord 等其他守护程序的安装器或配置生成器。
 
 ## 验收场景
 
@@ -407,8 +446,9 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
     读取运行器内存历史。
 31. 关闭崩溃日志编辑器后，attach 仍然失败，且不会自动重试服务连接；非交互式 CLI attach
     永远不会等待输入。
-32. Linux amd64、arm64 原生测试通过；每种宿主架构都能构建另一种 Linux 架构。
-33. Linux amd64、arm64 发行二进制最高依赖 GLIBC 2.17。
+32. macOS 和 Linux amd64、arm64 原生测试通过；每种宿主架构都能构建同一系统的另一架构。
+33. Linux amd64、arm64 发行二进制最高依赖 GLIBC 2.17；macOS amd64、arm64 分别声明
+    10.12 和 11.0 deployment target，并通过 ad-hoc 签名校验。
 34. `served daemon` 可由非 systemd 守护程序前台托管；`served shutdown` 优雅停止所有
     runner，`served daemon --handoff` 替换 manager 并保留服务 PID。
 35. 两个 systemd 用户实例同时运行时，各自 socket 归对应用户所有；停止一个实例不会影响
@@ -422,3 +462,10 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
     disable。名称或目录冲突不得改变已有服务。
 40. manager 异常退出后，新 manager 接管临时服务的 runner，且服务 PID 不变。正常
     shutdown 停止服务并删除私有 runtime 描述。主机重启后不得自动启动该服务。
+41. macOS plist 通过 `plutil` 校验，以普通安装用户和规范 HOME 运行，并设置 KeepAlive、
+    退出超时、私有 umask 与 `AbandonProcessGroup`。
+42. macOS 覆盖升级 handoff 所有活动 LaunchDaemon；服务 PID 不变，未加载实例保持未加载，
+    任一步失败时恢复旧二进制、plist 和活动 manager。
+43. macOS 卸载当前用户实例时保留配置、状态和其他用户需要的共享二进制。
+44. 在线安装器正确选择平台 full 包，验证 SHA-256 后才调用 `install.sh --yes`；checksum
+    失败和不支持的平台或架构不会执行安装器。

@@ -13,8 +13,12 @@ fail() {
     exit 1
 }
 
-require_linux_host() {
-    [[ "$(uname -s)" == "Linux" ]] || fail "release builds require Linux"
+host_os() {
+    case "$(uname -s)" in
+        Darwin) printf 'macos\n' ;;
+        Linux) printf 'linux\n' ;;
+        *) fail "supported build hosts are macOS and Linux" ;;
+    esac
 }
 
 host_arch() {
@@ -26,26 +30,40 @@ host_arch() {
 }
 
 rust_target() {
-    case "$1" in
-        amd64) printf 'x86_64-unknown-linux-gnu\n' ;;
-        arm64) printf 'aarch64-unknown-linux-gnu\n' ;;
-        *) fail "unsupported target architecture $1" ;;
+    case "$1/$2" in
+        macos/amd64) printf 'x86_64-apple-darwin\n' ;;
+        macos/arm64) printf 'aarch64-apple-darwin\n' ;;
+        linux/amd64) printf 'x86_64-unknown-linux-gnu\n' ;;
+        linux/arm64) printf 'aarch64-unknown-linux-gnu\n' ;;
+        *) fail "unsupported target $1/$2" ;;
     esac
 }
 
 build_target() {
-    local arch="$1"
+    local os="$1"
+    local arch="$2"
     local target
 
-    target="$(rust_target "$arch")"
+    target="$(rust_target "$os" "$arch")"
     rustup target add --toolchain "$rust_toolchain" "$target"
 
-    if command -v zig >/dev/null 2>&1; then
-        zig_version="$(zig version)"
-    elif python3 -m ziglang version >/dev/null 2>&1; then
+    if [[ "$os" == "macos" ]]; then
+        if [[ "$arch" == "amd64" ]]; then
+            MACOSX_DEPLOYMENT_TARGET=10.12 \
+                "${cargo_for_target[@]}" build --release --locked --target "$target"
+        else
+            MACOSX_DEPLOYMENT_TARGET=11.0 \
+                "${cargo_for_target[@]}" build --release --locked --target "$target"
+        fi
+        return
+    fi
+
+    if [[ "$(python3 -m ziglang version 2>/dev/null || true)" == "0.14.1" ]]; then
         zig_version="$(python3 -m ziglang version)"
         CARGO_ZIGBUILD_PYTHON_PATH="$(command -v python3)"
         export CARGO_ZIGBUILD_PYTHON_PATH
+    elif command -v zig >/dev/null 2>&1; then
+        zig_version="$(zig version)"
     else
         fail "zig 0.14.1 is required for Linux release builds; run make bootstrap"
     fi
@@ -64,7 +82,7 @@ case "$mode" in
 esac
 
 cd "$project_dir"
-require_linux_host
+os="$(host_os)"
 native_arch="$(host_arch)"
 if [[ "$native_arch" == "amd64" ]]; then
     other_arch="arm64"
@@ -74,13 +92,13 @@ fi
 
 case "$mode" in
     all)
-        build_target "$native_arch"
-        build_target "$other_arch"
+        build_target "$os" "$native_arch"
+        build_target "$os" "$other_arch"
         ;;
     cross)
-        build_target "$other_arch"
+        build_target "$os" "$other_arch"
         ;;
     amd64|arm64)
-        build_target "$mode"
+        build_target "$os" "$mode"
         ;;
 esac

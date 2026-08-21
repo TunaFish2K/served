@@ -30,6 +30,8 @@
   重启循环和私有 runner socket。
 - **System service 实例**：可选的 Linux 集成，由共享的 `served@.service` 模板实例化为
   `served@<user>.service`，由 system manager 管理，不是 `systemd --user` unit。
+- **LaunchDaemon 实例**：可选的 macOS 集成，使用
+  `io.github.tunafish2k.served.<uid>` 标识，由 system launchd 管理，但以安装用户身份运行。
 - **安装用户**：运行某个 manager 的普通用户。外部守护程序和该 manager 的所有受管子
   进程都使用该身份；一台主机可以有多个相互隔离的安装用户。
 - **固定 HOME 路径**：配置使用 `$HOME/.config`，状态使用 `$HOME/.local/state`。
@@ -45,8 +47,8 @@
 
 ## 已确认的决策
 
-- Linux/glibc 支持 amd64、arm64。每种宿主架构都能构建另一种 Linux 架构。外部守护程序
-  以前台 `served daemon` 托管 manager；systemd 只是可选安装方式。
+- macOS 和 Linux/glibc 都支持 amd64、arm64。每种宿主架构都能构建同一系统的另一架构。
+  外部守护程序以前台 `served daemon` 托管 manager；systemd 和 LaunchDaemon 是可选集成。
 - `served run [options] -- <program> [args...]` 创建临时服务。该命令忽略 `.served.json` 和
   `.env.served`。它使用 manager 环境快照，并应用 CLI `--env` 覆盖。它按原始 argv 边界
   执行命令。
@@ -92,8 +94,13 @@
   home 作为登录环境和工作目录。system manager 的 home 展开不属于服务路径约定。
 - `/usr/local/bin/served` 和 `served@.service` 是共享文件；每个实例的 socket、registry、
   runner 和服务仍按固定 HOME 路径隔离。共享升级会 handoff 所有活动实例。
-- GitHub Release、source archive 和可选 systemd 完整包是仓库维护的发行边界。发行版
-  包管理器元数据和模块由外部打包者维护，不属于兼容性承诺；其他 init 暂不提供专用包。
+- macOS LaunchDaemon 使用 `io.github.tunafish2k.served.<uid>` 标识、安装用户的规范 HOME
+  和登录 shell。共享升级会 handoff 所有活动实例；plist 变化时通过 relinquish 和重新
+  bootstrap 保留 runner。
+- GitHub Release、source archive、systemd 和 LaunchDaemon 完整包及统一在线安装脚本是仓库
+  维护的发行边界。发行版包管理器元数据和其他 init 集成不属于兼容性承诺。
+- 在线脚本检测 Linux/macOS 与 amd64/arm64，下载最新稳定 full 包并验证 SHA-256。重复运行
+  同一命令即升级；不提供 CLI 自更新或自动更新任务。
 - 每个受管服务在 `$HOME/.local/state/served/runtime/runners/<name>/` 下拥有一个 runner。
   manager 失败或收到非预期信号时，不会停止 runner 或服务。明确的 shutdown、disable 和
   服务 restart 会停止它。

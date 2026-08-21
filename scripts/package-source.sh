@@ -32,6 +32,7 @@ inputs=(
     CONTEXT.md
     rust-toolchain.toml
     docs
+    launchd
     scripts
     src
     systemd

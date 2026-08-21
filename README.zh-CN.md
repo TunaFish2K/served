@@ -3,10 +3,10 @@
 [English](README.md)
 
 `served` 帮助个人开发者把个人非关键服务部署为长期运行的服务。它直接管理宿主机进程，
-不运行容器。前台 manager 可以交给任意进程守护程序托管；仓库中的 systemd unit 只是可选
-的 Linux 集成。
+不运行容器。前台 manager 可以交给任意进程守护程序托管；仓库提供可选的 systemd 和
+launchd 集成。
 
-Release 支持 Linux/glibc，并提供 amd64/x64 和 arm64 二进制。
+Release 支持 macOS 和 Linux/glibc，并提供 amd64/x64 和 arm64 二进制。
 
 ## 适用范围
 
@@ -22,8 +22,15 @@ served 不是 Docker 容器运行时，也不提供 root 服务管理、命名�
 
 ## 部署流程
 
-下载与 Linux CPU 架构匹配的 Release 包，把 `served` 放到 `PATH` 中。配置进程守护程序，以
-目标用户身份和该用户正常的 `HOME` 运行以下前台命令：
+systemd Linux 主机和 macOS 主机可以用一条命令安装最新稳定版及对应 supervisor 集成：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh
+```
+
+以后重新运行同一命令即可升级。脚本检测系统和架构，下载 full 包及 SHA-256 sidecar，校验
+后才执行包内安装器。安装需要可用的 `sudo`。使用其他 supervisor 时，可以手动下载 binary
+资产，并以目标用户身份和该用户正常的 `HOME` 运行以下前台命令：
 
 ```bash
 served daemon
@@ -32,9 +39,9 @@ served daemon
 优雅停止使用 `served shutdown`。替换二进制后，使用 `served daemon --handoff` 切换 manager，
 同时保留 runner 和受管服务。向前台 manager 发送 `SIGTERM` 或 `SIGINT` 也会执行优雅停止。
 
-Linux 用户如果选择 systemd，可以下载对应架构的 `full.tar.gz` 并运行 `./install.sh`；该流程
-需要可用的 `sudo`。安装器会为执行脚本的账户启用 `served@$USER.service`，但不会自动启用
-项目服务。
+Linux full 包会启用 `served@$USER.service`。macOS full 包会安装名为
+`io.github.tunafish2k.served.<uid>` 的 system LaunchDaemon。两种安装器都不会自动启用项目
+服务。
 
 manager 启动后：
 
@@ -58,16 +65,8 @@ served attach <name>
 项目服务更新后，重新运行 `served restart`。服务异常时，可以使用 `served attach`、
 `served history` 和持久化日志排查。served 不会上传项目文件，也不会替用户执行构建流程。
 
-Linux 完整安装包包含以下文件，并从包目录运行安装脚本：
-
-```text
-served
-served@.service
-install.sh
-uninstall.sh
-README.md
-README.zh-CN.md
-```
+Linux 完整安装包包含 `served`、`served@.service`、`install.sh`、`uninstall.sh`、README 和
+许可证。macOS 完整包用 `served.plist` 代替 systemd 模板。
 
 以下 systemd 安装流程只适用于 Linux。仓库中的安装脚本位于 `scripts/`，system unit 模板
 位于 `systemd/`。脚本由拥有 manager 的普通用户执行，通过 `sudo` 安装共享的
@@ -97,6 +96,25 @@ enabled 和 active 状态。共享二进制变化后，安装器 reload 所有�
 以目标账户运行 `./uninstall.sh` 只会 disable 和停止该账户实例，并保留配置和状态。如果
 还有其他 enabled 或 active 实例，脚本会保留共享二进制和模板；否则使用单独的 `y/N`
 提示决定是否删除共享文件。需要确认的操作在非交互环境中不会执行。
+
+## 可选 launchd 安装
+
+macOS full 包把共享二进制安装到 `/usr/local/bin/served`，并为当前用户安装
+`/Library/LaunchDaemons/io.github.tunafish2k.served.<uid>.plist`。plist 由 root 拥有，但通过
+`UserName` 让 manager 和所有服务以安装用户身份运行。它使用该账户的 home、工作目录、登录
+shell、主组、socket、registry、runner 和日志，不依赖图形登录会话。
+
+首次安装会 bootstrap 并启动当前用户实例。升级替换共享二进制后，会 handoff 主机上所有
+活动 served LaunchDaemon。当前用户 plist 发生变化时，安装器先让 manager relinquish，再
+重新 bootstrap，使新 manager 接管已有 runner。任何失败都会恢复旧二进制、plist 和活动
+manager。原本未加载的实例保持未加载。
+
+以目标账户运行包内 `./uninstall.sh`，只会停止并删除该用户 LaunchDaemon，配置和状态始终
+保留。仍有其他 served LaunchDaemon 时保留共享二进制；否则用单独的 `y/N` 提示决定是否删除。
+
+macOS 隐私控制可能阻止 LaunchDaemon 访问受保护的 Desktop、Documents 或 Downloads 目录。
+可以为 `/usr/local/bin/served` 授予 Full Disk Access，或把项目放在不受保护的目录。Release
+使用 ad-hoc 签名，不做 notarization。
 
 ## 命令
 
@@ -290,9 +308,9 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 
 ## Tag 发布
 
-推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建 Linux
-amd64、arm64 产物。二进制最低需要 glibc 2.17。发布 tag 为 `vX.Y.Z` 时，产物使用以下
-命名格式：
+推送与 `Cargo.toml` 版本一致的 `v<semver>` tag 会自动创建 GitHub Release，并构建 macOS
+和 Linux 的 amd64、arm64 产物。Linux 二进制最低需要 glibc 2.17；macOS amd64 最低支持
+10.12，arm64 最低支持 11.0。发布 tag 为 `vX.Y.Z` 时，产物使用以下命名格式：
 
 ```text
 served-linux-amd64-vX.Y.Z-binary
@@ -303,21 +321,28 @@ served-linux-arm64-vX.Y.Z-binary
 served-linux-arm64-vX.Y.Z-binary.sha256
 served-linux-arm64-vX.Y.Z-full.tar.gz
 served-linux-arm64-vX.Y.Z-full.tar.gz.sha256
+served-macos-amd64-vX.Y.Z-binary
+served-macos-amd64-vX.Y.Z-binary.sha256
+served-macos-amd64-vX.Y.Z-full.tar.gz
+served-macos-amd64-vX.Y.Z-full.tar.gz.sha256
+served-macos-arm64-vX.Y.Z-binary
+served-macos-arm64-vX.Y.Z-binary.sha256
+served-macos-arm64-vX.Y.Z-full.tar.gz
+served-macos-arm64-vX.Y.Z-full.tar.gz.sha256
 served-vX.Y.Z-source.tar.gz
 served-vX.Y.Z-source.tar.gz.sha256
 ```
 
-Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包，包含 `served`、
-`served@.service`、`install.sh`、`uninstall.sh` 和两个 README 文件。可重复生成的 source
-压缩包包含可构建的项目源码。每个产物都有自己的 SHA-256 sidecar 文件。
-
-当前 workflow 不构建 macOS、musl 或 Windows 目标。
+每个平台的 `binary` 只包含可执行文件。Linux full 包增加 systemd 集成，macOS full 包增加
+LaunchDaemon 集成。可重复生成的 source 压缩包包含可构建的项目源码。每个产物都有自己的
+SHA-256 sidecar。macOS 二进制使用 ad-hoc 签名，不做 notarization。当前 workflow 不构建
+musl 或 Windows 目标。
 
 ## 安全边界
 
 - manager 以普通用户身份运行，socket 设置为用户可读写。
-- 进程守护程序以安装用户身份启动前台 manager；systemd unit 是一种 Linux 配置。每个服务
-  由独立 runner 持有，manager 通过私有 runner socket 接管它。
+- 进程守护程序以安装用户身份启动前台 manager；systemd unit 和 macOS LaunchDaemon 是
+  受支持的平台集成。每个服务由独立 runner 持有，manager 通过私有 runner socket 接管它。
 - manager 异常重启后会扫描启用注册表和临时服务的 runtime 描述。manager 只接管仍在运行的
   runner，并保留服务 PID。
 - runner 位于 `$HOME/.local/state/served/runtime/runners/<name>/`，持有服务进程、PTY、
@@ -341,7 +366,7 @@ Linux `binary` 只包含可执行文件；Linux `full.tar.gz` 是完整安装包
 应优先使用 Release 完整安装包。
 
 ```bash
-make bootstrap       # 安装 Linux amd64 和 arm64 Rust target
+make bootstrap       # 安装当前系统的 amd64 和 arm64 Rust target
 make check           # 格式、Clippy 和本机测试
 make msrv-check      # 使用 Rust 1.85 编译全部 target
 make build-cross     # 构建当前系统的另一种架构
@@ -349,15 +374,17 @@ make build-all       # 构建当前系统的两种架构
 make dist            # 打包当前系统的两种架构
 make source-dist     # 生成确定性的 source 压缩包
 make shellcheck      # 检查仓库中的 shell 脚本
+make installer-check # 用 mock 测试在线安装器
 make systemd-check   # 验证 systemd 模板
+make launchd-check   # 验证 launchd 模板
 make linux-check     # 在 Docker 中运行完整 Linux 检查
 ```
 
 `make run` 使用 `.dev/` 下的隔离 `HOME` 启动 manager。另开终端后，可以运行
 `make cli ARGS="list"` 或其他 served 命令。Linux 交叉发行固定使用 Zig 0.14.1 和
-cargo-zigbuild 0.21.8。构建要求 Linux，并覆盖两种 Linux 架构。Docker 检查固定使用 Rust
-1.85；本机构建和 CI 默认使用 stable，也可以通过 `RUST_TOOLCHAIN` 选择已经安装的 rustup
-工具链。
+cargo-zigbuild 0.21.8。构建流程不跨操作系统：macOS 构建两种 macOS 架构，Linux 构建两种
+Linux 架构。Docker 检查固定使用 Rust 1.85；本机构建和 CI 默认使用 stable，也可以通过
+`RUST_TOOLCHAIN` 选择已经安装的 rustup 工具链。
 
 核心需求记录在 [REQUIREMENTS.md](REQUIREMENTS.md)，技术决策记录在
 [TECH-STACK.md](TECH-STACK.md)。

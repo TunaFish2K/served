@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-#[cfg(not(target_os = "linux"))]
-compile_error!("served supports Linux only");
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("served supports Linux and macOS only");
 
 pub mod cli;
 pub mod client;

@@ -32,7 +32,7 @@ package_linux() {
     local full_root="$dist/served-linux-${arch}-v${version}-full"
 
     "$project_dir/scripts/verify-release-binary.sh" \
-        "$arch" "$project_dir/target/$target/release/served"
+        linux "$arch" "$project_dir/target/$target/release/served"
     install -m 755 "$project_dir/target/$target/release/served" "$dist/$binary_asset"
     mkdir -p "$full_root"
     install -m 755 "$project_dir/target/$target/release/served" "$full_root/served"
@@ -45,12 +45,37 @@ package_linux() {
     install -m 644 "$project_dir/README.zh-CN.md" "$full_root/README.zh-CN.md"
     install -m 644 "$project_dir/LICENSE" "$full_root/LICENSE"
     tar -C "$dist" -czf "$dist/$full_asset" "$(basename "$full_root")"
+    rm -rf "$full_root"
+    checksum "$dist/$binary_asset"
+    checksum "$dist/$full_asset"
+}
+
+package_macos() {
+    local version="$1"
+    local arch="$2"
+    local target="$3"
+    local binary_asset="served-macos-${arch}-v${version}-binary"
+    local full_asset="served-macos-${arch}-v${version}-full.tar.gz"
+    local full_root="$dist/served-macos-${arch}-v${version}-full"
+
+    install -m 755 "$project_dir/target/$target/release/served" "$dist/$binary_asset"
+    codesign --force --sign - --timestamp=none "$dist/$binary_asset"
+    "$project_dir/scripts/verify-release-binary.sh" macos "$arch" "$dist/$binary_asset"
+    mkdir -p "$full_root"
+    install -m 755 "$dist/$binary_asset" "$full_root/served"
+    install -m 644 "$project_dir/launchd/served.plist" "$full_root/served.plist"
+    install -m 755 "$project_dir/scripts/install-macos.sh" "$full_root/install.sh"
+    install -m 755 "$project_dir/scripts/uninstall-macos.sh" "$full_root/uninstall.sh"
+    install -m 644 "$project_dir/README.md" "$full_root/README.md"
+    install -m 644 "$project_dir/README.zh-CN.md" "$full_root/README.zh-CN.md"
+    install -m 644 "$project_dir/LICENSE" "$full_root/LICENSE"
+    tar -C "$dist" -czf "$dist/$full_asset" "$(basename "$full_root")"
+    rm -rf "$full_root"
     checksum "$dist/$binary_asset"
     checksum "$dist/$full_asset"
 }
 
 cd "$project_dir"
-[[ "$(uname -s)" == "Linux" ]] || fail "release packaging requires Linux"
 package_id="$(
     "$project_dir/scripts/cargo-toolchain.sh" "$rust_toolchain" pkgid --locked
 )"
@@ -68,12 +93,24 @@ esac
 rm -rf "$dist"
 mkdir -p "$dist"
 
-if [[ "$requested_arch" == "all" || "$requested_arch" == "amd64" ]]; then
-    package_linux "$version" amd64 x86_64-unknown-linux-gnu
-fi
-if [[ "$requested_arch" == "all" || "$requested_arch" == "arm64" ]]; then
-    package_linux "$version" arm64 aarch64-unknown-linux-gnu
-fi
+case "$(uname -s)" in
+    Linux)
+        if [[ "$requested_arch" == "all" || "$requested_arch" == "amd64" ]]; then
+            package_linux "$version" amd64 x86_64-unknown-linux-gnu
+        fi
+        if [[ "$requested_arch" == "all" || "$requested_arch" == "arm64" ]]; then
+            package_linux "$version" arm64 aarch64-unknown-linux-gnu
+        fi
+        ;;
+    Darwin)
+        if [[ "$requested_arch" == "all" || "$requested_arch" == "amd64" ]]; then
+            package_macos "$version" amd64 x86_64-apple-darwin
+        fi
+        if [[ "$requested_arch" == "all" || "$requested_arch" == "arm64" ]]; then
+            package_macos "$version" arm64 aarch64-apple-darwin
+        fi
+        ;;
+    *) fail "release packaging supports macOS and Linux" ;;
+esac
 
-find "$dist" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
 printf 'release assets written to %s\n' "$dist"

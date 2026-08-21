@@ -4,9 +4,9 @@
 
 `served` runs an existing project directory as a long-running service for personal, non-critical
 use. It manages host processes directly and does not run containers. The foreground manager can
-run under any process supervisor; the included systemd unit is an optional Linux integration.
+run under any process supervisor; the repository includes optional systemd and launchd integrations.
 
-Release binaries support Linux with glibc on amd64/x64 and arm64.
+Release binaries support macOS and Linux with glibc on amd64/x64 and arm64.
 
 ## What served Does
 
@@ -32,9 +32,17 @@ services, or any service that you need to maintain the host.
 
 ## Quick Deployment
 
-Download the release package for the Linux host architecture, then put `served` in a directory on
-`PATH`. Configure your process supervisor to run this foreground command as the target user with
-that user's normal `HOME`:
+For a systemd Linux host or macOS host, install the latest stable release and its native supervisor
+integration with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh
+```
+
+Run the same command again to update. It detects the operating system and architecture, downloads
+the matching full package and SHA-256 sidecar, verifies the checksum, and then runs the packaged
+installer. Installation requires working `sudo` access. Other supervisors can use the standalone
+binary and run this foreground command as the target user with that user's normal `HOME`:
 
 ```bash
 served daemon
@@ -44,9 +52,8 @@ Use `served shutdown` for a graceful stop. Use `served daemon --handoff` after r
 to switch managers while keeping runners and managed services alive. Sending `SIGTERM` or `SIGINT`
 to the foreground manager also performs a graceful stop.
 
-Linux users who want systemd can download the matching `full.tar.gz` package and run
-`./install.sh`; this requires working `sudo` access. The installer enables
-`served@$USER.service` for the invoking account but does not enable project services.
+The Linux full package enables `served@$USER.service`. The macOS full package installs a system
+LaunchDaemon named `io.github.tunafish2k.served.<uid>`. Neither installer enables project services.
 
 After the manager is running:
 
@@ -70,16 +77,9 @@ served attach <name>
 Run `served restart` after you update the project. Use `served attach`, `served history`,
 and persistent logs to investigate service failures. served does not upload or build the project.
 
-The Linux full package contains these files:
-
-```text
-served
-served@.service
-install.sh
-uninstall.sh
-README.md
-README.zh-CN.md
-```
+The Linux full package contains `served`, `served@.service`, `install.sh`, `uninstall.sh`, the
+README files, and the license. The macOS full package replaces the systemd template with
+`served.plist`.
 
 ## Common Commands
 
@@ -343,11 +343,33 @@ Use `systemctl reload "served@$USER.service"` for manager handoff. `systemctl re
 `systemctl stop` are explicit lifecycle actions for that account and stop its runners. If a manager
 exits unexpectedly, systemd starts it again and the surviving runners are adopted.
 
+## Optional launchd Installation
+
+The macOS full package installs `/usr/local/bin/served` and a per-user system LaunchDaemon at
+`/Library/LaunchDaemons/io.github.tunafish2k.served.<uid>.plist`. The plist is owned by root, but
+`UserName` runs the manager and all services as the installation user. It uses that account's home,
+working directory, login shell, primary group, socket, registry, runners, and logs. It does not
+depend on a graphical login session.
+
+The first installation bootstraps and starts the invoking user's daemon. An upgrade hands off every
+active served LaunchDaemon on the host after replacing the shared binary. If the current user's
+plist changes, the installer relinquishes the manager before bootstrapping the new plist so the new
+manager can adopt existing runners. A failure restores the old binary, plist, and active managers.
+An already unloaded instance remains unloaded.
+
+Run the packaged `./uninstall.sh` as the account whose integration you want to remove. It stops and
+removes only that user's LaunchDaemon and keeps configuration and state. The shared binary remains
+while another served LaunchDaemon exists; otherwise a separate `y/N` prompt controls its removal.
+
+macOS privacy controls can prevent a LaunchDaemon from accessing protected Desktop, Documents, or
+Downloads locations. Grant Full Disk Access to `/usr/local/bin/served`, or keep managed projects in
+an unprotected directory. Release binaries use ad-hoc signatures and are not notarized.
+
 ## Release Downloads
 
 Push a `v<semver>` tag that matches the version in `Cargo.toml` to create a GitHub Release. The
-workflow builds and tests Linux binaries for amd64 and arm64. Release binaries require glibc 2.17
-or later.
+workflow builds and tests macOS and Linux binaries for amd64 and arm64. Linux release binaries
+require glibc 2.17 or later. macOS amd64 targets 10.12 or later; arm64 targets 11.0 or later.
 
 For a release tag `vX.Y.Z`, the assets follow this naming scheme:
 
@@ -360,21 +382,28 @@ served-linux-arm64-vX.Y.Z-binary
 served-linux-arm64-vX.Y.Z-binary.sha256
 served-linux-arm64-vX.Y.Z-full.tar.gz
 served-linux-arm64-vX.Y.Z-full.tar.gz.sha256
+served-macos-amd64-vX.Y.Z-binary
+served-macos-amd64-vX.Y.Z-binary.sha256
+served-macos-amd64-vX.Y.Z-full.tar.gz
+served-macos-amd64-vX.Y.Z-full.tar.gz.sha256
+served-macos-arm64-vX.Y.Z-binary
+served-macos-arm64-vX.Y.Z-binary.sha256
+served-macos-arm64-vX.Y.Z-full.tar.gz
+served-macos-arm64-vX.Y.Z-full.tar.gz.sha256
 served-vX.Y.Z-source.tar.gz
 served-vX.Y.Z-source.tar.gz.sha256
 ```
 
-The Linux `binary` asset contains only the executable. The Linux `full.tar.gz` asset contains the
-executable, `served@.service`, installer, uninstaller, and both README files. The deterministic
-source archive contains the buildable project source. Each asset has its own SHA-256 sidecar file.
-
-The workflow does not build macOS, musl, or Windows targets.
+Each `binary` asset contains only the executable. A Linux full package adds systemd integration; a
+macOS full package adds LaunchDaemon integration. The deterministic source archive contains the
+buildable project source. Each asset has its own SHA-256 sidecar file. macOS binaries use ad-hoc
+signatures and are not notarized. The workflow does not build musl or Windows targets.
 
 ## Security and Limits
 
 - The manager runs as a normal user. The manager socket is readable and writable by that user.
-- A process supervisor starts the foreground manager as the installation user. The systemd unit is
-  one supported Linux configuration.
+- A process supervisor starts the foreground manager as the installation user. The systemd unit and
+  macOS LaunchDaemon are supported platform integrations.
 - Each managed service has an independent runner. The manager adopts it through a private runner
   socket.
 - After an unexpected manager restart, the manager scans the enabled registry and temporary runtime
@@ -405,7 +434,7 @@ These commands build and check served itself. You do not need a Rust toolchain t
 project. Use a full release package for personal deployment.
 
 ```bash
-make bootstrap       # Install Linux amd64 and arm64 targets
+make bootstrap       # Install same-OS amd64 and arm64 targets
 make check           # Format, clippy, and native tests
 make msrv-check      # Compile every target with Rust 1.85
 make build-cross     # Build the other host architecture
@@ -413,15 +442,17 @@ make build-all       # Build both host architectures
 make dist            # Package both host architectures
 make source-dist     # Create the deterministic source archive
 make shellcheck      # Check all repository shell scripts
+make installer-check # Test the online installer with mocks
 make systemd-check   # Validate the systemd template
+make launchd-check   # Validate the launchd template
 make linux-check     # Run the Linux checks in Docker
 ```
 
 `make run` starts an isolated manager with `HOME` under `.dev/`. In another terminal, use
 `make cli ARGS="list"` or another served command against that manager. Linux cross releases use
-Zig 0.14.1 and cargo-zigbuild 0.21.8. Builds require Linux and cover both Linux architectures. The
-Docker check runs on Rust 1.85; local builds and CI use stable unless `RUST_TOOLCHAIN` selects
-another installed rustup toolchain.
+Zig 0.14.1 and cargo-zigbuild 0.21.8. Builds do not cross operating systems: macOS builds both macOS
+architectures and Linux builds both Linux architectures. The Docker check runs on Rust 1.85; local
+builds and CI use stable unless `RUST_TOOLCHAIN` selects another installed rustup toolchain.
 
 Core requirements are in [REQUIREMENTS.md](REQUIREMENTS.md). Technical decisions are in
 [TECH-STACK.md](TECH-STACK.md).

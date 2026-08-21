@@ -48,18 +48,28 @@ jobs:
           echo "version=$package_version" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build Linux ${{ matrix.arch }}
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
     needs: metadata
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          - os: linux
+            arch: amd64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - arch: arm64
+          - os: linux
+            arch: arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - os: macos
+            arch: amd64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos
+            arch: arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -85,6 +95,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-release-
 
       - name: Install Linux release tools
+        if: matrix.os == 'linux'
         shell: bash
         run: |
           sudo apt-get update
@@ -99,10 +110,19 @@ jobs:
         run: make check
 
       - name: Validate system service template
+        if: matrix.os == 'linux'
         run: make systemd-check
 
+      - name: Validate launchd template
+        run: make launchd-check
+
       - name: Check shell scripts
+        if: matrix.os == 'linux'
         run: make shellcheck
+
+      - name: Test online installer
+        if: matrix.os == 'linux'
+        run: make installer-check
 
       - name: Package release assets
         env:
@@ -110,12 +130,20 @@ jobs:
         run: scripts/package-release.sh "${{ matrix.arch }}"
 
       - name: Run packaged native binary
-        run: dist/served-linux-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-binary --version
+        shell: bash
+        run: |
+          "dist/served-${{ matrix.os }}-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-binary" --version
+
+      - name: Smoke test macOS LaunchDaemon package
+        if: matrix.os == 'macos'
+        run: |
+          tests/macos_install_smoke.sh \
+            "dist/served-macos-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-full.tar.gz"
 
       - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
-          name: release-linux-${{ matrix.arch }}
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 

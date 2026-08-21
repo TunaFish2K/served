@@ -381,8 +381,8 @@ make linux-check     # 在 Docker 中运行完整 Linux 检查
 ```
 
 `make run` 使用 `.dev/` 下的隔离 `HOME` 启动 manager。另开终端后，可以运行
-`make cli ARGS="list"` 或其他 served 命令。Linux 交叉发行固定使用 Zig 0.14.1 和
-cargo-zigbuild 0.21.8。构建流程不跨操作系统：macOS 构建两种 macOS 架构，Linux 构建两种
+`make cli ARGS="list"` 或其他 served 命令。Linux 交叉发行固定使用 Zig 0.16.0 和
+cargo-zigbuild 0.23.0。构建流程不跨操作系统：macOS 构建两种 macOS 架构，Linux 构建两种
 Linux 架构。Docker 检查固定使用 Rust 1.85；本机构建和 CI 默认使用 stable，也可以通过
 `RUST_TOOLCHAIN` 选择已经安装的 rustup 工具链。
 

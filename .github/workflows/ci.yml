@@ -62,10 +62,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes shellcheck
-          python3 -m pip install --user --break-system-packages ziglang==0.14.1
+          python3 -m pip install --user --break-system-packages ziglang==0.16.0
           if [[ ! -x "$CARGO_HOME/bin/cargo-zigbuild" ]] ||
-             [[ "$("$CARGO_HOME/bin/cargo-zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
-            cargo install --locked --version 0.21.8 cargo-zigbuild
+             [[ "$("$CARGO_HOME/bin/cargo-zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.23.0" ]]; then
+            cargo install --locked --version 0.23.0 cargo-zigbuild
           fi
 
       - name: Run native checks

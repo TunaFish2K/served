@@ -1705,9 +1705,10 @@ fn process_exists(pid: u32) -> bool {
 }
 
 fn test_root() -> TempDir {
+    let temp_root = fs::canonicalize("/tmp").expect("canonical temp root");
     Builder::new()
         .prefix("served-")
-        .tempdir_in("/tmp")
+        .tempdir_in(temp_root)
         .expect("short test tempdir")
 }
 

@@ -32,18 +32,18 @@ bootstrap() {
 
     if [[ "$(uname -s)" == "Linux" ]]; then
         if [[ ! -x "$cargo_zigbuild" ]] ||
-            [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
-            "${cargo_for_dev[@]}" install --locked --version 0.21.8 cargo-zigbuild
+            [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.23.0" ]]; then
+            "${cargo_for_dev[@]}" install --locked --version 0.23.0 cargo-zigbuild
         fi
-        if [[ "$(python3 -m ziglang version 2>/dev/null || true)" == "0.14.1" ]]; then
+        if [[ "$(python3 -m ziglang version 2>/dev/null || true)" == "0.16.0" ]]; then
             zig_version="$(python3 -m ziglang version)"
         elif command -v zig >/dev/null 2>&1; then
             zig_version="$(zig version)"
         else
-            fail "install Zig 0.14.1 and rerun make bootstrap"
+            fail "install Zig 0.16.0 and rerun make bootstrap"
         fi
-        [[ "$zig_version" == "0.14.1" ]] || fail \
-            "Zig 0.14.1 is required, found $zig_version"
+        [[ "$zig_version" == "0.16.0" ]] || fail \
+            "Zig 0.16.0 is required, found $zig_version"
     fi
 }
 

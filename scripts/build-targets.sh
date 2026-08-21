@@ -58,20 +58,20 @@ build_target() {
         return
     fi
 
-    if [[ "$(python3 -m ziglang version 2>/dev/null || true)" == "0.14.1" ]]; then
+    if [[ "$(python3 -m ziglang version 2>/dev/null || true)" == "0.16.0" ]]; then
         zig_version="$(python3 -m ziglang version)"
         CARGO_ZIGBUILD_PYTHON_PATH="$(command -v python3)"
         export CARGO_ZIGBUILD_PYTHON_PATH
     elif command -v zig >/dev/null 2>&1; then
         zig_version="$(zig version)"
     else
-        fail "zig 0.14.1 is required for Linux release builds; run make bootstrap"
+        fail "zig 0.16.0 is required for Linux release builds; run make bootstrap"
     fi
-    [[ "$zig_version" == "0.14.1" ]] ||
-        fail "Zig 0.14.1 is required, found $zig_version"
+    [[ "$zig_version" == "0.16.0" ]] ||
+        fail "Zig 0.16.0 is required, found $zig_version"
     if [[ ! -x "$cargo_zigbuild" ]] ||
-        [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.21.8" ]]; then
-        fail "cargo-zigbuild 0.21.8 is required; run make bootstrap"
+        [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.23.0" ]]; then
+        fail "cargo-zigbuild 0.23.0 is required; run make bootstrap"
     fi
     "${cargo_for_target[@]}" zigbuild --release --locked --target "${target}.2.17"
 }

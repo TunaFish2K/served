@@ -450,7 +450,7 @@ make linux-check     # Run the Linux checks in Docker
 
 `make run` starts an isolated manager with `HOME` under `.dev/`. In another terminal, use
 `make cli ARGS="list"` or another served command against that manager. Linux cross releases use
-Zig 0.14.1 and cargo-zigbuild 0.21.8. Builds do not cross operating systems: macOS builds both macOS
+Zig 0.16.0 and cargo-zigbuild 0.23.0. Builds do not cross operating systems: macOS builds both macOS
 architectures and Linux builds both Linux architectures. The Docker check runs on Rust 1.85; local
 builds and CI use stable unless `RUST_TOOLCHAIN` selects another installed rustup toolchain.
 

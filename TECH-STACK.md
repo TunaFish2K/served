@@ -126,7 +126,7 @@ service 和 macOS LaunchDaemon，但不替代宿主进程守护程序，也不�
 - 推送匹配的 `v<semver>` tag 后，GitHub release workflow 自动运行。
 - `Makefile` 统一本机构建、测试、隔离运行、同系统跨架构编译和 Docker Linux 检查。
 - macOS 使用 Rust/Clang 构建 amd64、arm64，deployment target 分别为 10.12、11.0。
-- Linux 使用 Zig 0.14.1 和 cargo-zigbuild 0.21.8 构建 amd64、arm64，固定 glibc 2.17。
+- Linux 使用 Zig 0.16.0 和 cargo-zigbuild 0.23.0 构建 amd64、arm64，固定 glibc 2.17。
 - CI 在 macOS 和 Linux 的 amd64、arm64 原生 runner 上运行测试，并从每种宿主架构构建同一
   系统的另一架构。
 - Linux 完整安装包包含 systemd 集成；macOS 完整安装包包含 LaunchDaemon plist 和对应

@@ -108,9 +108,18 @@ render_plist() {
     plutil -replace StandardOutPath -string "$state_dir/manager.stdout.log" "$rendered_plist"
     plutil -replace StandardErrorPath -string "$state_dir/manager.stderr.log" "$rendered_plist"
     plutil -lint "$rendered_plist" >/dev/null
-    if grep -q '@SERVED_' "$rendered_plist"; then
-        fatal "rendered launchd property list contains an unresolved placeholder"
-    fi
+    [[ "$(plutil -extract Label raw -o - "$rendered_plist" 2>/dev/null)" = "$label" &&
+        "$(plutil -extract UserName raw -o - "$rendered_plist" 2>/dev/null)" = "$user_name" &&
+        "$(plutil -extract ProgramArguments.0 raw -o - "$rendered_plist" 2>/dev/null)" = "$user_shell" &&
+        "$(plutil -extract ProgramArguments.2 raw -o - "$rendered_plist" 2>/dev/null)" = "exec $binary_target daemon" &&
+        "$(plutil -extract WorkingDirectory raw -o - "$rendered_plist" 2>/dev/null)" = "$user_home" &&
+        "$(plutil -extract EnvironmentVariables.HOME raw -o - "$rendered_plist" 2>/dev/null)" = "$user_home" &&
+        "$(plutil -extract EnvironmentVariables.USER raw -o - "$rendered_plist" 2>/dev/null)" = "$user_name" &&
+        "$(plutil -extract EnvironmentVariables.LOGNAME raw -o - "$rendered_plist" 2>/dev/null)" = "$user_name" &&
+        "$(plutil -extract EnvironmentVariables.SHELL raw -o - "$rendered_plist" 2>/dev/null)" = "$user_shell" &&
+        "$(plutil -extract StandardOutPath raw -o - "$rendered_plist" 2>/dev/null)" = "$state_dir/manager.stdout.log" &&
+        "$(plutil -extract StandardErrorPath raw -o - "$rendered_plist" 2>/dev/null)" = "$state_dir/manager.stderr.log" ]] ||
+        fatal "rendered launchd property list does not match the installation account"
 }
 
 inspect_installation() {

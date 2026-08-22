@@ -32,7 +32,10 @@ use tokio::{
 mod model;
 mod view;
 
-use model::{CrashLogPrompt, CrashPromptAction, HistoryView, crash_prompt_action};
+use model::{
+    CrashLogPrompt, CrashPromptAction, HistoryView, LifecycleAction, PendingLifecycleAction,
+    crash_prompt_action,
+};
 use view::{draw_history_content, draw_history_list, draw_main};
 
 #[cfg(test)]
@@ -166,34 +169,54 @@ async fn run_loop(
     let mut services = Vec::new();
     let mut notice = String::new();
     let mut crash_prompt: Option<CrashLogPrompt> = None;
+    let mut pending_action: Option<PendingLifecycleAction> = None;
+    let mut exit_when_idle = false;
     let tip = random_tip();
     let current_directory = std::env::current_dir().ok();
 
     loop {
-        match client::request(&paths, Request::List).await {
-            Ok(Response::Services { services: latest }) => {
-                services = latest;
-                if !services.is_empty() {
-                    selected = selected.min(services.len() - 1);
-                }
-                if let Some(directory) = &current_directory {
-                    let has_local_config = directory.join(CONFIG_FILE).is_file();
-                    let enabled = services
-                        .iter()
-                        .any(|service| Path::new(&service.directory) == directory.as_path());
-                    if has_local_config && !enabled && notice.is_empty() {
-                        notice = "enable your service to manage it here!".to_owned();
+        if pending_action
+            .as_ref()
+            .is_some_and(PendingLifecycleAction::is_finished)
+        {
+            let outcome = pending_action
+                .take()
+                .expect("finished lifecycle action")
+                .finish()
+                .await;
+            notice = outcome.notice;
+            if exit_when_idle && outcome.succeeded {
+                return Ok(());
+            }
+            exit_when_idle = false;
+        }
+
+        if pending_action.is_none() {
+            match client::request(&paths, Request::List).await {
+                Ok(Response::Services { services: latest }) => {
+                    services = latest;
+                    if !services.is_empty() {
+                        selected = selected.min(services.len() - 1);
+                    }
+                    if let Some(directory) = &current_directory {
+                        let has_local_config = directory.join(CONFIG_FILE).is_file();
+                        let enabled = services
+                            .iter()
+                            .any(|service| Path::new(&service.directory) == directory.as_path());
+                        if has_local_config && !enabled && notice.is_empty() {
+                            notice = "enable your service to manage it here!".to_owned();
+                        }
                     }
                 }
-            }
-            Err(error) => {
-                if crash_prompt.is_none() {
-                    notice = format!("manager unavailable: {error}");
+                Err(error) => {
+                    if crash_prompt.is_none() {
+                        notice = format!("manager unavailable: {error}");
+                    }
                 }
-            }
-            Ok(response) => {
-                if crash_prompt.is_none() {
-                    notice = format!("unexpected manager response: {response:?}");
+                Ok(response) => {
+                    if crash_prompt.is_none() {
+                        notice = format!("unexpected manager response: {response:?}");
+                    }
                 }
             }
         }
@@ -206,6 +229,11 @@ async fn run_loop(
             continue;
         };
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(pending) = &pending_action {
+                exit_when_idle = true;
+                notice = pending.progress_notice(true);
+                continue;
+            }
             return Ok(());
         }
         if let Some(prompt) = crash_prompt.take() {
@@ -225,6 +253,24 @@ async fn run_loop(
             }
             continue;
         }
+        if let Some(pending) = &pending_action {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    exit_when_idle = true;
+                    notice = pending.progress_notice(true);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !services.is_empty() {
+                        selected = (selected + 1).min(services.len() - 1);
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected.saturating_sub(1);
+                }
+                _ => {}
+            }
+            continue;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
             KeyCode::Down | KeyCode::Char('j') => {
@@ -237,30 +283,18 @@ async fn run_loop(
             }
             KeyCode::Char('r') => {
                 if let Some(service) = services.get(selected) {
-                    notice = command_notice(
-                        client::expect_ok(
-                            &paths,
-                            Request::Restart {
-                                target: Target::Name(service.name.clone()),
-                            },
-                        )
-                        .await,
-                        "restart",
-                    );
+                    let name = service.name.clone();
+                    let pending = start_lifecycle_action(&paths, LifecycleAction::Restart, name);
+                    notice = pending.progress_notice(false);
+                    pending_action = Some(pending);
                 }
             }
             KeyCode::Char('d') => {
                 if let Some(service) = services.get(selected) {
-                    notice = command_notice(
-                        client::expect_ok(
-                            &paths,
-                            Request::Disable {
-                                target: Target::Name(service.name.clone()),
-                            },
-                        )
-                        .await,
-                        "disable",
-                    );
+                    let name = service.name.clone();
+                    let pending = start_lifecycle_action(&paths, LifecycleAction::Disable, name);
+                    notice = pending.progress_notice(false);
+                    pending_action = Some(pending);
                 }
             }
             KeyCode::Char('a') => {
@@ -303,11 +337,23 @@ async fn run_loop(
     }
 }
 
-fn command_notice(result: Result<()>, action: &str) -> String {
-    match result {
-        Ok(()) => format!("{action} requested"),
-        Err(error) => format!("{action}: {error}"),
-    }
+fn start_lifecycle_action(
+    paths: &ServedPaths,
+    action: LifecycleAction,
+    name: String,
+) -> PendingLifecycleAction {
+    let request = match action {
+        LifecycleAction::Disable => Request::Disable {
+            target: Target::Name(name.clone()),
+        },
+        LifecycleAction::Restart => Request::Restart {
+            target: Target::Name(name.clone()),
+        },
+    };
+    let paths = paths.clone();
+    PendingLifecycleAction::spawn(action, name, async move {
+        client::expect_ok(&paths, request).await
+    })
 }
 
 async fn history_in_tui(
@@ -682,6 +728,42 @@ mod tests {
         assert!(!input_requests_detach(b"output"));
     }
 
+    #[tokio::test]
+    async fn lifecycle_action_starts_without_waiting_and_reports_success() {
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        let pending =
+            PendingLifecycleAction::spawn(LifecycleAction::Disable, "api".to_owned(), async move {
+                waiting.await.expect("release lifecycle action");
+                Ok(())
+            });
+
+        assert!(!pending.is_finished());
+        assert_eq!(pending.progress_notice(false), "disabling api...");
+        assert_eq!(
+            pending.progress_notice(true),
+            "disabling api...; quitting when complete"
+        );
+
+        release.send(()).expect("finish lifecycle action");
+        let outcome = tokio::time::timeout(Duration::from_secs(1), pending.finish())
+            .await
+            .expect("lifecycle action completion");
+        assert!(outcome.succeeded);
+        assert_eq!(outcome.notice, "disabled api");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_action_failure_keeps_the_error_context() {
+        let pending =
+            PendingLifecycleAction::spawn(LifecycleAction::Restart, "api".to_owned(), async {
+                Err(anyhow::anyhow!("runner unavailable"))
+            });
+
+        let outcome = pending.finish().await;
+        assert!(!outcome.succeeded);
+        assert_eq!(outcome.notice, "restart api: runner unavailable");
+    }
+
     #[test]
     fn attach_log_prompt_accepts_only_explicit_yes() {
         assert!(is_affirmative("y\n"));
@@ -734,6 +816,20 @@ mod tests {
             .draw(|frame| draw_main(frame, &[temporary], 0, "render tip", ""))
             .expect("draw temporary service");
         assert!(buffer_text(&terminal).contains("temporary"));
+    }
+
+    #[test]
+    fn main_render_shows_lifecycle_progress() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let services = vec![service_info(true)];
+        let notice = LifecycleAction::Disable.progress_notice("api", false);
+
+        terminal
+            .draw(|frame| draw_main(frame, &services, 0, "render tip", &notice))
+            .expect("draw");
+
+        assert!(buffer_text(&terminal).contains("disabling api..."));
     }
 
     #[test]

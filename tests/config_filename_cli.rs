@@ -18,7 +18,13 @@ fn edit_path_creates_current_config_without_warning() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),
-        format!("{}\n", directory.path().join(CURRENT_CONFIG).display())
+        format!(
+            "{}\n",
+            fs::canonicalize(directory.path())
+                .expect("canonical tempdir")
+                .join(CURRENT_CONFIG)
+                .display()
+        )
     );
     assert!(output.stderr.is_empty());
     assert!(directory.path().join(CURRENT_CONFIG).is_file());
@@ -43,7 +49,13 @@ fn edit_path_uses_deprecated_config_and_warns_only_on_stderr() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),
-        format!("{}\n", directory.path().join(LEGACY_CONFIG).display())
+        format!(
+            "{}\n",
+            fs::canonicalize(directory.path())
+                .expect("canonical tempdir")
+                .join(LEGACY_CONFIG)
+                .display()
+        )
     );
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
     assert!(stderr.contains("warning:"));
@@ -74,7 +86,13 @@ fn edit_path_prefers_current_config_and_warns_that_legacy_is_ignored() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),
-        format!("{}\n", directory.path().join(CURRENT_CONFIG).display())
+        format!(
+            "{}\n",
+            fs::canonicalize(directory.path())
+                .expect("canonical tempdir")
+                .join(CURRENT_CONFIG)
+                .display()
+        )
     );
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
     assert!(stderr.contains("warning:"));

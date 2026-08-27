@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     client,
-    config::CONFIG_FILE,
+    config::has_config_file,
     editor,
     logs::DEFAULT_CHUNK_LIMIT,
     paths::ServedPaths,
@@ -44,7 +44,7 @@ use crate::protocol::{ServiceInfo, ServiceKind, ServiceState};
 use view::{history_position, main_footer};
 
 const TIPS: &[&str] = &[
-    "one directory, one .served.json, one working directory",
+    "one directory, one .served.json5, one working directory",
     "served run creates a temporary service without project configuration",
     "the manager starts enabled services after a user-session restart",
     "tty:false services support read-only attach",
@@ -199,7 +199,7 @@ async fn run_loop(
                         selected = selected.min(services.len() - 1);
                     }
                     if let Some(directory) = &current_directory {
-                        let has_local_config = directory.join(CONFIG_FILE).is_file();
+                        let has_local_config = has_config_file(directory);
                         let enabled = services
                             .iter()
                             .any(|service| Path::new(&service.directory) == directory.as_path());

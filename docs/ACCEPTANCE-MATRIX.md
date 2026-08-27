@@ -8,7 +8,7 @@
 
 | 场景 | Gate | 主要证据 |
 | --- | --- | --- |
-| 1 | `cargo test` | `config::template_creates_annotated_json5_without_legacy_env_file`、`cli::edit_path_creates_template_without_editor` |
+| 1 | `cargo test` | 配置文件优先级单元测试、`cli::edit_path_creates_template_without_editor`、`config_filename_cli` warning 测试 |
 | 2 | `cargo test` | `manager_smoke::enable_restart_and_disable_a_pipe_service` |
 | 3 | `cargo test` | `manager_smoke::enable_restart_and_disable_a_pipe_service` 验证重复名称失败且原链接不变 |
 | 4 | `cargo test` | `manager_smoke::enable_restart_and_disable_a_pipe_service` |
@@ -21,9 +21,9 @@
 | 11 | `cargo test` | TUI model/render tests；随机选择由 `rand` 启动路径执行 |
 | 12 | `cargo test` | `client::rejects_directory_without_managed_service` |
 | 13 | `cargo test` | `tui::main_footer_describes_available_actions`、`tui::main_render_keeps_tip_and_contextual_footer` |
-| 14 | `cargo test` | editor 优先级、`PATH` 候选顺序和 CLI parser tests |
+| 14 | `cargo test` | editor 优先级、`PATH` 候选顺序、CLI parser 和 `config_filename_cli` 路径测试 |
 | 15 | `cargo test` | `cli::edit_path_creates_template_without_editor`、Clap 冲突定义 |
-| 16 | `cargo test` | `config::template_does_not_rewrite_existing_source` |
+| 16 | `cargo test` | `config::template_does_not_rewrite_existing_source`、`config::template_keeps_deprecated_config_without_creating_current_file` |
 | 17 | `cargo test` | `manager_smoke::direct_attach_supports_name_and_current_directory`、`tui::ctrl_c_is_the_attach_detach_byte` |
 | 18 | `cargo test` | direct attach、client directory resolution 和 pipe attach 集成测试 |
 | 19 | `cargo test` | direct attach PTY 集成测试和 TUI render tests |

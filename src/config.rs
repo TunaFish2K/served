@@ -6,8 +6,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::warn;
 
-pub const CONFIG_FILE: &str = ".served.json";
+pub const CONFIG_FILE: &str = ".served.json5";
+pub const LEGACY_CONFIG_FILE: &str = ".served.json";
 pub const ENV_FILE: &str = ".env.served";
 pub const DEFAULT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 pub const DEFAULT_LOG_MAX_FILES: u32 = 3;
@@ -18,7 +20,7 @@ pub enum ConfigError {
     MissingDirectory(PathBuf),
     #[error("service directory is not a directory: {0}")]
     NotDirectory(PathBuf),
-    #[error("missing {CONFIG_FILE} in {0}")]
+    #[error("missing {CONFIG_FILE} or {LEGACY_CONFIG_FILE} in {0}")]
     MissingConfig(PathBuf),
     #[error("invalid service name {0:?}; use letters, digits, '.', '_' or '-'")]
     InvalidName(String),
@@ -32,8 +34,12 @@ pub enum ConfigError {
     InvalidLogMaxFiles,
     #[error("I/O error while reading service configuration: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid JSON5 in {CONFIG_FILE}: {0}")]
-    Json5(#[from] json5::Error),
+    #[error("invalid JSON5 in {path}: {source}")]
+    Json5 {
+        path: PathBuf,
+        #[source]
+        source: json5::Error,
+    },
     #[error("invalid dotenv data: {0}")]
     Dotenv(#[from] dotenvy::Error),
 }
@@ -179,6 +185,77 @@ pub struct LoadedService {
     pub environment: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFileStatus {
+    Current,
+    Legacy,
+    CurrentWithLegacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedConfigFile {
+    path: PathBuf,
+    status: ConfigFileStatus,
+}
+
+impl ResolvedConfigFile {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn deprecation_warning(&self) -> Option<String> {
+        let directory = self.path.parent()?;
+        let current = directory.join(CONFIG_FILE);
+        let legacy = directory.join(LEGACY_CONFIG_FILE);
+        match self.status {
+            ConfigFileStatus::Current => None,
+            ConfigFileStatus::Legacy => Some(format!(
+                "{} is deprecated; rename it to {}",
+                legacy.display(),
+                current.display()
+            )),
+            ConfigFileStatus::CurrentWithLegacy => Some(format!(
+                "ignoring deprecated {} because {} exists",
+                legacy.display(),
+                current.display()
+            )),
+        }
+    }
+
+    fn log_deprecation_warning(&self) {
+        if let Some(message) = self.deprecation_warning() {
+            warn!(config = %self.path.display(), "{message}");
+        }
+    }
+}
+
+pub(crate) fn resolve_config_file(directory: &Path) -> Option<ResolvedConfigFile> {
+    let current = directory.join(CONFIG_FILE);
+    let legacy = directory.join(LEGACY_CONFIG_FILE);
+    if current.is_file() {
+        let status = if legacy.is_file() {
+            ConfigFileStatus::CurrentWithLegacy
+        } else {
+            ConfigFileStatus::Current
+        };
+        Some(ResolvedConfigFile {
+            path: current,
+            status,
+        })
+    } else if legacy.is_file() {
+        Some(ResolvedConfigFile {
+            path: legacy,
+            status: ConfigFileStatus::Legacy,
+        })
+    } else {
+        None
+    }
+}
+
+pub(crate) fn has_config_file(directory: &Path) -> bool {
+    resolve_config_file(directory).is_some()
+}
+
 pub fn load_service(
     directory: impl AsRef<Path>,
     manager_environment: &BTreeMap<String, String>,
@@ -191,11 +268,14 @@ pub fn load_service(
         return Err(ConfigError::NotDirectory(directory.to_path_buf()));
     }
     let directory = fs::canonicalize(directory)?;
-    let config_path = directory.join(CONFIG_FILE);
-    if !config_path.is_file() {
-        return Err(ConfigError::MissingConfig(directory));
-    }
-    let config: ServiceConfig = json5::from_str(&fs::read_to_string(config_path)?)?;
+    let config_file = resolve_config_file(&directory)
+        .ok_or_else(|| ConfigError::MissingConfig(directory.clone()))?;
+    config_file.log_deprecation_warning();
+    let source = fs::read_to_string(config_file.path())?;
+    let config: ServiceConfig = json5::from_str(&source).map_err(|source| ConfigError::Json5 {
+        path: config_file.path.clone(),
+        source,
+    })?;
     config.validate()?;
 
     let mut environment = manager_environment.clone();
@@ -223,12 +303,20 @@ pub fn manager_environment() -> BTreeMap<String, String> {
 }
 
 pub fn write_template(directory: &Path) -> Result<(), ConfigError> {
+    prepare_config_file(directory).map(|_| ())
+}
+
+pub(crate) fn prepare_config_file(directory: &Path) -> Result<ResolvedConfigFile, ConfigError> {
     fs::create_dir_all(directory)?;
-    let config_path = directory.join(CONFIG_FILE);
-    if !config_path.exists() {
-        fs::write(config_path, template_source(directory))?;
+    if let Some(config_file) = resolve_config_file(directory) {
+        return Ok(config_file);
     }
-    Ok(())
+    let path = directory.join(CONFIG_FILE);
+    fs::write(&path, template_source(directory))?;
+    Ok(ResolvedConfigFile {
+        path,
+        status: ConfigFileStatus::Current,
+    })
 }
 
 fn validate_env_key(key: &str) -> Result<(), ConfigError> {
@@ -334,6 +422,81 @@ mod tests {
             service.environment.get("QUOTED"),
             Some(&"hello world".to_owned())
         );
+    }
+
+    #[test]
+    fn loads_deprecated_json_filename() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(LEGACY_CONFIG_FILE),
+            r#"{name: "legacy", command: "echo ok"}"#,
+        )
+        .expect("legacy config");
+
+        let resolved = resolve_config_file(directory.path()).expect("resolve legacy config");
+        assert_eq!(resolved.path(), directory.path().join(LEGACY_CONFIG_FILE));
+        assert!(
+            resolved
+                .deprecation_warning()
+                .expect("deprecation warning")
+                .contains("is deprecated")
+        );
+        let service = load_service(directory.path(), &BTreeMap::new()).expect("load legacy config");
+        assert_eq!(service.config.name, "legacy");
+    }
+
+    #[test]
+    fn json5_filename_takes_precedence_over_deprecated_json_filename() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(LEGACY_CONFIG_FILE),
+            r#"{name: "legacy", command: "echo legacy"}"#,
+        )
+        .expect("legacy config");
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            r#"{name: "current", command: "echo current"}"#,
+        )
+        .expect("current config");
+
+        let resolved = resolve_config_file(directory.path()).expect("resolve current config");
+        assert_eq!(resolved.path(), directory.path().join(CONFIG_FILE));
+        assert!(
+            resolved
+                .deprecation_warning()
+                .expect("ignored legacy warning")
+                .contains("ignoring deprecated")
+        );
+        let service =
+            load_service(directory.path(), &BTreeMap::new()).expect("load current config");
+        assert_eq!(service.config.name, "current");
+    }
+
+    #[test]
+    fn invalid_json5_filename_does_not_fall_back_to_deprecated_json_filename() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join(LEGACY_CONFIG_FILE),
+            r#"{name: "legacy", command: "echo legacy"}"#,
+        )
+        .expect("legacy config");
+        fs::write(directory.path().join(CONFIG_FILE), "{ invalid").expect("invalid current config");
+
+        let error = load_service(directory.path(), &BTreeMap::new()).expect_err("reject current");
+        assert!(matches!(
+            error,
+            ConfigError::Json5 { path, .. } if path == directory.path().join(CONFIG_FILE)
+        ));
+    }
+
+    #[test]
+    fn missing_config_reports_both_supported_filenames() {
+        let directory = tempdir().expect("tempdir");
+
+        let error = load_service(directory.path(), &BTreeMap::new()).expect_err("missing config");
+        let message = error.to_string();
+        assert!(message.contains(CONFIG_FILE));
+        assert!(message.contains(LEGACY_CONFIG_FILE));
     }
 
     #[test]
@@ -496,6 +659,21 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(directory.path().join(CONFIG_FILE)).expect("read config"),
+            original
+        );
+    }
+
+    #[test]
+    fn template_keeps_deprecated_config_without_creating_current_file() {
+        let directory = tempdir().expect("tempdir");
+        let original = "// keep legacy source\n{name: 'legacy', command: 'echo ok'}\n";
+        fs::write(directory.path().join(LEGACY_CONFIG_FILE), original).expect("legacy config");
+
+        write_template(directory.path()).expect("keep legacy template");
+
+        assert!(!directory.path().join(CONFIG_FILE).exists());
+        assert_eq!(
+            fs::read_to_string(directory.path().join(LEGACY_CONFIG_FILE)).expect("read legacy"),
             original
         );
     }

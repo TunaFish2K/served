@@ -21,7 +21,7 @@ service 和 macOS LaunchDaemon，但不替代宿主进程守护程序，也不�
 | 管理模型 | Manager actor，以及每个受管服务一个独立 runner 进程 | 管理器持有状态缓存，并负责 IPC 和注册表。runner 负责子进程生命周期和输出 |
 | Worker 模型 | 一套事件驱动 supervisor，外加 PTY 和 pipe 适配器 | 统一处理退出、重启、stop、attach、resize、进程组终止和输出分发 |
 | 服务命令 | `/bin/sh -c <command>` | 工作目录是服务目录 |
-| 无 PTY 的进程 | `tokio::process` 和异步管道 | `.served.json` 使用 `tty: false` 时启用 |
+| 无 PTY 的进程 | `tokio::process` 和异步管道 | `.served.json5` 使用 `tty: false` 时启用 |
 | 有 PTY 的进程 | `portable-pty` | 默认路径；master 始终由 worker 持有 |
 | 进程身份 | Linux `/proc`；macOS `sysinfo` | Linux 保留既有 tick 格式；macOS 使用安全 API 的启动时间 |
 | 本地时间戳 | `chrono` | 为归档日志生成可读的本地运行名称 |
@@ -35,8 +35,9 @@ service 和 macOS LaunchDaemon，但不替代宿主进程守护程序，也不�
 
 ## 配置与状态
 
-- `json5` 通过 `serde` 反序列化带注释、直接对象形式的 `.served.json`；IPC 消息仍使用
-  `serde_json` 作为 wire format。
+- `json5` 通过 `serde` 反序列化带注释、直接对象形式的 `.served.json5`。旧版
+  `.served.json` 使用相同解析器作为弃用兼容输入；新文件优先，且不会因解析失败回退。
+  IPC 消息仍使用 `serde_json` 作为 wire format。
 - `dotenvy` 按 dotenv 规则解析固定的旧版 `.env.served` 回退文件。文件按数据读取，永远
   不会由 shell source。
 - 管理器捕获启动环境，再叠加旧版 `.env.served`，最后为每个服务叠加 JSON5 字面量 `env`。
@@ -83,8 +84,9 @@ service 和 macOS LaunchDaemon，但不替代宿主进程守护程序，也不�
 - TUI 首屏是全局受管服务列表。它显示服务类型和状态，也提供 restart、disable、attach 和
   history。首屏只显示一行 `tips:`。上下文操作栏始终位于 tips 下方。窄终端使用两行
   操作栏。PTY 和管道服务都显示 attach。
-- `served edit` 只在 `.served.json` 缺失时创建带注释的 JSON5 模板，再直接打开文件。已有
-  源文本保持不变；`--path` 只创建模板和报告路径，不启动编辑器。
+- `served edit` 只在 `.served.json5` 和 `.served.json` 都缺失时创建带注释的
+  `.served.json5` 模板，再直接打开选中的文件。已有源文本保持不变；旧文件原地打开并向
+  stderr 输出弃用 warning。`--path` 只创建模板和报告路径，不启动编辑器。
 - `h` 历史页面先列出记录，再分页加载清理后的内容。页面显示简单的 `current/total`
   逻辑行位置，保留轮换的 `tips:`，不会通过 attach 回放历史。
 - `served history [name]` 默认选择 `latest`，`--run <id>` 选择归档。编辑器或 `--path`

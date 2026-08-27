@@ -3,8 +3,7 @@ use std::{collections::BTreeMap, io::ErrorKind, path::Path, process};
 use crate::{
     client,
     config::{
-        CONFIG_FILE, DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES, default_service_name,
-        write_template,
+        DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES, default_service_name, prepare_config_file,
     },
     editor,
     logs::DEFAULT_CHUNK_LIMIT,
@@ -51,7 +50,7 @@ enum Command {
         #[arg(long)]
         socket: std::path::PathBuf,
     },
-    /// Open .served.json in an external editor.
+    /// Open .served.json5 in an external editor.
     Edit {
         #[arg(short = 'e', long, value_name = "COMMAND", conflicts_with = "path")]
         editor: Option<String>,
@@ -462,15 +461,18 @@ where
 }
 
 async fn edit_config(directory: &Path, editor: Option<String>, path_only: bool) -> Result<()> {
-    write_template(directory).context("create .served.json template")?;
-    let path = directory.join(CONFIG_FILE);
+    let config_file = prepare_config_file(directory).context("prepare service configuration")?;
+    if let Some(warning) = config_file.deprecation_warning() {
+        eprintln!("warning: {warning}");
+    }
+    let path = config_file.path();
     if path_only {
         println!("{}", path.display());
         return Ok(());
     }
 
     let editor = editor::resolve(editor)?;
-    open_editor_or_exit(&editor, &path).await
+    open_editor_or_exit(&editor, path).await
 }
 
 async fn open_editor_or_exit(editor_command: &str, path: &Path) -> Result<()> {
@@ -644,7 +646,7 @@ mod tests {
             .await
             .expect("create config path");
 
-        let path = directory.path().join(CONFIG_FILE);
+        let path = directory.path().join(crate::config::CONFIG_FILE);
         assert!(path.is_file());
         assert!(
             std::fs::read_to_string(path)

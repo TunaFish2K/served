@@ -38,9 +38,11 @@
   `XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_RUNTIME_DIR` 不会改变 served 的路径。
 - **安装用户 home**：已安装 system service 使用的规范 home。该用户直接运行
   `served daemon` 时也使用相同的 `$HOME` 路径。主动覆盖 `HOME` 不在支持范围内。
-- **旧版 served 环境文件**：`.served.json` 旁边可选的 `.env.served`。它是 dotenv 兼容
+- **服务配置文件**：首选 `.served.json5`；`.served.json` 是弃用的兼容文件名。两个文件
+  同时存在时只使用 `.served.json5`，且不会因它无效而回退。
+- **旧版 served 环境文件**：服务配置旁边可选的 `.env.served`。它是 dotenv 兼容
   回退输入；项目 `.env` 不属于 served 配置。
-- **已启用服务**：`kind=enabled` 的服务。`.served.json` 和启用链接定义该服务。manager
+- **已启用服务**：`kind=enabled` 的服务。服务配置文件和启用链接定义该服务。manager
   启动时恢复该服务。
 - **临时服务**：`kind=temporary` 的服务。`served run` 的 argv 和选项定义该服务。该服务
   不写项目配置或启用链接。manager 只用私有 runtime 描述接管活动 runner。
@@ -49,9 +51,9 @@
 
 - macOS 和 Linux/glibc 都支持 amd64、arm64。每种宿主架构都能构建同一系统的另一架构。
   外部守护程序以前台 `served daemon` 托管 manager；systemd 和 LaunchDaemon 是可选集成。
-- `served run [options] -- <program> [args...]` 创建临时服务。该命令忽略 `.served.json` 和
-  `.env.served`。它使用 manager 环境快照，并应用 CLI `--env` 覆盖。它按原始 argv 边界
-  执行命令。
+- `served run [options] -- <program> [args...]` 创建临时服务。该命令忽略 `.served.json5`、
+  `.served.json` 和 `.env.served`。它使用 manager 环境快照，并应用 CLI `--env` 覆盖。它按
+  原始 argv 边界执行命令。
 - 临时服务在显式 disable 前保持可管理。manager handoff、relinquish 和异常崩溃会保留
   runner。正常 shutdown 和无活动 runner 的恢复路径会删除私有 runtime 描述。
 - 直接 attach 进入备用屏幕，清屏并启用 raw mode。detach、EOF 或错误发生后，恢复 shell
@@ -73,10 +75,12 @@
   导出到临时文件，可在 attach 失败后用 `served history --stdout` 或 `--json` 读取。离开
   编辑器后不重试 attach。
 - 主 TUI 不再显示最近输出面板。无论 TTY 模式如何，都显示 `a attach`。
-- `.served.json` 按 JSON5 解析。新的 `served edit` 模板为每个字段添加详细行内注释；
-  已有文件打开时不重写。编辑器依次使用 `-e/--editor COMMAND`、`$EDITOR`，或从 `PATH`
-  查找 `editor`、`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`；`--path`
-  创建缺失模板后只打印绝对配置路径。
+- `.served.json5` 和兼容的 `.served.json` 都按 JSON5 解析。新文件优先；只有旧文件时原地
+  使用，两个文件同时存在时忽略旧文件。两种兼容情况都输出 warning，不自动迁移，也没有
+  预定移除版本。新的 `served edit` 模板为每个字段添加详细行内注释；已有文件打开时不重写。
+  编辑器依次使用 `-e/--editor COMMAND`、`$EDITOR`，或从 `PATH` 查找 `editor`、
+  `sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`；`--path` 创建缺失模板后只
+  打印绝对配置路径，warning 写入 stderr。
 - 每个服务的环境优先级为 manager 启动环境、旧版 `.env.served` dotenv 值、JSON5 字面量
   `env` 值。新模板不创建 `.env.served`，项目 `.env` 永远不读取。
 - `persist_logs` 默认值为 `false`，下次进程启动或重启时生效。持久化日志使用

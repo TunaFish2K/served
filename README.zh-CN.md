@@ -46,7 +46,7 @@ Linux full 包会启用 `served@$USER.service`。macOS full 包会安装名为
 manager 启动后：
 
 1. 进入项目目录。
-2. 运行 `served edit` 创建并编辑 `.served.json`。
+2. 运行 `served edit` 创建并编辑 `.served.json5`。
 3. 运行 `served enable` 启用并启动项目服务。
 
 如需运行不使用项目配置的临时服务，请使用 `served run`：
@@ -126,9 +126,9 @@ served daemon --handoff
 served daemon --relinquish
                        退出 manager，但保留 runner 供另一个守护程序接管
 served shutdown        停止 manager 和所有受管 runner
-served edit            用外部编辑器打开当前目录的 .served.json
+served edit            用外部编辑器打开当前目录的 .served.json5
 served edit -e <cmd>   指定编辑器命令，优先于 $EDITOR
-served edit --path     创建缺失模板后只打印 .served.json 路径
+served edit --path     创建缺失模板后只打印选中的配置路径
 served enable          启用当前目录并立即运行
 served run [选项] -- <程序> [参数...]
                        不使用项目配置创建临时服务
@@ -150,7 +150,8 @@ served list            列出 manager 管理的服务
 ```
 
 `served run` 在当前目录创建临时服务。manager 必须已经运行。该命令不读取或创建
-`.served.json` 和 `.env.served`，也不创建启用链接。创建成功后，该命令输出服务名并退出。
+`.served.json5`、已弃用的 `.served.json` 和 `.env.served`，也不创建启用链接。创建成功后，
+该命令输出服务名并退出。
 
 ```bash
 served run --name api --no-tty --restart on-failure \
@@ -162,7 +163,7 @@ served run --name api --no-tty --restart on-failure \
 `never`、`on-failure` 或 `always`。
 
 `--no-tty` 和 `--no-sync-rows-cols` 可以关闭对应的 TTY 选项。`--persist-logs` 把 raw 日志
-写入磁盘。`--log-max-bytes` 和 `--log-max-files` 的默认值与 `.served.json` 相同。
+写入磁盘。`--log-max-bytes` 和 `--log-max-files` 的默认值与 `.served.json5` 相同。
 
 每个 `--env KEY=VALUE` 都会覆盖 manager 环境快照中的同名键。一个键重复出现时，最后一个
 值生效。
@@ -247,8 +248,13 @@ manager 会先完整校验新配置，校验失败时保留旧进程不变。启
 
 ## 服务目录
 
-在服务目录中运行 `served edit`。如果 `.served.json` 不存在，命令会先创建带详细注释的
-JSON5 模板，再用外部编辑器打开。已有文件不会被重写或格式化。最小配置如下：
+在服务目录中运行 `served edit`。如果两种受支持的配置文件都不存在，命令会先在
+`.served.json5` 创建带详细注释的 JSON5 模板，再用外部编辑器打开。已有文件不会被重写或
+格式化。最小配置如下：
+
+旧文件名 `.served.json` 仍受支持，内容仍按 JSON5 解析。只有旧文件时，served 会原地使用，
+不会自动改名，并输出弃用 warning。两个文件同时存在时，`.served.json5` 优先，served 会提示
+旧文件已被忽略。即使 `.served.json5` 无效，也不会回退到 `.served.json`。
 
 ```json5
 {
@@ -300,7 +306,7 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 和 `h history`。TTY 服务的 attach 可向服务写入；`tty: false` 服务的 attach 只读；两者
 都进入终端第二屏。窄终端会把操作栏自动换成两行。
 
-主 TUI 不再编辑服务配置。`served edit` 会直接把 `.served.json` 交给外部编辑器：
+主 TUI 不再编辑服务配置。`served edit` 会直接把选中的配置文件交给外部编辑器：
 `-e/--editor COMMAND` 优先使用指定命令，其次使用 `$EDITOR`，最后按 `editor`、
 `sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx` 的顺序查找可执行文件。
 命令可以带参数，配置路径会作为最后一个参数传入。`--path` 会先创建缺失模板，然后只打印

@@ -49,7 +49,7 @@ sudo launchctl print "system/$label" >/dev/null
 [[ -f "$keepalive_target" ]] || fail "macOS installer did not create its launchd keepalive marker"
 
 mkdir -p "$service_dir"
-cat > "$service_dir/.served.json" <<EOF
+cat > "$service_dir/.served.json5" <<EOF
 {
   name: "$service_name",
   command: "sleep 300",

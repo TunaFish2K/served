@@ -41,7 +41,9 @@ async fn run_creates_a_full_temporary_service_without_reading_config_files() {
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&runtime_dir).expect("runtime");
     fs::create_dir_all(&service_dir).expect("service");
-    fs::write(service_dir.join(".served.json"), "{ invalid json\n").expect("invalid config");
+    fs::write(service_dir.join(".served.json5"), "{ invalid json5\n")
+        .expect("invalid current config");
+    fs::write(service_dir.join(".served.json"), "{ invalid json\n").expect("invalid legacy config");
     fs::write(service_dir.join(".env.served"), "FROM_FILE=must-not-load\n")
         .expect("legacy environment");
 
@@ -271,7 +273,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
     fs::create_dir_all(&runtime_dir).expect("runtime");
     fs::create_dir_all(&service_dir).expect("service");
     fs::write(
-        service_dir.join(".served.json"),
+        service_dir.join(".served.json5"),
         r#"{
   "name": "smoke",
   "command": "test \"$SMOKE_PORT\" = \"8080\" && sleep 60",
@@ -310,7 +312,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
     let duplicate_dir = root.path().join("duplicate");
     fs::create_dir_all(&duplicate_dir).expect("duplicate service");
     fs::write(
-        duplicate_dir.join(".served.json"),
+        duplicate_dir.join(".served.json5"),
         r#"{
   "name": "smoke",
   "command": "exit 99",
@@ -334,8 +336,8 @@ async fn enable_restart_and_disable_a_pipe_service() {
         service_dir
     );
 
-    let original_config = fs::read(service_dir.join(".served.json")).expect("read config");
-    fs::write(service_dir.join(".served.json"), "{ invalid json\n").expect("invalid config");
+    let original_config = fs::read(service_dir.join(".served.json5")).expect("read config");
+    fs::write(service_dir.join(".served.json5"), "{ invalid json\n").expect("invalid config");
     let error = client::request(
         &paths,
         Request::Restart {
@@ -346,7 +348,7 @@ async fn enable_restart_and_disable_a_pipe_service() {
     .expect_err("invalid config must reject restart");
     assert!(error.to_string().contains("invalid JSON"));
     wait_for_state(&paths, "smoke", ServiceState::Running).await;
-    fs::write(service_dir.join(".served.json"), original_config).expect("restore config");
+    fs::write(service_dir.join(".served.json5"), original_config).expect("restore config");
 
     fs::write(service_dir.join(".env.served"), "SMOKE_PORT=9090\n").expect("new env.served");
     client::expect_ok(

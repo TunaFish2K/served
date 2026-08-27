@@ -58,7 +58,7 @@ LaunchDaemon named `io.github.tunafish2k.served.<uid>`. Neither installer enable
 After the manager is running:
 
 1. Enter the project directory.
-2. Run `served edit` to create and edit `.served.json`.
+2. Run `served edit` to create and edit `.served.json5`.
 3. Run `served enable` to enable and start the project service.
 
 To run a temporary service without project configuration, use `served run`:
@@ -93,7 +93,7 @@ served daemon --handoff
 served daemon --relinquish
                        Exit the manager while keeping runners alive for another supervisor
 served shutdown        Stop the manager and all managed runners
-served edit            Open .served.json in an external editor
+served edit            Open .served.json5 in an external editor
 served edit -e <cmd>   Use the specified editor command
 served edit --path     Create a missing template and print its path
 served enable          Enable and start the current service
@@ -126,8 +126,9 @@ after you change its configuration. served does not provide separate service-lev
 ### Temporary Services
 
 `served run` creates a managed temporary service in the current directory. The manager must already
-be running. The command does not read or create `.served.json` or `.env.served`. It does not create
-an enabled registry link. After creation, the command prints the service name and exits.
+be running. The command does not read or create `.served.json5`, the deprecated `.served.json`, or
+`.env.served`. It does not create an enabled registry link. After creation, the command prints the
+service name and exits.
 
 ```bash
 served run --name api --no-tty --restart on-failure \
@@ -139,7 +140,7 @@ allocates a TTY and syncs its size with an attach client. The default restart po
 Logs remain in memory by default. `--restart` accepts `never`, `on-failure`, or `always`.
 
 Use `--no-tty` or `--no-sync-rows-cols` to disable the TTY options. Use `--persist-logs` to keep raw
-logs on disk. `--log-max-bytes` and `--log-max-files` use the same defaults as `.served.json`.
+logs on disk. `--log-max-bytes` and `--log-max-files` use the same defaults as `.served.json5`.
 
 Each `--env KEY=VALUE` option overrides the manager environment snapshot. If a key occurs more than
 once, the last value applies.
@@ -161,9 +162,14 @@ manager stop remove this definition. After a host reboot, the manager does not r
 
 ## Service Configuration
 
-Run `served edit` in the service directory. If `.served.json` does not exist, served creates
-a commented JSON5 template and opens it in your editor. served does not rewrite or format an existing
-file.
+Run `served edit` in the service directory. If neither supported configuration file exists, served
+creates a commented JSON5 template at `.served.json5` and opens it in your editor. served does not
+rewrite or format an existing file.
+
+The old `.served.json` filename remains supported and is parsed as JSON5. When it is the only
+configuration, served uses it without renaming it and prints a deprecation warning. If both files
+exist, `.served.json5` takes precedence and served warns that `.served.json` is ignored. An invalid
+`.served.json5` is reported as an error and does not fall back to `.served.json`.
 
 ```json5
 {
@@ -245,8 +251,8 @@ session starts and when the terminal changes. Set `syncRowsCols: false` to keep 
 size. A control connection can fail without stopping raw attach. The client reconnects in the
 background and sends the current size again. Detach does not reset the PTY size.
 
-The main TUI does not edit service configuration. Use `served edit` to open `.served.json`
-in an external editor. `-e/--editor COMMAND` takes priority over `$EDITOR`. If neither is set,
+The main TUI does not edit service configuration. Use `served edit` to open the selected
+configuration file in an external editor. `-e/--editor COMMAND` takes priority over `$EDITOR`. If neither is set,
 served searches `PATH` for `editor`, `sensible-editor`, `nvim`, `vim`, `vi`, `nano`, `micro`, then
 `hx`. The editor command can contain arguments. served adds the configuration path as the last
 argument. `--path` creates a missing template and prints its absolute path. `--path` conflicts with

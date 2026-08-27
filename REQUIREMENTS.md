@@ -28,7 +28,8 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
   `io.github.tunafish2k.served.<uid>`，开机后以目标安装用户身份运行 manager。
 - 统一在线脚本检测 Linux/macOS 与 amd64/arm64，下载最新稳定 full 包和 SHA-256 sidecar，
   校验后安装。重复运行同一命令执行升级。
-- 持久启用的项目服务必须先有自己的目录和 `.served.json`，再运行 `served enable`。
+- 持久启用的项目服务必须先有自己的目录和 `.served.json5`，或兼容的旧版
+  `.served.json`，再运行 `served enable`。
 - 用户可以用 `served run -- <program> [args...]` 创建临时服务。临时服务不要求项目配置文件。
 - `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
 - 项目文件或配置更新后，使用 `served restart` 应用变化。
@@ -37,9 +38,10 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 ## 核心模型
 
 - 一个受管服务对应一个目录。同一目录同时最多有一个受管服务。
-- 受管服务分为 `enabled` 和 `temporary`。已启用服务由 `.served.json` 和启用链接定义。
+- 受管服务分为 `enabled` 和 `temporary`。已启用服务由服务配置文件和启用链接定义。
   临时服务由 `served run` 的命令行参数定义。
-- 已启用服务的目录必须包含 JSON5 服务定义文件 `.served.json`。临时服务忽略该文件。
+- 已启用服务的目录必须包含 JSON5 服务定义文件 `.served.json5`，或兼容的旧版
+  `.served.json`。临时服务忽略这两个文件。
 - 服务定义可以用 `env` 对象设置服务专用的字面量环境变量。
 - 同一目录中的 `.env.served` 只作为旧版 dotenv 回退输入；新模板不会创建它。
 - 项目 `.env` 与 served 无关，served 永远不会读取它。
@@ -56,13 +58,23 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 ~/.config/served/enabled/<name> -> /path/to/service-directory
 ```
 
-链接指向服务目录，而不是直接指向 JSON 文件。这样管理器可以用统一方式加载
-`.served.json`、旧版 `.env.served` 回退文件和工作目录。
+链接指向服务目录，而不是直接指向 JSON5 文件。这样管理器可以用统一方式加载服务配置、
+旧版 `.env.served` 回退文件和工作目录。
 
 ## 配置
 
-`.served.json` 是一个服务对应的 JSON5 对象。它支持注释、不加引号的字段名、单引号、
+`.served.json5` 是一个服务对应的 JSON5 对象。它支持注释、不加引号的字段名、单引号、
 双引号和尾逗号。最小结构如下：
+
+旧文件名 `.served.json` 是弃用的兼容输入，内容仍按 JSON5 解析。配置文件选择规则固定为：
+
+1. `.served.json5` 存在时使用它；`.served.json` 同时存在时忽略旧文件并输出 warning。
+2. 只有 `.served.json` 时使用旧文件并输出弃用 warning，不自动复制、改名或删除。
+3. `.served.json5` 无效时返回该文件的错误，不回退到 `.served.json`。
+4. 两个文件都不存在时返回缺失配置错误。
+
+manager 在恢复、enable 和 restart 时把 warning 写入 tracing 日志。`served edit` 把 warning
+写入 stderr，`served edit --path` 的 stdout 仍只包含配置路径。旧文件名没有预定移除版本。
 
 ```json5
 {
@@ -119,9 +131,9 @@ enable your service to manage it here!
 
 ### `served edit`
 
-用外部编辑器打开当前目录的 `.served.json`。如果文件不存在，served 会先创建带注释的
-JSON5 模板。已有文件会原样打开，served 不会重新格式化或重写它。编辑只会修改文件，
-不会自动应用到运行中的服务。
+用外部编辑器打开当前目录中按上述规则选中的配置。两个文件都不存在时，served 会在
+`.served.json5` 创建带注释的 JSON5 模板。已有文件会原样打开，served 不会重新格式化、
+重写或迁移它。编辑只会修改文件，不会自动应用到运行中的服务。
 
 编辑器按以下优先级解析：`-e/--editor COMMAND`、非空 `$EDITOR`，然后从 `PATH` 依次
 查找 `editor`、`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`。命令可以
@@ -132,7 +144,7 @@ JSON5 模板。已有文件会原样打开，served 不会重新格式化或重�
 
 只在服务目录中有效。
 
-1. 读取并校验 JSON5 `.served.json`，包括可选的 `env` 对象和旧版 `.env.served` 回退。
+1. 按配置文件选择规则读取并校验 JSON5，包括可选的 `env` 对象和旧版 `.env.served` 回退。
 2. 拒绝缺失或无效的配置。
 3. 拒绝重复的全局服务名。
 4. 创建用户级启用链接。
@@ -142,8 +154,9 @@ JSON5 模板。已有文件会原样打开，served 不会重新格式化或重�
 
 ### `served run [options] -- <program> [args...]`
 
-在当前目录创建临时服务。manager 必须已经运行。该命令不得读取或创建 `.served.json` 和
-`.env.served`，也不得创建启用链接。创建成功后，该命令必须只输出服务名并返回。
+在当前目录创建临时服务。manager 必须已经运行。该命令不得读取或创建 `.served.json5`、
+`.served.json` 和 `.env.served`，也不得创建启用链接。创建成功后，该命令必须只输出服务名
+并返回。
 
 - `--name` 可选，默认使用清洗后的当前目录名。
 - 默认启用 TTY 和 PTY 尺寸同步。`--no-tty` 和 `--no-sync-rows-cols` 分别关闭这两个选项。
@@ -169,7 +182,7 @@ JSON5 模板。已有文件会原样打开，served 不会重新格式化或重�
 
 不带名称时操作当前服务目录。提供名称后，可以从任意目录操作对应的受管服务。
 
-重启已启用服务时，manager 必须重新读取当前 `.served.json` 和旧版环境回退文件。manager
+重启已启用服务时，manager 必须按选择规则重新读取当前配置和旧版环境回退文件。manager
 必须先完成校验，再停止并启动服务。没有独立的 `reload` 操作。
 
 重启临时服务时，manager 必须使用创建时保存的命令、选项和环境。需要修改这些值时，用户
@@ -244,7 +257,7 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 
 ## 输出历史
 
-- `.served.json` 有可选的 `persist_logs` 布尔值，默认 `false`。
+- `.served.json5` 有可选的 `persist_logs` 布尔值，默认 `false`。
 - 每次进程启动创建一条独立输出记录，包括自动重启和手动重启。
 - TTY 和管道服务都会产生历史。TTY 输出是 raw PTY 字节；管道 stdout/stderr 按运行器
   收到的事件顺序合并。
@@ -396,7 +409,9 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 
 ## 验收场景
 
-1. `served edit` 在空服务目录中创建带注释的 JSON5 `.served.json`，且不创建 `.env.served`。
+1. `served edit` 在空服务目录中创建带注释的 JSON5 `.served.json5`，且不创建 `.env.served`；
+   只有 `.served.json` 时原地使用并输出弃用 warning，双文件时选择 `.served.json5` 并提示
+   旧文件被忽略。
 2. `served enable` 创建目录符号链接、启动服务，并使服务出现在全局 `served` 和
    `served list` 视图中。
 3. 启用重复 `name` 时失败，且不替换已有链接。
@@ -412,11 +427,12 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 12. 未启用的服务目录不能由全局管理器控制。
 13. 全局 TUI 操作栏根据是否选中服务显示不同内容，并为两种 `tty` 模式显示 attach 和
     history。
-14. `served edit` 按 `-e/--editor COMMAND`、`$EDITOR` 和约定的 `PATH` 候选顺序打开
-    `.served.json`，并把配置路径作为最后一个参数追加。
+14. `served edit` 按 `-e/--editor COMMAND`、`$EDITOR` 和约定的 `PATH` 候选顺序打开选中的
+    配置文件，并把配置路径作为最后一个参数追加。
 15. `served edit --path` 创建缺失的带注释模板，并只打印绝对路径；`--path` 与 `--editor`
     互斥。
-16. `served edit` 打开已有 `.served.json` 时不重写其中的源文本、注释或格式。
+16. `served edit` 打开任一已有配置文件时不重写其中的源文本、注释或格式，也不自动迁移
+    旧文件。
 17. `served attach <name>` 进入运行中的 PTY 服务，不打开 TUI；`Ctrl-C` 退出会话但保持
     服务运行。
 18. `served attach` 根据当前目录解析受管服务。未启用且未通过 `served run` 创建的目录会被

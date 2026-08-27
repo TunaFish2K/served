@@ -482,10 +482,13 @@ mod tests {
         .expect("legacy config");
         fs::write(directory.path().join(CONFIG_FILE), "{ invalid").expect("invalid current config");
 
+        let expected_path = fs::canonicalize(directory.path())
+            .expect("canonical directory")
+            .join(CONFIG_FILE);
         let error = load_service(directory.path(), &BTreeMap::new()).expect_err("reject current");
         assert!(matches!(
             error,
-            ConfigError::Json5 { path, .. } if path == directory.path().join(CONFIG_FILE)
+            ConfigError::Json5 { path, .. } if path == expected_path
         ));
     }
 

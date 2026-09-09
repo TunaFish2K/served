@@ -103,17 +103,35 @@ pub async fn send_resize(
     }
 }
 
-fn service_name_for_directory(services: &[ServiceInfo], directory: &Path) -> Result<String> {
-    services
+pub(crate) fn service_name_for_directory(
+    services: &[ServiceInfo],
+    directory: &Path,
+) -> Result<String> {
+    let names = services
         .iter()
-        .find(|service| Path::new(&service.directory) == directory)
-        .map(|service| service.name.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no managed service for current directory {}",
-                directory.display()
-            )
-        })
+        .filter(|service| Path::new(&service.directory) == directory)
+        .map(|service| service.name.clone());
+    unique_service_name_for_directory(names, directory)
+}
+
+pub(crate) fn unique_service_name_for_directory(
+    names: impl IntoIterator<Item = String>,
+    directory: &Path,
+) -> Result<String> {
+    let mut names: Vec<_> = names.into_iter().collect();
+    names.sort();
+    match names.as_slice() {
+        [] => bail!(
+            "no managed service for current directory {}",
+            directory.display()
+        ),
+        [name] => Ok(name.clone()),
+        _ => bail!(
+            "multiple services for directory {}; specify a service name: {}",
+            directory.display(),
+            names.join(", ")
+        ),
+    }
 }
 
 pub fn target(name: Option<String>, directory: std::path::PathBuf) -> Target {
@@ -136,6 +154,7 @@ mod tests {
 
     fn service(directory: &str, name: &str) -> ServiceInfo {
         ServiceInfo {
+            config_file: None,
             name: name.to_owned(),
             directory: directory.to_owned(),
             kind: ServiceKind::Enabled,

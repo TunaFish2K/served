@@ -31,6 +31,273 @@ impl Drop for DaemonGuard {
 }
 
 #[tokio::test]
+async fn custom_sources_and_shared_workdirs_survive_recovery() {
+    let root = test_root();
+    let home = root.path().join("home");
+    let caller = root.path().join("caller");
+    let configs = root.path().join("configs");
+    let project = root.path().join("project");
+    let next = root.path().join("next");
+    for directory in [&home, &caller, &configs, &project, &next] {
+        fs::create_dir(directory).unwrap();
+    }
+    let paths = ServedPaths {
+        config_home: home.join(".config"),
+        runtime_dir: home.join(".local/state/served/runtime"),
+        state_home: home.join(".local/state"),
+    };
+    let spawn = || {
+        Command::new(env!("CARGO_BIN_EXE_served"))
+            .arg("daemon")
+            .env("HOME", &home)
+            .spawn()
+            .unwrap()
+    };
+    let mut daemon = DaemonGuard(spawn());
+    wait_for_path(&paths.socket_path()).await;
+    let cli = |args: &[&str], directory: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_served"))
+            .args(args)
+            .current_dir(directory)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let write_config = |file: &Path, name: &str, cwd: &str, tty: bool| {
+        fs::write(file, serde_json::to_vec(&serde_json::json!({
+            "name":name, "command":"printf '%s|%s\\n' \"$PWD\" \"$LOCATION\"; exec sleep 60", "cwd":cwd, "tty":tty
+        })).unwrap()).unwrap();
+    };
+    let api = configs.join("api.custom");
+    let worker = configs.join("worker.custom");
+    write_config(&api, "api", "../project", true);
+    write_config(&worker, "worker", "does-not-exist", false);
+    fs::write(configs.join(".served.json5"), "invalid").unwrap();
+    fs::write(configs.join(".env.served"), "LOCATION=config").unwrap();
+    fs::write(project.join(".env.served"), "LOCATION=wrong").unwrap();
+    for args in [
+        vec!["enable", "-f", "../configs/api.custom"],
+        vec![
+            "enable",
+            "--file",
+            "../configs/worker.custom",
+            "--workdir",
+            "../project",
+        ],
+    ] {
+        let output = cli(&args, &caller);
+        assert!(output.status.success(), "{output:?}");
+    }
+    let output = cli(
+        &[
+            "run",
+            "--name",
+            "temporary",
+            "--no-tty",
+            "--workdir",
+            "../project",
+            "--",
+            "sleep",
+            "60",
+        ],
+        &caller,
+    );
+    assert!(output.status.success(), "{output:?}");
+    for name in ["api", "worker"] {
+        wait_for_output_tail(&paths, name, &format!("{}|config", project.display())).await;
+        let registration = paths.registry_dir().join(name);
+        assert!(fs::symlink_metadata(&registration).unwrap().is_file());
+        assert_eq!(
+            fs::metadata(&registration).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(registration).unwrap()).unwrap();
+        assert_eq!(
+            value["source"]["path"],
+            configs.join(format!("{name}.custom")).to_str().unwrap()
+        );
+    }
+    wait_for_state(&paths, "temporary", ServiceState::Running).await;
+    let names = ["api", "temporary", "worker"];
+    let mut pids = Vec::new();
+    for name in names {
+        pids.push(service_pid(&paths, name).await);
+    }
+    for command in ["restart", "disable", "attach", "history"] {
+        let output = cli(&[command], &project);
+        assert!(!output.status.success(), "{command}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("api, temporary, worker"),
+            "{output:?}"
+        );
+    }
+    let history = cli(&["history", "worker", "--stdout"], &caller);
+    assert!(history.status.success(), "{history:?}");
+    assert!(String::from_utf8_lossy(&history.stdout).contains("|config"));
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(service_pid(&paths, name).await, pids[index]);
+    }
+
+    // Invalid reloads do not stop either service, even when they share a directory.
+    fs::write(&api, "invalid").unwrap();
+    assert!(!cli(&["restart", "api"], &caller).status.success());
+    write_config(&api, "api", "missing", true);
+    assert!(!cli(&["restart", "api"], &caller).status.success());
+    assert_eq!(service_pid(&paths, "api").await, pids[0]);
+    write_config(&api, "api", "../project", true);
+    let duplicate = configs.join("duplicate.custom");
+    write_config(&duplicate, "api", "../next", false);
+    let output = cli(&["enable", "-f", duplicate.to_str().unwrap()], &caller);
+    assert!(!output.status.success());
+    assert_eq!(service_pid(&paths, "api").await, pids[0]);
+    let output = cli(&["enable", "-f", "../configs/missing"], &caller);
+    assert!(!output.status.success());
+
+    daemon.0.kill().unwrap();
+    daemon.0.wait().unwrap();
+    daemon = DaemonGuard(spawn());
+    for (index, name) in names.iter().enumerate() {
+        wait_for_state(&paths, name, ServiceState::Running).await;
+        assert_eq!(service_pid(&paths, name).await, pids[index]);
+    }
+    let output = cli(&["daemon", "--handoff"], &caller);
+    assert!(output.status.success(), "{output:?}");
+    for (index, name) in names.iter().enumerate() {
+        wait_for_state(&paths, name, ServiceState::Running).await;
+        assert_eq!(service_pid(&paths, name).await, pids[index]);
+    }
+
+    write_config(&api, "api", "../next", true);
+    assert!(cli(&["restart", "api"], &caller).status.success());
+    wait_for_output_tail(&paths, "api", &format!("{}|config", next.display())).await;
+    assert_ne!(service_pid(&paths, "api").await, pids[0]);
+    assert_eq!(service_pid(&paths, "worker").await, pids[2]);
+    assert!(cli(&["restart", "worker"], &caller).status.success());
+    wait_for_output_tail(&paths, "worker", &format!("{}|config", project.display())).await;
+
+    assert!(cli(&["shutdown"], &caller).status.success());
+    daemon.0.wait().unwrap();
+    wait_for_absent(&paths.socket_path()).await;
+    let _recovered = DaemonGuard(spawn());
+    for (name, directory) in [("api", &next), ("worker", &project)] {
+        wait_for_output_tail(&paths, name, &format!("{}|config", directory.display())).await;
+    }
+    let Response::Services { services } = client::request(&paths, Request::List).await.unwrap()
+    else {
+        panic!("list");
+    };
+    assert_eq!(services.len(), 2);
+    assert_eq!(
+        services
+            .iter()
+            .find(|service| service.name == "worker")
+            .unwrap()
+            .config_file
+            .as_deref(),
+        worker.to_str()
+    );
+    // Disable by name does not require the source to remain valid or present.
+    fs::remove_file(&worker).unwrap();
+    assert!(cli(&["disable", "worker"], &caller).status.success());
+    assert!(!paths.registry_dir().join("worker").exists());
+    assert!(cli(&["shutdown"], &caller).status.success());
+}
+
+#[tokio::test]
+async fn workdir_discovery_and_legacy_sources_remain_distinct() {
+    let root = test_root();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let work = root.path().join("work");
+    for directory in [&home, &project, &work] {
+        fs::create_dir(directory).unwrap();
+    }
+    let paths = ServedPaths {
+        config_home: home.join(".config"),
+        runtime_dir: home.join(".local/state/served/runtime"),
+        state_home: home.join(".local/state"),
+    };
+    let daemon = Command::new(env!("CARGO_BIN_EXE_served"))
+        .arg("daemon")
+        .env("HOME", &home)
+        .spawn()
+        .unwrap();
+    let _guard = DaemonGuard(daemon);
+    wait_for_path(&paths.socket_path()).await;
+    let cli = |args: &[&str], directory: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_served"))
+            .args(args)
+            .current_dir(directory)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let config = project.join(".served.json");
+    fs::write(
+        &config,
+        "{name:'legacy',command:'pwd; exec sleep 60',cwd:'../work',tty:false}",
+    )
+    .unwrap();
+    // Ordinary enable keeps the config directory link, not the process working directory.
+    assert!(cli(&["enable"], &project).status.success());
+    assert_eq!(
+        fs::read_link(paths.registry_dir().join("legacy")).unwrap(),
+        project
+    );
+    wait_for_output_tail(&paths, "legacy", work.to_str().unwrap()).await;
+    fs::write(
+        &config,
+        "{name:'legacy',command:'pwd; exec sleep 60',cwd:'.',tty:false}",
+    )
+    .unwrap();
+    assert!(cli(&["restart", "legacy"], root.path()).status.success());
+    wait_for_output_tail(&paths, "legacy", project.to_str().unwrap()).await;
+    assert!(cli(&["disable", "legacy"], root.path()).status.success());
+
+    // --workdir without --file searches there and persists the override.
+    fs::write(root.path().join(".served.json5"), "invalid").unwrap();
+    fs::write(
+        &config,
+        "{name:'discovered',command:'pwd; exec sleep 60',cwd:'../work',tty:false}",
+    )
+    .unwrap();
+    let output = cli(&["enable", "--workdir", "project"], root.path());
+    assert!(output.status.success(), "{output:?}");
+    wait_for_output_tail(&paths, "discovered", project.to_str().unwrap()).await;
+    assert!(
+        cli(&["restart", "discovered"], root.path())
+            .status
+            .success()
+    );
+    wait_for_output_tail(&paths, "discovered", project.to_str().unwrap()).await;
+    assert!(
+        cli(&["disable", "discovered"], root.path())
+            .status
+            .success()
+    );
+    // run derives its default name from its selected directory and ignores invalid config.
+    fs::write(project.join(".served.json5"), "invalid").unwrap();
+    let output = cli(
+        &[
+            "run",
+            "--workdir",
+            "project",
+            "--no-tty",
+            "--",
+            "sh",
+            "-c",
+            "pwd; exec sleep 60",
+        ],
+        root.path(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"project\n");
+    wait_for_output_tail(&paths, "project", project.to_str().unwrap()).await;
+    assert!(cli(&["shutdown"], root.path()).status.success());
+}
+
+#[tokio::test]
 async fn run_creates_a_full_temporary_service_without_reading_config_files() {
     let root = test_root();
     let home = root.path().join("home");
@@ -153,9 +420,19 @@ async fn run_creates_a_full_temporary_service_without_reading_config_files() {
         .current_dir(&service_dir)
         .env("HOME", &home)
         .output()
-        .expect("run directory collision");
-    assert!(!collision.status.success());
-    assert!(String::from_utf8_lossy(&collision.stderr).contains("already managed"));
+        .expect("run service in shared directory");
+    assert!(
+        collision.status.success(),
+        "shared directory: {collision:?}"
+    );
+    client::expect_ok(
+        &paths,
+        Request::Disable {
+            target: Target::Name("other".to_owned()),
+        },
+    )
+    .await
+    .expect("disable shared service");
 
     let other_dir = root.path().join("other-project");
     fs::create_dir(&other_dir).expect("other service directory");
@@ -301,6 +578,8 @@ async fn enable_restart_and_disable_a_pipe_service() {
     let response = client::request(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -325,6 +604,8 @@ async fn enable_restart_and_disable_a_pipe_service() {
     let duplicate_error = client::request(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: duplicate_dir.display().to_string(),
         },
     )
@@ -438,6 +719,8 @@ async fn persistent_and_memory_history_survive_service_restarts() {
         client::expect_ok(
             &paths,
             Request::Enable {
+                file: None,
+                workdir: None,
                 directory: directory.display().to_string(),
             },
         )
@@ -619,6 +902,8 @@ async fn crash_loop_attach_reports_only_a_persisted_latest_log() {
         client::expect_ok(
             &paths,
             Request::Enable {
+                file: None,
+                workdir: None,
                 directory: directory.display().to_string(),
             },
         )
@@ -710,6 +995,8 @@ async fn pty_service_accepts_one_attach_session() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -790,6 +1077,8 @@ async fn pipe_service_supports_multiple_readonly_attach_sessions() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -909,6 +1198,8 @@ async fn process_group_stops_pipe_descendants() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -973,6 +1264,8 @@ async fn process_group_stops_pty_descendants() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -1037,6 +1330,8 @@ async fn bounded_output_keeps_disable_responsive() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -1157,6 +1452,8 @@ async fn manager_crash_keeps_runner_and_service_alive_for_adoption() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -1239,6 +1536,8 @@ async fn shutdown_stops_runners_after_manager_crash() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -1305,6 +1604,8 @@ async fn manager_handoff_preserves_service_and_shutdown_stops_runners() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -1376,6 +1677,8 @@ async fn manager_relinquish_preserves_runner_for_a_new_supervisor() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )
@@ -1456,6 +1759,8 @@ async fn direct_attach_supports_name_and_current_directory() {
     client::expect_ok(
         &paths,
         Request::Enable {
+            file: None,
+            workdir: None,
             directory: service_dir.display().to_string(),
         },
     )

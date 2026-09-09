@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{LoadedService, RestartPolicy, ServiceConfig, load_service},
+    config::{LoadedService, RestartPolicy, ServiceConfig, ServiceSource, load_source},
     paths::ServedPaths,
     process,
     protocol::{
@@ -62,6 +62,79 @@ enum PrepareAttachError {
         recent_failures: u32,
         latest_log: Option<String>,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnabledDefinition {
+    version: u32,
+    source: ServiceSource,
+    workdir: Option<PathBuf>,
+}
+
+impl EnabledDefinition {
+    fn read(path: &Path) -> Result<Self, String> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            let directory = fs::canonicalize(path).map_err(|error| error.to_string())?;
+            if !directory.is_dir() {
+                return Err("legacy enable link must point to a directory".to_owned());
+            }
+            return Ok(Self {
+                version: 1,
+                source: ServiceSource::Directory(directory),
+                workdir: None,
+            });
+        }
+        let definition: Self =
+            serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid enabled definition: {error}"))?;
+        let source_path = match &definition.source {
+            ServiceSource::Directory(path) | ServiceSource::File(path) => path,
+        };
+        if definition.version != 1
+            || !source_path.is_absolute()
+            || definition
+                .workdir
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
+        {
+            return Err("unsupported or invalid enabled definition".to_owned());
+        }
+        Ok(definition)
+    }
+
+    fn load(
+        &self,
+        environment: &std::collections::BTreeMap<String, String>,
+    ) -> Result<LoadedService, String> {
+        load_source(&self.source, self.workdir.as_deref(), environment)
+            .map_err(|error| error.to_string())
+    }
+
+    fn write(&self, path: &Path) -> Result<(), String> {
+        let temporary = path.with_file_name(format!(
+            ".{}.{}.tmp",
+            path.file_name().unwrap().to_string_lossy(),
+            rand::random::<u64>()
+        ));
+        let result = (|| -> Result<(), String> {
+            let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|error| error.to_string())?;
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            // Publish without replacing another registration, including a dangling link.
+            fs::hard_link(&temporary, path).map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(temporary);
+        result
+    }
 }
 
 struct ManagedService {
@@ -116,14 +189,9 @@ impl ManagerState {
         for entry in entries.flatten() {
             let link = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            let target = match fs::canonicalize(&link) {
-                Ok(target) => target,
-                Err(error) => {
-                    warn!(service = %name, %error, "ignoring broken enable link");
-                    continue;
-                }
-            };
-            match load_service(&target, &self.base_environment) {
+            match EnabledDefinition::read(&link)
+                .and_then(|definition| definition.load(&self.base_environment))
+            {
                 Ok(service) if service.config.name == name => {
                     if self.services.contains_key(&name) {
                         warn!(service = %name, "ignoring duplicate enabled service");
@@ -184,10 +252,6 @@ impl ManagerState {
             if service.config.name != name
                 || service.config.validate().is_err()
                 || fs::canonicalize(&service.directory).ok().as_ref() != Some(&service.directory)
-                || self
-                    .services
-                    .values()
-                    .any(|managed| managed.definition.directory == service.directory)
             {
                 warn!(service = %name, "discarding inconsistent transient definition");
                 self.cleanup_transient_runner(&name).await;
@@ -202,7 +266,7 @@ impl ManagerState {
                 .fetch_runner_status(&self.paths.runner_socket(&name), &name)
                 .await
             {
-                Ok(status) if status.spec.as_ref() == Some(&definition.spec) => {
+                Ok(status) if status.spec.as_deref() == Some(&definition.spec) => {
                     if let Err(error) = self.ensure_service(service, ServiceKind::Temporary).await {
                         warn!(service = %name, %error, "cannot restore transient service");
                     }
@@ -332,7 +396,18 @@ impl ManagerState {
             Request::List => Ok(Response::Services {
                 services: self.list_services(),
             }),
-            Request::Enable { directory } => self.enable(PathBuf::from(directory)).await,
+            Request::Enable {
+                directory,
+                file,
+                workdir,
+            } => {
+                self.enable(
+                    PathBuf::from(directory),
+                    file.map(PathBuf::from),
+                    workdir.map(PathBuf::from),
+                )
+                .await
+            }
             Request::Run { spec } => self.run_temporary(spec).await,
             Request::Disable { target } => self.disable(target).await,
             Request::Restart { target } => self.restart(target).await,
@@ -434,19 +509,43 @@ impl ManagerState {
         }
     }
 
-    async fn enable(&mut self, directory: PathBuf) -> std::result::Result<Response, String> {
-        let service =
-            load_service(&directory, &self.base_environment).map_err(|error| error.to_string())?;
-        if self
-            .services
-            .values()
-            .any(|managed| managed.definition.directory == service.directory)
-        {
-            return Err(format!(
-                "service directory {} is already managed",
-                service.directory.display()
-            ));
-        }
+    async fn enable(
+        &mut self,
+        directory: PathBuf,
+        file: Option<PathBuf>,
+        workdir: Option<PathBuf>,
+    ) -> std::result::Result<Response, String> {
+        let custom = file.is_some() || workdir.is_some();
+        let source = match file {
+            Some(path) => {
+                if !path.is_absolute() {
+                    return Err("configuration path must be absolute".to_owned());
+                }
+                let parent =
+                    fs::canonicalize(path.parent().ok_or("configuration path must name a file")?)
+                        .map_err(|error| error.to_string())?;
+                ServiceSource::File(
+                    parent.join(
+                        path.file_name()
+                            .ok_or("configuration path must name a file")?,
+                    ),
+                )
+            }
+            None => ServiceSource::Directory(
+                fs::canonicalize(&directory).map_err(|error| error.to_string())?,
+            ),
+        };
+        let workdir = workdir
+            .map(|path| {
+                crate::config::canonical_directory(&path).map_err(|error| error.to_string())
+            })
+            .transpose()?;
+        let definition = EnabledDefinition {
+            version: 1,
+            source,
+            workdir,
+        };
+        let service = definition.load(&self.base_environment)?;
         let link = self.paths.registry_dir().join(&service.config.name);
         if fs::symlink_metadata(&link).is_ok() {
             return Err(format!(
@@ -464,8 +563,12 @@ impl ManagerState {
                 service.config.name
             ));
         }
-        symlink(&service.directory, &link)
-            .map_err(|error| format!("create enable link {}: {error}", link.display()))?;
+        if custom {
+            definition.write(&link)?;
+        } else if let ServiceSource::Directory(directory) = &definition.source {
+            symlink(directory, &link)
+                .map_err(|error| format!("create enable link {}: {error}", link.display()))?;
+        }
         if let Err(error) = self.ensure_service(service, ServiceKind::Enabled).await {
             return match fs::remove_file(&link) {
                 Ok(()) => Err(error),
@@ -500,6 +603,7 @@ impl ManagerState {
         }
         let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
         let config = ServiceConfig {
+            cwd: None,
             name: spec.name,
             command: shell_command(&spec.argv),
             tty: spec.tty,
@@ -517,21 +621,12 @@ impl ManagerState {
         {
             return Err(format!("service name {:?} is already managed", config.name));
         }
-        if self
-            .services
-            .values()
-            .any(|managed| managed.definition.directory == directory)
-        {
-            return Err(format!(
-                "service directory {} is already managed",
-                directory.display()
-            ));
-        }
         let mut environment = self.base_environment.clone();
         for (key, value) in &config.env {
             environment.insert(key.clone(), value.clone());
         }
         let service = LoadedService {
+            config_file: None,
             directory,
             config,
             environment,
@@ -571,11 +666,11 @@ impl ManagerState {
     }
 
     async fn restart(&mut self, target: Target) -> std::result::Result<Response, String> {
-        let (name, directory, kind) = self.resolve_target(&target)?;
+        let (name, _, kind) = self.resolve_target(&target)?;
         let service = match kind {
             ServiceKind::Enabled => {
-                let service = load_service(&directory, &self.base_environment)
-                    .map_err(|error| error.to_string())?;
+                let service = EnabledDefinition::read(&self.paths.registry_dir().join(&name))?
+                    .load(&self.base_environment)?;
                 if service.config.name != name {
                     return Err(format!(
                         "restart cannot rename enabled service from {name:?} to {:?}; disable it first",
@@ -650,13 +745,15 @@ impl ManagerState {
             }
             Target::Directory(directory) => {
                 let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
-                self.services
+                let names = self
+                    .services
                     .iter()
-                    .find(|(_, service)| service.definition.directory == directory)
-                    .map(|(name, service)| (name.clone(), directory.clone(), service.kind))
-                    .ok_or_else(|| {
-                        format!("no managed service for directory {}", directory.display())
-                    })
+                    .filter(|(_, service)| service.definition.directory == directory)
+                    .map(|(name, _)| name.clone());
+                let name = crate::client::unique_service_name_for_directory(names, &directory)
+                    .map_err(|error| error.to_string())?;
+                let kind = self.services[&name].kind;
+                Ok((name, directory, kind))
             }
         }
     }
@@ -845,6 +942,11 @@ impl ManagerState {
             .services
             .values()
             .map(|service| ServiceInfo {
+                config_file: service
+                    .definition
+                    .config_file
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
                 name: service.definition.config.name.clone(),
                 directory: service.definition.directory.display().to_string(),
                 kind: service.kind,
@@ -1117,6 +1219,36 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn enabled_definition_does_not_replace_existing_registrations() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("api");
+        let definition = EnabledDefinition {
+            version: 1,
+            source: ServiceSource::File(root.path().join("api.custom")),
+            workdir: Some(root.path().to_owned()),
+        };
+        definition.write(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(definition.write(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let loaded = EnabledDefinition::read(&path).unwrap();
+        assert_eq!(loaded.workdir, definition.workdir);
+        fs::remove_file(&path).unwrap();
+        let missing = root.path().join("missing");
+        symlink(&missing, &path).unwrap();
+        assert!(definition.write(&path).is_err());
+        assert_eq!(fs::read_link(&path).unwrap(), missing);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, original).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["version"] = 999.into();
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(EnabledDefinition::read(&path).is_err());
+    }
+
+    #[test]
     fn shell_command_preserves_argv_without_shell_expansion() {
         let command = shell_command(&[
             "printf".to_owned(),
@@ -1143,8 +1275,10 @@ mod tests {
         let root = tempdir().expect("tempdir");
         let paths = ServedPaths::from_home(root.path());
         let service = LoadedService {
+            config_file: None,
             directory: root.path().to_path_buf(),
             config: ServiceConfig {
+                cwd: None,
                 name: "temporary".to_owned(),
                 command: "'true'".to_owned(),
                 tty: true,

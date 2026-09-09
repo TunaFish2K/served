@@ -2,7 +2,7 @@
 
 状态：当前开发版验收基线。
 
-本文把 `REQUIREMENTS.md` 的 44 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元
+本文把 `REQUIREMENTS.md` 的 49 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元
 测试或集成测试。`release CI` 必须在目标操作系统或打包环境中执行。单台开发机的结果不能
 替代该 gate。
 
@@ -52,10 +52,16 @@
 | 42 | macOS release smoke | 活动 LaunchDaemon handoff、PID 保留、未加载状态和失败回滚 |
 | 43 | macOS release smoke | 当前实例卸载、用户数据与其他实例共享文件保留 |
 | 44 | `make installer-check` | 平台资产选择、checksum 失败和 `install.sh --yes` mock 测试 |
+| 45 | `cargo test` | `config_filename_cli::explicit_file_creates_parents_and_preserves_existing_source`、`explicit_legacy_file_bypasses_discovery_and_deprecation` |
+| 46 | `cargo test` | `config::explicit_source_resolves_cwd_and_environment_independently`、`manager_smoke::custom_sources_and_shared_workdirs_survive_recovery` |
+| 47 | `cargo test` | `manager_smoke::custom_sources_and_shared_workdirs_survive_recovery`、`workdir_discovery_and_legacy_sources_remain_distinct` |
+| 48 | `cargo test` | `manager_smoke::custom_sources_and_shared_workdirs_survive_recovery` |
+| 49 | `cargo test` | `manager_smoke::workdir_discovery_and_legacy_sources_remain_distinct`、runner v1 wire tests |
 
 ## 重写兼容 gate
 
-- `protocol::manager_request_keeps_the_v7_wire_shape` 固定公共 manager v7 JSON。
+- `protocol::run_request_keeps_the_v7_wire_shape` 固定未改变的 Run JSON。
+- `protocol::enable_v8_preserves_independent_file_and_workdir` 固定 manager v8 Enable 字段。
 - `runner_protocol::runner_status_keeps_the_v1_wire_shape` 固定既有 runner v1 status JSON。
 - `runner_protocol::watch_status_is_an_additive_v1_request` 固定新增订阅仍属于 additive v1。
 - `manager::watcher::falls_back_to_status_polling_for_an_older_v1_runner` 验证旧 runner 回退。

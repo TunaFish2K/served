@@ -1,9 +1,15 @@
-use std::{collections::BTreeMap, io::ErrorKind, path::Path, process};
+use std::{
+    collections::BTreeMap,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    process,
+};
 
 use crate::{
     client,
     config::{
         DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES, default_service_name, prepare_config_file,
+        prepare_explicit_config,
     },
     editor,
     logs::DEFAULT_CHUNK_LIMIT,
@@ -50,18 +56,31 @@ enum Command {
         #[arg(long)]
         socket: std::path::PathBuf,
     },
-    /// Open .served.json5 in an external editor.
+    /// Open a service configuration in an external editor.
     Edit {
+        /// Configuration path; defaults to .served.json5 or legacy .served.json.
+        #[arg(short = 'f', long, value_name = "PATH")]
+        file: Option<PathBuf>,
         #[arg(short = 'e', long, value_name = "COMMAND", conflicts_with = "path")]
         editor: Option<String>,
         #[arg(long, conflicts_with = "editor")]
         path: bool,
     },
-    /// Enable the current service directory and start it.
-    Enable,
+    /// Enable a service configuration and start it.
+    Enable {
+        /// Explicit configuration path, parsed as JSON5 regardless of filename.
+        #[arg(short = 'f', long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Working directory override, saved for subsequent restarts.
+        #[arg(long, value_name = "DIR")]
+        workdir: Option<PathBuf>,
+    },
     /// Create a temporary service from command-line options and start it.
     Run {
-        /// Service name. Defaults to the current directory name.
+        /// Process working directory. Defaults to the invocation directory.
+        #[arg(long, value_name = "DIR")]
+        workdir: Option<PathBuf>,
+        /// Service name. Defaults to the working directory name.
         #[arg(long)]
         name: Option<String>,
         /// Use pipes instead of allocating a PTY.
@@ -129,9 +148,9 @@ pub async fn run() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Edit { editor, path }) => {
+        Some(Command::Edit { file, editor, path }) => {
             let directory = std::env::current_dir().context("read current directory")?;
-            edit_config(&directory, editor, path).await
+            edit_config(&directory, file.as_deref(), editor, path).await
         }
         command => {
             let paths = ServedPaths::from_environment().context("served requires HOME")?;
@@ -156,17 +175,22 @@ pub async fn run() -> Result<()> {
                 }
                 Some(Command::Shutdown) => manager::request_shutdown(paths).await,
                 Some(Command::Runner { name, socket }) => runner::run(name, socket).await,
-                Some(Command::Enable) => {
-                    let directory = std::env::current_dir().context("read current directory")?;
+                Some(Command::Enable { file, workdir }) => {
+                    let current = std::env::current_dir().context("read current directory")?;
+                    let workdir = workdir.map(|path| current.join(path));
+                    let directory = workdir.as_deref().unwrap_or(&current);
                     client::expect_ok(
                         &paths,
                         Request::Enable {
                             directory: directory.display().to_string(),
+                            file: file.map(|path| current.join(path).display().to_string()),
+                            workdir: workdir.as_ref().map(|path| path.display().to_string()),
                         },
                     )
                     .await
                 }
                 Some(Command::Run {
+                    workdir,
                     name,
                     no_tty,
                     no_sync_rows_cols,
@@ -178,6 +202,11 @@ pub async fn run() -> Result<()> {
                     argv,
                 }) => {
                     let directory = std::env::current_dir().context("read current directory")?;
+                    let directory = crate::config::canonical_directory(
+                        &workdir
+                            .map(|path| directory.join(path))
+                            .unwrap_or(directory),
+                    )?;
                     let name = name.unwrap_or_else(|| default_service_name(&directory));
                     let spec = RunSpec {
                         directory: directory.display().to_string(),
@@ -460,8 +489,17 @@ where
     }
 }
 
-async fn edit_config(directory: &Path, editor: Option<String>, path_only: bool) -> Result<()> {
-    let config_file = prepare_config_file(directory).context("prepare service configuration")?;
+async fn edit_config(
+    directory: &Path,
+    file: Option<&Path>,
+    editor: Option<String>,
+    path_only: bool,
+) -> Result<()> {
+    let config_file = match file {
+        Some(file) => prepare_explicit_config(&directory.join(file)),
+        None => prepare_config_file(directory),
+    }
+    .context("prepare service configuration")?;
     if let Some(warning) = config_file.deprecation_warning() {
         eprintln!("warning: {warning}");
     }
@@ -562,6 +600,7 @@ mod tests {
                 log_max_files: 4,
                 env,
                 argv,
+                workdir: None,
             }) if name == "worker"
                 && restart == "on-failure"
                 && env == ["PORT=8080", "EMPTY="]
@@ -624,6 +663,7 @@ mod tests {
             Some(Command::Edit {
                 editor: Some(editor),
                 path: false,
+                file: None,
             }) if editor == "nvim -f"
         ));
 
@@ -633,6 +673,7 @@ mod tests {
             Some(Command::Edit {
                 editor: None,
                 path: true,
+                file: None,
             })
         ));
         assert!(Cli::try_parse_from(["served", "edit", "--path", "-e", "nvim"]).is_err());
@@ -642,7 +683,7 @@ mod tests {
     async fn edit_path_creates_template_without_editor() {
         let directory = tempdir().expect("tempdir");
 
-        edit_config(directory.path(), None, true)
+        edit_config(directory.path(), None, None, true)
             .await
             .expect("create config path");
 

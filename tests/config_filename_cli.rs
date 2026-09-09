@@ -98,3 +98,54 @@ fn edit_path_prefers_current_config_and_warns_that_legacy_is_ignored() {
     assert!(stderr.contains("warning:"));
     assert!(stderr.contains("ignoring deprecated"));
 }
+
+#[test]
+fn explicit_file_creates_parents_and_preserves_existing_source() {
+    let root = tempdir().unwrap();
+    let relative = "configs/custom.service";
+    let output = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["edit", "-f", relative, "--path"])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let path = root.path().join(relative);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        fs::canonicalize(&path).unwrap().to_str().unwrap()
+    );
+    assert!(output.stderr.is_empty());
+    assert!(fs::read_to_string(&path).unwrap().contains("cwd: null"));
+    fs::write(&path, "// keep even invalid source\n{").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["edit", "--file", relative, "--path"])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "// keep even invalid source\n{"
+    );
+}
+
+#[test]
+fn explicit_legacy_file_bypasses_discovery_and_deprecation() {
+    let root = tempdir().unwrap();
+    fs::write(root.path().join(CURRENT_CONFIG), "invalid").unwrap();
+    fs::write(root.path().join(LEGACY_CONFIG), "{}").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["edit", "-f", LEGACY_CONFIG, "--path"])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        fs::canonicalize(root.path().join(LEGACY_CONFIG))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+}

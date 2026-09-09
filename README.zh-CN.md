@@ -149,7 +149,7 @@ served history [name] --json
 served list            列出 manager 管理的服务
 ```
 
-`served run` 在当前目录创建临时服务。manager 必须已经运行。该命令不读取或创建
+`served run` 在当前目录或 `--workdir DIR` 指定的目录创建临时服务。manager 必须已经运行。该命令不读取或创建
 `.served.json5`、已弃用的 `.served.json` 和 `.env.served`，也不创建启用链接。创建成功后，
 该命令输出服务名并退出。
 
@@ -158,7 +158,7 @@ served run --name api --no-tty --restart on-failure \
   --env PORT=8080 -- python app.py --verbose
 ```
 
-服务名默认使用清洗后的当前目录名。served 默认分配 TTY。served 默认根据 attach 客户端
+服务名默认使用清洗后的最终工作目录名。served 默认分配 TTY。served 默认根据 attach 客户端
 同步 PTY 尺寸。默认重启策略是 `never`。日志默认只保存在内存中。`--restart` 接受
 `never`、`on-failure` 或 `always`。
 
@@ -168,7 +168,7 @@ served run --name api --no-tty --restart on-failure \
 每个 `--env KEY=VALUE` 都会覆盖 manager 环境快照中的同名键。一个键重复出现时，最后一个
 值生效。
 
-服务名在所有受管服务中必须唯一。一个目录只能有一个受管服务。发生名称或目录冲突时，
+服务名在所有受管服务中必须唯一。多个服务可以共用工作目录。发生名称冲突时，
 `served run` 会返回错误。该命令不会修改已有服务。
 
 `--` 后的参数保持原始边界。served 不解释这些参数中的 shell 语法。命令需要管道、重定向
@@ -246,7 +246,34 @@ manager 会先完整校验新配置，校验失败时保留旧进程不变。启
 ~/.config/served/enabled/<name> -> /path/to/service-directory
 ```
 
-## 服务目录
+## 配置位置与工作目录
+
+`edit` 和 `enable` 支持 `-f/--file PATH`，可使用任意文件名，内容统一按 JSON5 解析。
+显式指定文件时不搜索默认文件，不发出旧文件名警告，也不在出错时回退。`edit -f` 会创建
+缺失的模板及父目录，已有文件即使内容无效也保持原样。`enable` 要求文件已存在且有效。
+
+```bash
+served edit -f /configs/api.json5
+served enable -f /configs/api.json5 --workdir /srv/api
+served run --name worker --workdir /srv/api -- ./worker
+served restart api
+```
+
+工作目录优先级为：启用时保存的 `--workdir` 覆盖值、配置中的可选 `cwd`、配置文件所在目录。
+CLI 相对路径以调用目录为基准，配置中的相对 `cwd` 以配置文件所在目录为基准。
+`enable --workdir DIR` 未传 `-f` 时在 `DIR` 搜索默认配置；两个选项都省略时在调用目录搜索。
+旧版 `.env.served` 始终从配置文件旁读取，临时服务仍不读取它。
+
+工作目录必须已存在。restart 按原配置来源重新加载并验证，验证失败时保留旧进程。
+命令行目录覆盖值在 restart 和 manager 恢复后保留；更换或清除它需要 disable 后重新 enable，
+不会改写用户配置。后续管理使用名称；restart、disable、attach、history 不接受 `-f`。
+省略名称时按当前进程工作目录匹配服务，匹配多个时列出候选名称并拒绝操作。
+
+普通目录启用继续使用上面的目录软链接；显式使用 `-f` 或 `--workdir` 时，同一注册表路径
+保存权限为 `0600` 的版本化 JSON 记录，包含配置来源和目录覆盖值。旧链接无需迁移。
+客户端与 manager 需同步支持协议 v8；runner v1 协议保持兼容，可接管已有 runner。
+
+## 默认服务配置
 
 在服务目录中运行 `served edit`。如果两种受支持的配置文件都不存在，命令会先在
 `.served.json5` 创建带详细注释的 JSON5 模板，再用外部编辑器打开。已有文件不会被重写或
@@ -260,6 +287,7 @@ manager 会先完整校验新配置，校验失败时保留旧进程不变。启
 {
   name: "api",
   command: "python app.py",
+  cwd: null, // 可写绝对路径，或相对于本配置文件的路径。
   tty: true,
   syncRowsCols: true,
   restart: "never",

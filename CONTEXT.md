@@ -38,16 +38,30 @@
   `XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_RUNTIME_DIR` 不会改变 served 的路径。
 - **安装用户 home**：已安装 system service 使用的规范 home。该用户直接运行
   `served daemon` 时也使用相同的 `$HOME` 路径。主动覆盖 `HOME` 不在支持范围内。
-- **服务配置文件**：首选 `.served.json5`；`.served.json` 是弃用的兼容文件名。两个文件
+- **服务配置文件**：可显式指定任意文件名；自动查找首选 `.served.json5`；`.served.json` 是弃用的兼容文件名。两个文件
   同时存在时只使用 `.served.json5`，且不会因它无效而回退。
 - **旧版 served 环境文件**：服务配置旁边可选的 `.env.served`。它是 dotenv 兼容
   回退输入；项目 `.env` 不属于 served 配置。
-- **已启用服务**：`kind=enabled` 的服务。服务配置文件和启用链接定义该服务。manager
+- **已启用服务**：`kind=enabled` 的服务。服务配置文件和启用记录定义该服务。manager
   启动时恢复该服务。
 - **临时服务**：`kind=temporary` 的服务。`served run` 的 argv 和选项定义该服务。该服务
   不写项目配置或启用链接。manager 只用私有 runtime 描述接管活动 runner。
 
 ## 已确认的决策
+
+- 配置来源与工作目录独立。`enable`、`edit` 支持 `-f/--file`；`enable`、`run` 支持
+  `--workdir`。显式文件统一按 JSON5 解析，不执行默认文件发现、警告或回退。
+- 持久服务工作目录优先级为保存的 CLI 覆盖、配置 `cwd`、配置文件所在目录。CLI 相对
+  路径基于调用目录，配置相对 `cwd` 基于配置文件所在目录。`.env.served` 始终在配置旁。
+- `enable` 未传 `-f` 时，在 `--workdir` 指定目录或调用目录查找默认配置。
+  `run` 默认使用调用目录，默认名称取最终工作目录名，继续忽略配置文件。
+- 普通目录启用保留目录软链接；显式指定文件或工作目录时，用同位置的私有版本化 JSON
+  记录保存配置来源和覆盖值。旧链接不迁移。restart 按原来源重新加载，CLI 覆盖持续
+  生效；更换或清除覆盖需 disable 后重新 enable。
+- 服务名全局唯一，多个 enabled 或 temporary 服务可共用工作目录。管理命令只支持名称
+  或当前目录，不增加 `-f`。目录匹配多个服务时列出排序后的名称并拒绝操作。
+- `ServiceInfo.directory` 表示最终工作目录，`config_file` 表示已加载的配置路径，临时
+  服务为空。runner 只接收解析后的目录，不接收来源元数据或原始 `cwd`。
 
 - macOS 和 Linux/glibc 都支持 amd64、arm64。每种宿主架构都能构建同一系统的另一架构。
   外部守护程序以前台 `served daemon` 托管 manager；systemd 和 LaunchDaemon 是可选集成。
@@ -76,7 +90,7 @@
   编辑器后不重试 attach。
 - 主 TUI 不再显示最近输出面板。无论 TTY 模式如何，都显示 `a attach`。
 - `.served.json5` 和兼容的 `.served.json` 都按 JSON5 解析。新文件优先；只有旧文件时原地
-  使用，两个文件同时存在时忽略旧文件。两种兼容情况都输出 warning，不自动迁移，也没有
+  使用，两个文件同时存在时忽略旧文件。自动发现的两种兼容情况都输出 warning，不自动迁移，也没有
   预定移除版本。新的 `served edit` 模板为每个字段添加详细行内注释；已有文件打开时不重写。
   编辑器依次使用 `-e/--editor COMMAND`、`$EDITOR`，或从 `PATH` 查找 `editor`、
   `sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`；`--path` 创建缺失模板后只
@@ -123,7 +137,8 @@
 `Request::Attach { name }` 仍然使用服务名称。manager 根据受管服务定义选择 PTY 或管道
 relay。协议版本 3 增加精确的清理后历史行数。版本 5 增加结构化崩溃循环 attach 诊断，
 以及 manager handoff 和 shutdown 请求。版本 6 为 handoff 增加目标可执行文件的绝对路径，
-并增加 relinquish 请求。版本 7 增加 `Run` 和服务类型。
+并增加 relinquish 请求。版本 7 增加 `Run` 和服务类型。版本 8 增加 Enable 的文件与
+目录覆盖字段及 ServiceInfo 的配置路径；客户端与 manager 必须同步升级。
 
 成功 attach 仍返回 opaque token。尺寸控制使用单独 framed connection 上的
 `Request::Resize` 消息。Runner IPC 使用独立的 additive v1 协议。manager 升级后仍可接管

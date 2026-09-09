@@ -389,7 +389,7 @@ impl RunnerState {
                 .as_ref()
                 .and_then(LogStore::latest_log_path)
                 .map(|path| path.display().to_string()),
-            spec: self.spec.clone(),
+            spec: self.spec.clone().map(Box::new),
         }
     }
 

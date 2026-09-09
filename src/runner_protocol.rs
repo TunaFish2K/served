@@ -74,6 +74,7 @@ impl From<&ServiceConfig> for WireServiceConfig {
 impl From<WireServiceConfig> for ServiceConfig {
     fn from(config: WireServiceConfig) -> Self {
         Self {
+            cwd: None,
             name: config.name,
             command: config.command,
             tty: config.tty,
@@ -122,15 +123,18 @@ impl<'de> Deserialize<'de> for LaunchSpec {
 
 impl LaunchSpec {
     pub fn from_loaded(service: &LoadedService) -> Self {
+        let mut config = service.config.clone();
+        config.cwd = None;
         Self {
             directory: service.directory.display().to_string(),
-            config: service.config.clone(),
+            config,
             environment: service.environment.clone(),
         }
     }
 
     pub fn into_loaded(self) -> Result<LoadedService> {
         Ok(LoadedService {
+            config_file: None,
             directory: PathBuf::from(&self.directory),
             config: self.config,
             environment: self.environment,
@@ -170,7 +174,7 @@ pub struct RunnerStatus {
     pub recent_failures: u32,
     pub window_seconds: u64,
     pub latest_log: Option<String>,
-    pub spec: Option<LaunchSpec>,
+    pub spec: Option<Box<LaunchSpec>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +312,7 @@ mod tests {
         LaunchSpec {
             directory: "/tmp/service".to_owned(),
             config: ServiceConfig {
+                cwd: None,
                 name: "service".to_owned(),
                 command: "echo ok".to_owned(),
                 tty: false,

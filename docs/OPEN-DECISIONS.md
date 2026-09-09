@@ -12,3 +12,5 @@ worker supervisor。ADR 0012 定义 macOS LaunchDaemon、共享升级和统一�
 
 ADR 0011 定义无项目配置的临时服务、私有 runtime 描述和 manager v7 协议边界。该功能
 当前没有待定决策。
+
+ADR 0014 定义独立配置来源、工作目录和同目录多服务。该功能当前没有待定决策。

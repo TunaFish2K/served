@@ -34,6 +34,12 @@ pub enum ConfigError {
     InvalidLogMaxFiles,
     #[error("I/O error while reading service configuration: {0}")]
     Io(#[from] std::io::Error),
+    #[error("cannot read configuration {path}: {source}")]
+    ReadSource {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("invalid JSON5 in {path}: {source}")]
     Json5 {
         path: PathBuf,
@@ -87,6 +93,9 @@ impl RestartPolicy {
 pub struct ServiceConfig {
     pub name: String,
     pub command: String,
+    /// Source-only setting; resolved into LoadedService.directory before launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default = "default_tty")]
     pub tty: bool,
     #[serde(rename = "syncRowsCols", default = "default_sync_rows_cols")]
@@ -150,6 +159,7 @@ impl ServiceConfig {
         Self {
             name: default_service_name(directory),
             command: "./run.sh".to_owned(),
+            cwd: None,
             tty: true,
             sync_rows_cols: true,
             restart: RestartPolicy::Never,
@@ -181,6 +191,7 @@ pub fn default_service_name(directory: &Path) -> String {
 #[derive(Debug, Clone)]
 pub struct LoadedService {
     pub directory: PathBuf,
+    pub config_file: Option<PathBuf>,
     pub config: ServiceConfig,
     pub environment: BTreeMap<String, String>,
 }
@@ -252,34 +263,80 @@ pub(crate) fn resolve_config_file(directory: &Path) -> Option<ResolvedConfigFile
     }
 }
 
-pub(crate) fn has_config_file(directory: &Path) -> bool {
-    resolve_config_file(directory).is_some()
+/// The durable configuration location, independent of the process working directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "path", rename_all = "snake_case")]
+pub enum ServiceSource {
+    Directory(PathBuf),
+    File(PathBuf),
 }
 
 pub fn load_service(
     directory: impl AsRef<Path>,
     manager_environment: &BTreeMap<String, String>,
 ) -> Result<LoadedService, ConfigError> {
-    let directory = directory.as_ref();
+    load_source(
+        &ServiceSource::Directory(directory.as_ref().to_owned()),
+        None,
+        manager_environment,
+    )
+}
+
+pub fn canonical_directory(directory: &Path) -> Result<PathBuf, ConfigError> {
     if !directory.exists() {
-        return Err(ConfigError::MissingDirectory(directory.to_path_buf()));
+        return Err(ConfigError::MissingDirectory(directory.to_owned()));
     }
     if !directory.is_dir() {
-        return Err(ConfigError::NotDirectory(directory.to_path_buf()));
+        return Err(ConfigError::NotDirectory(directory.to_owned()));
     }
-    let directory = fs::canonicalize(directory)?;
-    let config_file = resolve_config_file(&directory)
-        .ok_or_else(|| ConfigError::MissingConfig(directory.clone()))?;
-    config_file.log_deprecation_warning();
-    let source = fs::read_to_string(config_file.path())?;
-    let config: ServiceConfig = json5::from_str(&source).map_err(|source| ConfigError::Json5 {
-        path: config_file.path.clone(),
+    Ok(fs::canonicalize(directory)?)
+}
+
+pub fn load_source(
+    source: &ServiceSource,
+    workdir: Option<&Path>,
+    manager_environment: &BTreeMap<String, String>,
+) -> Result<LoadedService, ConfigError> {
+    let config_file = match source {
+        ServiceSource::Directory(directory) => {
+            let directory = canonical_directory(directory)?;
+            let file = resolve_config_file(&directory)
+                .ok_or_else(|| ConfigError::MissingConfig(directory.clone()))?;
+            file.log_deprecation_warning();
+            file.path
+        }
+        ServiceSource::File(path) => {
+            let parent = canonical_directory(path.parent().unwrap_or(Path::new(".")))?;
+            parent.join(path.file_name().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "configuration path must name a file",
+                )
+            })?)
+        }
+    };
+    let source = fs::read_to_string(&config_file).map_err(|source| ConfigError::ReadSource {
+        path: config_file.clone(),
         source,
     })?;
+    let mut config: ServiceConfig =
+        json5::from_str(&source).map_err(|source| ConfigError::Json5 {
+            path: config_file.clone(),
+            source,
+        })?;
     config.validate()?;
-
+    let config_directory = config_file.parent().expect("absolute configuration path");
+    let configured_cwd = config.cwd.take();
+    let directory = match workdir {
+        Some(directory) => canonical_directory(directory)?,
+        None => canonical_directory(
+            &configured_cwd
+                .map(|cwd| config_directory.join(cwd))
+                .unwrap_or_else(|| config_directory.to_owned()),
+        )?,
+    };
     let mut environment = manager_environment.clone();
-    let env_path = directory.join(ENV_FILE);
+    let env_path = config_directory.join(ENV_FILE);
     if env_path.exists() {
         for item in dotenvy::from_path_iter(env_path)? {
             let (key, value) = item?;
@@ -290,9 +347,9 @@ pub fn load_service(
     for (key, value) in &config.env {
         environment.insert(key.clone(), value.clone());
     }
-
     Ok(LoadedService {
         directory,
+        config_file: Some(config_file),
         config,
         environment,
     })
@@ -319,6 +376,32 @@ pub(crate) fn prepare_config_file(directory: &Path) -> Result<ResolvedConfigFile
     })
 }
 
+pub(crate) fn prepare_explicit_config(path: &Path) -> Result<ResolvedConfigFile, ConfigError> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let parent = fs::canonicalize(parent)?;
+    let path = parent.join(path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "configuration path must name a file",
+        )
+    })?);
+    use std::io::Write;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => file.write_all(template_source(&parent).as_bytes())?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_file() => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(ResolvedConfigFile {
+        path,
+        status: ConfigFileStatus::Current,
+    })
+}
+
 fn validate_env_key(key: &str) -> Result<(), ConfigError> {
     if key.is_empty() || key.contains('=') || key.contains('\0') {
         return Err(ConfigError::InvalidEnvKey(key.to_owned()));
@@ -338,7 +421,11 @@ fn template_source(directory: &Path) -> String {
   // Renaming an enabled service requires disabling and enabling it again.
   name: "{name}",
 
-  // Shell script executed with `/bin/sh -c` from this service directory.
+  // Working directory, relative to this file or absolute. null uses this file's
+  // directory. An enable --workdir override takes priority until re-enabled.
+  cwd: null,
+
+  // Shell script executed with `/bin/sh -c` from the resolved working directory.
   // Multiple commands may be separated by real newlines or shell operators.
   command: "{command}",
 
@@ -394,6 +481,77 @@ fn template_source(directory: &Path) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn explicit_source_resolves_cwd_and_environment_independently() {
+        let root = tempfile::tempdir().unwrap();
+        let configs = root.path().join("configs");
+        let configured = root.path().join("configured");
+        let override_dir = root.path().join("override");
+        for directory in [&configs, &configured, &override_dir] {
+            fs::create_dir(directory).unwrap();
+        }
+        let path = configs.join("api.custom");
+        fs::write(
+            &path,
+            "{name:'api', command:'pwd', cwd:'../configured', env:{VALUE:'config'}}",
+        )
+        .unwrap();
+        fs::write(configs.join(CONFIG_FILE), "invalid").unwrap();
+        fs::write(configs.join(ENV_FILE), "VALUE=dotenv\nFROM_CONFIG=yes").unwrap();
+        fs::write(override_dir.join(ENV_FILE), "FROM_CONFIG=no").unwrap();
+        let source = ServiceSource::File(path.clone());
+        let loaded = load_source(&source, None, &BTreeMap::new()).unwrap();
+        assert_eq!(loaded.directory, fs::canonicalize(&configured).unwrap());
+        assert_eq!(
+            loaded.config_file.as_ref(),
+            Some(&fs::canonicalize(&path).unwrap())
+        );
+        assert_eq!(loaded.config.cwd, None);
+        assert_eq!(loaded.environment["VALUE"], "config");
+        assert_eq!(loaded.environment["FROM_CONFIG"], "yes");
+        let loaded = load_source(&source, Some(&override_dir), &BTreeMap::new()).unwrap();
+        assert_eq!(loaded.directory, fs::canonicalize(&override_dir).unwrap());
+        assert_eq!(loaded.environment["FROM_CONFIG"], "yes");
+        fs::write(&path, "{name:'api', command:'pwd'}").unwrap();
+        assert_eq!(
+            load_source(&source, None, &BTreeMap::new())
+                .unwrap()
+                .directory,
+            fs::canonicalize(&configs).unwrap()
+        );
+        fs::write(&path, "{name:'api', command:'pwd', cwd:'missing'}").unwrap();
+        assert!(matches!(
+            load_source(&source, None, &BTreeMap::new()),
+            Err(ConfigError::MissingDirectory(_))
+        ));
+        assert!(load_source(&source, Some(&override_dir), &BTreeMap::new()).is_ok());
+        fs::write(&path, "invalid").unwrap();
+        assert!(matches!(
+            load_source(&source, None, &BTreeMap::new()),
+            Err(ConfigError::Json5 { .. })
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(load_source(&source, None, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn directory_source_keeps_configuration_location_when_cwd_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let workdir = root.path().join("work");
+        fs::create_dir(&workdir).unwrap();
+        fs::write(
+            root.path().join(CONFIG_FILE),
+            "{name:'api', command:'pwd', cwd:'work'}",
+        )
+        .unwrap();
+        let service = load_service(root.path(), &BTreeMap::new()).unwrap();
+        assert_eq!(service.directory, fs::canonicalize(workdir).unwrap());
+        assert_eq!(
+            service.config_file.unwrap(),
+            fs::canonicalize(root.path().join(CONFIG_FILE)).unwrap()
+        );
+    }
 
     #[test]
     fn loads_json5_and_legacy_dotenv_overlay() {
@@ -537,7 +695,7 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         fs::write(
             directory.path().join(CONFIG_FILE),
-            r#"{"name":"api","command":"echo ok","cwd":"/tmp"}"#,
+            r#"{"name":"api","command":"echo ok","unknown_field":"/tmp"}"#,
         )
         .expect("config");
         let error = load_service(directory.path(), &BTreeMap::new()).expect_err("must reject");

@@ -8,7 +8,7 @@ pub use crate::ipc::{
     Frame, HandoffStream, MAX_FRAME_LENGTH, framed, into_handoff, receive_json, send_json,
 };
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +46,8 @@ pub enum Request {
     List,
     Enable {
         directory: String,
+        file: Option<String>,
+        workdir: Option<String>,
     },
     Run {
         spec: RunSpec,
@@ -98,6 +100,7 @@ pub enum ServiceState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInfo {
+    pub config_file: Option<String>,
     pub name: String,
     pub directory: String,
     pub kind: ServiceKind,
@@ -194,6 +197,27 @@ pub fn io_error(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn enable_v8_preserves_independent_file_and_workdir() {
+        let request = Request::Enable {
+            directory: "/caller".to_owned(),
+            file: Some("/configs/api.custom".to_owned()),
+            workdir: Some("/srv/api".to_owned()),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"Enable": {
+                "directory":"/caller", "file":"/configs/api.custom", "workdir":"/srv/api"
+            }})
+        );
+        let parsed: Request = serde_json::from_value(value).unwrap();
+        assert!(
+            matches!(parsed, Request::Enable { file: Some(file), workdir: Some(workdir), .. }
+            if file == "/configs/api.custom" && workdir == "/srv/api")
+        );
+    }
 
     #[test]
     fn request_round_trips_as_json() {
@@ -300,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_request_keeps_the_v7_wire_shape() {
+    fn run_request_keeps_the_v7_wire_shape() {
         assert_eq!(
             serde_json::to_value(Request::HistoryChunk {
                 target: Target::Directory("/srv/api".to_owned()),
@@ -361,6 +385,7 @@ mod tests {
     #[test]
     fn service_kind_keeps_the_v7_wire_shape() {
         let service = ServiceInfo {
+            config_file: None,
             name: "scratch".to_owned(),
             directory: "/srv/scratch".to_owned(),
             state: ServiceState::Running,

@@ -28,8 +28,8 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
   `io.github.tunafish2k.served.<uid>`，开机后以目标安装用户身份运行 manager。
 - 统一在线脚本检测 Linux/macOS 与 amd64/arm64，下载最新稳定 full 包和 SHA-256 sidecar，
   校验后安装。重复运行同一命令执行升级。
-- 持久启用的项目服务必须先有自己的目录和 `.served.json5`，或兼容的旧版
-  `.served.json`，再运行 `served enable`。
+- 持久启用服务必须先有有效的 JSON5 配置和工作目录，再运行 `served enable`。配置可以
+  使用默认文件名，也可以通过 `-f/--file` 显式指定。
 - 用户可以用 `served run -- <program> [args...]` 创建临时服务。临时服务不要求项目配置文件。
 - `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
 - 项目文件或配置更新后，使用 `served restart` 应用变化。
@@ -37,19 +37,20 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 
 ## 核心模型
 
-- 一个受管服务对应一个目录。同一目录同时最多有一个受管服务。
-- 受管服务分为 `enabled` 和 `temporary`。已启用服务由服务配置文件和启用链接定义。
+- 一个配置文件定义一个服务。服务名全局唯一，多个服务可以共用工作目录。
+- 受管服务分为 `enabled` 和 `temporary`。已启用服务由服务配置文件和启用记录定义。
   临时服务由 `served run` 的命令行参数定义。
-- 已启用服务的目录必须包含 JSON5 服务定义文件 `.served.json5`，或兼容的旧版
-  `.served.json`。临时服务忽略这两个文件。
+- 已启用服务的配置来源是目录内自动查找，或显式指定的 JSON5 文件；配置位置与进程
+  工作目录独立。临时服务忽略配置文件。
 - 服务定义可以用 `env` 对象设置服务专用的字面量环境变量。
-- 同一目录中的 `.env.served` 只作为旧版 dotenv 回退输入；新模板不会创建它。
+- 配置文件旁的 `.env.served` 只作为旧版 dotenv 回退输入；新模板不会创建它。
 - 项目 `.env` 与 served 无关，served 永远不会读取它。
-- 服务工作目录始终是创建服务时的当前目录。
-- 管理器通过用户拥有的启用链接发现已启用服务。管理器通过私有 runtime 描述接管仍有
+- 工作目录优先级为启用时的 `--workdir` 覆盖值、配置 `cwd`、配置文件所在目录。
+  CLI 相对路径相对于调用目录，配置相对 `cwd` 相对于配置文件所在目录。
+- 管理器通过用户拥有的启用记录发现已启用服务。管理器通过私有 runtime 描述接管仍有
   活动 runner 的临时服务。
 - 服务名在所有受管服务中必须全局唯一。已启用服务的名称来自 JSON。临时服务的名称来自
-  `--name` 或清洗后的当前目录名。
+  `--name` 或清洗后的最终工作目录名。
 - 已启用服务需要改名时，先 `disable`，再修改名称，最后重新 `enable`。
 
 启用注册表为：
@@ -58,28 +59,32 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 ~/.config/served/enabled/<name> -> /path/to/service-directory
 ```
 
-链接指向服务目录，而不是直接指向 JSON5 文件。这样管理器可以用统一方式加载服务配置、
-旧版 `.env.served` 回退文件和工作目录。
+普通目录启用保留目录软链接。显式使用 `-f` 或 `--workdir` 时，在同一位置原子发布
+权限为 `0600` 的版本化 JSON 记录，保存目录或文件来源和可选工作目录覆盖值。旧链接
+无需迁移。restart 和恢复读取原来源；覆盖值需 disable 后重新 enable 才能更换或清除。
 
 ## 配置
 
 `.served.json5` 是一个服务对应的 JSON5 对象。它支持注释、不加引号的字段名、单引号、
 双引号和尾逗号。最小结构如下：
 
-旧文件名 `.served.json` 是弃用的兼容输入，内容仍按 JSON5 解析。配置文件选择规则固定为：
+旧文件名 `.served.json` 是弃用的兼容输入，内容仍按 JSON5 解析。自动发现的配置文件选择规则为：
 
 1. `.served.json5` 存在时使用它；`.served.json` 同时存在时忽略旧文件并输出 warning。
 2. 只有 `.served.json` 时使用旧文件并输出弃用 warning，不自动复制、改名或删除。
 3. `.served.json5` 无效时返回该文件的错误，不回退到 `.served.json`。
 4. 两个文件都不存在时返回缺失配置错误。
 
-manager 在恢复、enable 和 restart 时把 warning 写入 tracing 日志。`served edit` 把 warning
+显式 `-f` 接受任意文件名，内容仍按 JSON5 解析，不执行默认发现或弃用警告，也不回退。
+
+manager 在恢复、enable 和 restart 时把自动发现的 warning 写入 tracing 日志。`served edit` 把 warning
 写入 stderr，`served edit --path` 的 stdout 仍只包含配置路径。旧文件名没有预定移除版本。
 
 ```json5
 {
   name: "api",
   command: "python app.py",
+  cwd: null,
   tty: true,
   syncRowsCols: true,
   restart: "never",
@@ -134,6 +139,7 @@ enable your service to manage it here!
 用外部编辑器打开当前目录中按上述规则选中的配置。两个文件都不存在时，served 会在
 `.served.json5` 创建带注释的 JSON5 模板。已有文件会原样打开，served 不会重新格式化、
 重写或迁移它。编辑只会修改文件，不会自动应用到运行中的服务。
+`-f/--file PATH` 改为打开指定文件，缺失时创建模板及父目录。
 
 编辑器按以下优先级解析：`-e/--editor COMMAND`、非空 `$EDITOR`，然后从 `PATH` 依次
 查找 `editor`、`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx`。命令可以
@@ -142,23 +148,24 @@ enable your service to manage it here!
 
 ### `served enable`
 
-只在服务目录中有效。
+支持 `-f/--file PATH` 与 `--workdir DIR`。未指定文件时，在指定工作目录中查找默认配置；
+未指定工作目录时，在调用目录查找。配置 `cwd` 不参与配置发现。
 
 1. 按配置文件选择规则读取并校验 JSON5，包括可选的 `env` 对象和旧版 `.env.served` 回退。
 2. 拒绝缺失或无效的配置。
 3. 拒绝重复的全局服务名。
-4. 创建用户级启用链接。
+4. 创建用户级启用记录，启动设置失败时回滚记录。
 5. 在管理器中启动服务。
 
 没有独立的 `start` 命令。
 
 ### `served run [options] -- <program> [args...]`
 
-在当前目录创建临时服务。manager 必须已经运行。该命令不得读取或创建 `.served.json5`、
+在当前目录或 `--workdir DIR` 指定的目录创建临时服务。manager 必须已经运行。该命令不得读取或创建 `.served.json5`、
 `.served.json` 和 `.env.served`，也不得创建启用链接。创建成功后，该命令必须只输出服务名
 并返回。
 
-- `--name` 可选，默认使用清洗后的当前目录名。
+- `--name` 可选，默认使用清洗后的最终工作目录名。
 - 默认启用 TTY 和 PTY 尺寸同步。`--no-tty` 和 `--no-sync-rows-cols` 分别关闭这两个选项。
 - `--restart` 接受 `never`、`on-failure`、`always`，默认 `never`。
 - `--persist-logs` 默认关闭。`--log-max-bytes` 和 `--log-max-files` 的默认值与配置文件相同。
@@ -173,8 +180,10 @@ enable your service to manage it here!
 
 ### `served disable [name]`
 
-停止并移除服务。不带名称时使用当前目录。提供名称后，可以从任意目录控制受管服务。
-已启用服务同时删除启用链接。临时服务删除私有 runtime 描述。两种服务都保留持久化日志。
+停止并移除服务。不带名称时使用当前工作目录。提供名称后，可以从任意目录控制受管服务。
+restart、disable、attach、history 均不接受 `-f`。目录匹配多个服务时拒绝操作，按名称排序
+列出候选并要求指定名称；不能任意选择一个服务。
+已启用服务同时删除启用记录。临时服务删除私有 runtime 描述。两种服务都保留持久化日志。
 
 没有独立的 `stop` 命令。
 
@@ -400,7 +409,7 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - 兼容 Docker 的镜像或文件系统隔离。
 - 除 served 自身非特权 unit 以外的任意 root/system 服务管理。
 - 发行版包管理器元数据和模块。
-- 一个目录或一个 JSON 文件中配置多个服务。
+- 一个 JSON 文件中配置多个服务。
 - 服务依赖或就绪检查。
 - 公共 `served` CLI 中独立的 `start`、`stop` 或 `reload` 命令。
 - 任意位置的 `.env.served` 文件。
@@ -412,10 +421,10 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 1. `served edit` 在空服务目录中创建带注释的 JSON5 `.served.json5`，且不创建 `.env.served`；
    只有 `.served.json` 时原地使用并输出弃用 warning，双文件时选择 `.served.json5` 并提示
    旧文件被忽略。
-2. `served enable` 创建目录符号链接、启动服务，并使服务出现在全局 `served` 和
+2. 普通 `served enable` 创建目录符号链接、启动服务，并使服务出现在全局 `served` 和
    `served list` 视图中。
 3. 启用重复 `name` 时失败，且不替换已有链接。
-4. `served disable` 删除链接并停止服务。
+4. `served disable` 删除启用记录并停止服务。
 5. `served restart` 只有在完整校验后才应用当前 JSON5 和环境变化；JSON5 `env` 覆盖旧版
    `.env.served` 回退值。
 6. 无效配置不会影响已经运行的服务。
@@ -475,7 +484,7 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 38. `served run -- <program> [args...]` 在没有有效配置文件时创建临时服务。该命令完整保留
     argv 边界，继承 manager 环境，并应用 CLI `--env` 覆盖。
 39. 临时服务出现在 list 和 TUI 中。它支持 attach、history、restart 和按名称或目录
-    disable。名称或目录冲突不得改变已有服务。
+    disable。名称冲突不得改变已有服务；同一工作目录允许多个服务。
 40. manager 异常退出后，新 manager 接管临时服务的 runner，且服务 PID 不变。正常
     shutdown 停止服务并删除私有 runtime 描述。主机重启后不得自动启动该服务。
 41. macOS plist 通过 `plutil` 校验，以普通安装用户和规范 HOME 运行，并设置 KeepAlive、
@@ -485,3 +494,13 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 43. macOS 卸载当前用户实例时保留配置、状态和其他用户需要的共享二进制。
 44. 在线安装器正确选择平台 full 包，验证 SHA-256 后才调用 `install.sh --yes`；checksum
     失败和不支持的平台或架构不会执行安装器。
+
+45. `edit -f --path` 支持任意文件名、创建父目录、保留已有源文本，并跳过默认文件发现和警告。
+46. `enable -f` 与配置 `cwd`、`--workdir` 按约定解析相对路径和优先级；PTY、pipe 均在最终
+    目录运行，`.env.served` 从配置旁读取。显式文件缺失或无效时不得回退。
+47. 普通目录链接和新启用记录均能恢复；自定义来源与覆盖值在 restart、崩溃接管、handoff
+    和正常启动后保留。配置未变化时接管保持 PID。无效重启不得停止旧进程。
+48. enabled 与 temporary 服务可共用工作目录。按目录操作遇到多个候选时拒绝执行并列出
+    名称；按名称操作只影响指定服务。
+49. `enable --workdir` 未传 `-f` 时从指定目录发现配置；`run --workdir` 的默认名称取最终
+    工作目录名，仍忽略项目配置。manager 协议为 v8，runner wire 保持 v1。

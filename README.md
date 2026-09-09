@@ -116,8 +116,8 @@ served history [name] --json
 served list            List services managed by the manager
 ```
 
-Commands without a name use the service for the current directory. Commands with a name work from
-any directory.
+Commands without a name match the current process working directory. If several services match,
+served reports their names and requires an explicit name. Named commands work from any directory.
 
 Use `served disable` when you no longer want to manage a project. Use `served restart`
 after you change its configuration. served does not provide separate service-level `start`,
@@ -125,8 +125,8 @@ after you change its configuration. served does not provide separate service-lev
 
 ### Temporary Services
 
-`served run` creates a managed temporary service in the current directory. The manager must already
-be running. The command does not read or create `.served.json5`, the deprecated `.served.json`, or
+`served run` creates a managed temporary service in the current directory, or in `--workdir DIR`.
+The manager must already be running. The command does not read or create `.served.json5`, the deprecated `.served.json`, or
 `.env.served`. It does not create an enabled registry link. After creation, the command prints the
 service name and exits.
 
@@ -135,7 +135,7 @@ served run --name api --no-tty --restart on-failure \
   --env PORT=8080 -- python app.py --verbose
 ```
 
-The service name defaults to a sanitized form of the current directory name. By default, served
+The service name defaults to a sanitized form of the selected working directory name. By default, served
 allocates a TTY and syncs its size with an attach client. The default restart policy is `never`.
 Logs remain in memory by default. `--restart` accepts `never`, `on-failure`, or `always`.
 
@@ -145,8 +145,8 @@ logs on disk. `--log-max-bytes` and `--log-max-files` use the same defaults as `
 Each `--env KEY=VALUE` option overrides the manager environment snapshot. If a key occurs more than
 once, the last value applies.
 
-Service names must be unique across all managed services. A directory can have only one managed
-service. `served run` rejects a conflict without changing the existing service.
+Service names must be unique across all managed services. Multiple services can share a working
+directory. `served run` rejects a name conflict without changing the existing service.
 
 Arguments after `--` keep their exact boundaries. served does not interpret shell syntax in these
 arguments. Use an explicit `sh -c` when a command requires pipes, redirects, or expansion.
@@ -162,6 +162,36 @@ manager stop remove this definition. After a host reboot, the manager does not r
 
 ## Service Configuration
 
+Use `-f/--file PATH` with `edit` or `enable` to select a configuration with any filename. It is
+always parsed as JSON5. Explicit selection bypasses default filename discovery and deprecation
+warnings; a missing or invalid file is an error for `enable`. `edit -f` creates a missing template
+and its parent directories, and preserves existing source text, including invalid source.
+
+```bash
+served edit -f /configs/api.json5
+served enable -f /configs/api.json5 --workdir /srv/api
+served run --name worker --workdir /srv/api -- ./worker
+served restart api
+```
+
+The working directory is selected in this order: the saved `enable --workdir` override, the
+configuration's optional `cwd`, then the configuration file's parent directory. CLI paths are
+relative to the invocation directory; relative `cwd` values are relative to the configuration file.
+With `enable --workdir DIR` and no `-f`, default configuration discovery uses `DIR`. Without either
+option, discovery uses the invocation directory. The legacy `.env.served` remains beside the
+configuration, even when the service runs elsewhere. `run` does not load it.
+
+The working directory must exist. Restart reloads the original configuration source and validates
+it before stopping the existing process. The CLI override survives restart and manager recovery;
+disable and enable again to change or remove it. It never rewrites the configuration. Only `edit`
+and `enable` accept `-f`; use names for subsequent management.
+
+Ordinary directory enables retain the existing `~/.config/served/enabled/<name>` directory symlink.
+Enables with `-f` or `--workdir` instead store a private, versioned JSON record at that path, containing
+the source location and directory override. Existing links need no migration. Client and manager
+must both support manager protocol v8; runner protocol v1 remains compatible with existing runners.
+
+
 Run `served edit` in the service directory. If neither supported configuration file exists, served
 creates a commented JSON5 template at `.served.json5` and opens it in your editor. served does not
 rewrite or format an existing file.
@@ -175,6 +205,7 @@ exist, `.served.json5` takes precedence and served warns that `.served.json` is 
 {
   name: "api",
   command: "python app.py",
+  cwd: null, // Or an absolute path, or a path relative to this configuration.
   tty: true,
   syncRowsCols: true,
   restart: "never",

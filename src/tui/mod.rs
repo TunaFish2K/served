@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     client,
-    config::has_config_file,
+    config::resolve_config_file,
     editor,
     logs::DEFAULT_CHUNK_LIMIT,
     paths::ServedPaths,
@@ -44,7 +44,7 @@ use crate::protocol::{ServiceInfo, ServiceKind, ServiceState};
 use view::{history_position, main_footer};
 
 const TIPS: &[&str] = &[
-    "one directory, one .served.json5, one working directory",
+    "services can share a working directory; select them by name",
     "served run creates a temporary service without project configuration",
     "the manager starts enabled services after a user-session restart",
     "tty:false services support read-only attach",
@@ -199,11 +199,15 @@ async fn run_loop(
                         selected = selected.min(services.len() - 1);
                     }
                     if let Some(directory) = &current_directory {
-                        let has_local_config = has_config_file(directory);
-                        let enabled = services
-                            .iter()
-                            .any(|service| Path::new(&service.directory) == directory.as_path());
-                        if has_local_config && !enabled && notice.is_empty() {
+                        let local_config = resolve_config_file(directory);
+                        let enabled = services.iter().any(|service| {
+                            service.config_file.as_deref().is_some_and(|path| {
+                                local_config
+                                    .as_ref()
+                                    .is_some_and(|file| Path::new(path) == file.path())
+                            })
+                        });
+                        if local_config.is_some() && !enabled && notice.is_empty() {
                             notice = "enable your service to manage it here!".to_owned();
                         }
                     }
@@ -674,6 +678,7 @@ mod tests {
 
     fn service_info(tty: bool) -> ServiceInfo {
         ServiceInfo {
+            config_file: None,
             name: "api".to_owned(),
             directory: "/tmp/api".to_owned(),
             kind: ServiceKind::Enabled,

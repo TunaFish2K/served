@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/install-docs.sh
+source "$script_dir/install-docs.sh"
+served_docs_init "$script_dir" /usr/local
+
 binary_target="/usr/local/bin/served"
 daemon_dir="/Library/LaunchDaemons"
 keepalive_dir="/Library/Application Support/served"
@@ -114,6 +119,7 @@ fi
 
 if confirm_no "No other served LaunchDaemons were found. Remove the shared served binary?"; then
     root_cmd rm -f "$binary_target"
+    served_docs_remove || fatal "could not remove shared documentation"
     printf 'shared served binary removed; configuration and state were preserved.\n'
 else
     status=$?

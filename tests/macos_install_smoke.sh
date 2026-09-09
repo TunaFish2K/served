@@ -14,6 +14,8 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/served-macos-smoke.XXXXXX")"
 service_dir="$test_root/service"
 package_dir=""
 owns_install=0
+docs_target="/usr/local/share/served/skills/served"
+man_target="/usr/local/share/man/man1/served.1"
 service_name="served-macos-smoke"
 
 fail() {
@@ -26,6 +28,13 @@ cleanup() {
         "$binary_target" disable "$service_name" >/dev/null 2>&1 || true
         sudo launchctl bootout "system/$label" >/dev/null 2>&1 || true
         sudo rm -f "$plist_target" "$other_plist" "$binary_target" "$keepalive_target"
+        if [[ -n "$package_dir" ]]; then
+            # shellcheck source=scripts/install-docs.sh
+            source "$package_dir/install-docs.sh"
+            root_cmd() { sudo "$@"; }
+            served_docs_init "$package_dir" /usr/local
+            served_docs_remove || true
+        fi
         sudo rmdir "$keepalive_dir" >/dev/null 2>&1 || true
     fi
     rm -rf "$test_root"
@@ -34,7 +43,7 @@ trap cleanup EXIT
 
 [[ "$(uname -s)" == Darwin ]] || fail "macOS install smoke test requires macOS"
 [[ -f "$archive" ]] || fail "usage: tests/macos_install_smoke.sh FULL_ARCHIVE"
-[[ ! -e "$binary_target" && ! -e "$plist_target" && ! -e "$other_plist" && ! -e "$keepalive_target" ]] ||
+[[ ! -e "$docs_target" && ! -e "$man_target" && ! -e /usr/local/share/man/man5/served.5 && ! -e "$binary_target" && ! -e "$plist_target" && ! -e "$other_plist" && ! -e "$keepalive_target" ]] ||
     fail "refusing to replace an existing served installation on the smoke-test host"
 
 tar -C "$test_root" -xzf "$archive"
@@ -44,6 +53,10 @@ package_dir="$test_root/$(basename "$archive" .tar.gz)"
 
 "$package_dir/install.sh" --yes
 owns_install=1
+[[ -f "$man_target" && -f /usr/local/share/man/man5/served.5 && -f "$docs_target/references/config.md" ]] ||
+    fail "documentation payload was not installed"
+man -M /usr/local/share/man -w 1 served >/dev/null
+man -M /usr/local/share/man -w 5 served >/dev/null
 "$binary_target" list >/dev/null
 sudo launchctl print "system/$label" >/dev/null
 [[ -f "$keepalive_target" ]] || fail "macOS installer did not create its launchd keepalive marker"
@@ -80,6 +93,10 @@ service_pid() {
 }
 
 before_pid="$(service_pid)" || fail "service did not start before the launchd reload"
+sudo rm "$docs_target/references/config.md"
+"$package_dir/install.sh" --yes
+[[ -f "$docs_target/references/config.md" ]] || fail "reinstall did not repair documentation"
+[[ "$(service_pid)" == "$before_pid" ]] || fail "documentation repair changed the service PID"
 sudo plutil -insert ServedSmokeMarker -bool true "$plist_target"
 "$package_dir/install.sh" --yes
 after_pid="$(service_pid)" || fail "service was not adopted after the launchd reload"
@@ -102,6 +119,8 @@ for _ in {1..10}; do
 done
 "$binary_target" list >/dev/null || fail "manager did not restart after the unloaded-instance check"
 
+cp "$man_target" "$test_root/served.1.good"
+printf '\nUpdated documentation\n' >> "$package_dir/share/man/man1/served.1"
 cp "$package_dir/served" "$test_root/served.good"
 printf '#!/bin/sh\nexit 1\n' > "$package_dir/served"
 chmod 755 "$package_dir/served"
@@ -111,6 +130,8 @@ fi
 cmp -s "$binary_target" "$test_root/served.good" ||
     fail "failed upgrade did not restore the installed binary"
 "$binary_target" list >/dev/null || fail "failed upgrade did not restore the active manager"
+cmp -s "$man_target" "$test_root/served.1.good" || fail "failed upgrade did not restore documentation"
+cp "$test_root/served.1.good" "$package_dir/share/man/man1/served.1"
 install -m 755 "$test_root/served.good" "$package_dir/served"
 
 sudo cp "$plist_target" "$other_plist"
@@ -119,6 +140,7 @@ sudo chown root:wheel "$other_plist"
 "$package_dir/uninstall.sh" --yes
 [[ -e "$binary_target" && ! -e "$plist_target" ]] ||
     fail "macOS uninstaller removed a binary still shared by another instance"
+[[ -f "$man_target" && -f "$docs_target/SKILL.md" ]] || fail "shared documentation was removed too early"
 [[ ! -e "$keepalive_target" ]] || fail "macOS uninstaller kept a stale launchd keepalive marker"
 sudo rm -f "$other_plist"
 
@@ -128,6 +150,8 @@ owns_install=0
 [[ ! -e "$binary_target" && ! -e "$plist_target" && ! -e "$other_plist" ]] ||
     fail "macOS uninstaller left shared installation files behind"
 [[ ! -e "$keepalive_target" ]] || fail "macOS uninstaller left its launchd keepalive marker behind"
+[[ ! -e "$man_target" && ! -e /usr/local/share/man/man5/served.5 && ! -e "$docs_target/SKILL.md" ]] ||
+    fail "uninstaller left shared documentation behind"
 [[ -d "$HOME/.local/state/served" ]] || fail "macOS uninstaller removed user state"
 
 printf 'macOS install smoke checks passed\n'

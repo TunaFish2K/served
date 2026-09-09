@@ -35,6 +35,7 @@ inputs=(
     launchd
     scripts
     src
+    skills
     systemd
     tests
 )

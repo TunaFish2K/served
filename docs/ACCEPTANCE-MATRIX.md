@@ -70,3 +70,9 @@
   输出之间没有丢失窗口。
 - `manager_smoke::persistent_and_memory_history_survive_service_restarts` 验证不持久化记录仍可
   分页导出为清理后的 stdout 和结构化 JSON，且不创建日志文件。
+
+## 手册与 AI skill
+
+- `make docs-check` 校验 mdoc、生成参考同步、skill 的可移植引用及独立包校验和。
+- `tests/docs_install.sh` 在临时目录验证权限、补齐、故障回滚和只删除所属文件。
+- macOS release smoke 校验 man 查询、文档修复保留 PID、升级回滚及多用户卸载保留。

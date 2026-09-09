@@ -23,6 +23,12 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Validate manuals and AI skill
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes mandoc
+          make docs-check
+
       - name: Verify release tag
         id: release
         shell: bash
@@ -173,6 +179,9 @@ jobs:
           scripts/package-source.sh "dist/served-v${RELEASE_VERSION}-source.tar.gz" "$RELEASE_VERSION"
           cd dist
           sha256sum "served-v${RELEASE_VERSION}-source.tar.gz" > "served-v${RELEASE_VERSION}-source.tar.gz.sha256"
+
+      - name: Package standalone AI skill
+        run: make skill-dist
 
       - name: Publish assets
         shell: bash

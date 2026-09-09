@@ -14,6 +14,9 @@ help:
 	@echo "  make build-all       Build release binaries for both host architectures"
 	@echo "  make dist            Package both host architectures under dist/"
 	@echo "  make source-dist     Create the deterministic source release archive"
+	@echo "  make docs            Generate skill references from mdoc manuals"
+	@echo "  make docs-check      Validate manuals, skill references, and doc installation"
+	@echo "  make skill-dist      Package the standalone AI skill"
 	@echo "  make check           Run format, clippy, and all native tests"
 	@echo "  make shellcheck      Check repository shell scripts"
 	@echo "  make installer-check Test the online installer without network access"
@@ -80,3 +83,14 @@ cli:
 
 linux-check:
 	@./scripts/dev.sh linux-check
+
+.PHONY: docs docs-check skill-dist
+docs:
+	@python3 scripts/docs.py
+
+docs-check:
+	@python3 scripts/docs.py --check
+	@bash tests/docs_install.sh
+
+skill-dist:
+	@python3 scripts/package-skill.py dist

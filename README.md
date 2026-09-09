@@ -8,6 +8,32 @@ run under any process supervisor; the repository includes optional systemd and l
 
 Release binaries support macOS and Linux with glibc on amd64/x64 and arm64.
 
+## Manuals and AI skill
+
+Full packages and the online installer include English command and configuration manuals:
+
+```sh
+man served
+man 5 served
+```
+
+The portable [served skill](skills/served/SKILL.md) helps AI agents configure and manage services.
+It includes offline command and configuration references generated from the same manuals.
+Download `served-v<version>-skill.tar.gz` and its SHA-256 file from GitHub Releases, or copy the
+installed `/usr/local/share/served/skills/served/` directory into your AI tool's skills directory.
+Copy the entire directory, including `references/`; choose the destination supported by your tool.
+Re-import the skill when you upgrade served. The served installer updates its shared copy; your
+imported copy belongs to you. A standalone binary download does not include these documentation files.
+
+For example, after importing the skill, ask your agent to “use served to run an API and worker from
+separate config files in the same project”, or “inspect the API logs and explain why its restart failed”.
+
+Documentation authors edit `docs/man/served.1` and `docs/man/served.5`, then run `make docs` and commit
+the generated skill references. `make docs-check` validates rendering, references, packaging, repair,
+and rollback without installing system files. These targets need Python 3.9+ and mandoc.
+`make skill-dist` creates the standalone archive and checksum in `dist/`.
+
+
 ## What served Does
 
 served manages a project directory that already exists. You prepare the project, its command, and

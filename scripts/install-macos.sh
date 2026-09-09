@@ -2,6 +2,9 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/install-docs.sh
+source "$script_dir/install-docs.sh"
+served_docs_init "$script_dir" /usr/local
 binary_source="$script_dir/served"
 template_source="$script_dir/served.plist"
 binary_target="/usr/local/bin/served"
@@ -202,6 +205,7 @@ backup_files() {
         fatal "could not create an upgrade backup directory"
     ((had_binary == 0)) || root_cmd cp -p "$binary_target" "$backup_dir/served"
     ((had_plist == 0)) || root_cmd cp -p "$plist_target" "$backup_dir/served.plist"
+    served_docs_backup "$backup_dir/docs"
 }
 
 enable_keepalive() {
@@ -217,17 +221,18 @@ disable_keepalive() {
 }
 
 install_files() {
-    root_cmd install -d -m 755 "$(dirname "$binary_target")"
-    root_cmd install -d -m 755 "$daemon_dir"
+    root_cmd install -d -m 755 "$(dirname "$binary_target")" || return 1
+    root_cmd install -d -m 755 "$daemon_dir" || return 1
     if ((binary_changed)); then
-        root_cmd install -m 755 "$binary_source" "$binary_target"
-        root_cmd chown root:wheel "$binary_target"
+        root_cmd install -m 755 "$binary_source" "$binary_target" || return 1
+        root_cmd chown root:wheel "$binary_target" || return 1
     fi
     if ((plist_changed || had_plist == 0)); then
-        root_cmd install -m 644 "$rendered_plist" "$plist_target"
-        root_cmd chown root:wheel "$plist_target"
+        root_cmd install -m 644 "$rendered_plist" "$plist_target" || return 1
+        root_cmd chown root:wheel "$plist_target" || return 1
     fi
-    enable_keepalive
+    enable_keepalive || return 1
+    served_docs_install
 }
 
 wait_for_manager() {
@@ -305,6 +310,7 @@ restore_files() {
         disable_keepalive || failed=1
         root_cmd rmdir "$keepalive_dir" >/dev/null 2>&1 || true
     fi
+    served_docs_restore "$backup_dir/docs" || failed=1
     return "$failed"
 }
 
@@ -399,9 +405,11 @@ resolve_account
     fatal "served binary is missing or not executable in the package"
 [[ -f "$template_source" ]] || fatal "served.plist is missing from the package"
 render_plist
+served_docs_validate || fatal "invalid documentation payload"
 inspect_installation
 
 if ((binary_changed == 0 && plist_changed == 0 && had_plist && had_keepalive)); then
+    served_docs_update_only || fatal "could not update documentation"
     printf 'served is already installed at %s\n' "$binary_target"
     ((target_loaded)) || printf '%s remains unloaded\n' "$label"
     exit 0

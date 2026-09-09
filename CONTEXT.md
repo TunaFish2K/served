@@ -49,6 +49,14 @@
 
 ## 已确认的决策
 
+- 英文 `served(1)` 与 `served(5)` 是命令和配置参考的维护源，使用 mdoc；skill 的离线
+  Markdown 参考由 mandoc 生成并提交。`make docs-check` 检查同步和引用。
+- 通用 `served` skill 面向操作服务，使用 `SKILL.md` 和按需加载的参考。中英文 README
+  提供使用与导入说明。完整包包含手册和 skill，Release 另发带 SHA-256 的独立 skill 包。
+- 安装器将手册安装到 `/usr/local/share/man`，skill 安装到
+  `/usr/local/share/served/skills/served`。文档参与安装回滚；同版本仅文档更新不重启服务。
+  共享文件卸载时同时移除文档，仍有其他用户实例时保留。AI 工具中的用户副本由用户导入。
+
 - 配置来源与工作目录独立。`enable`、`edit` 支持 `-f/--file`；`enable`、`run` 支持
   `--workdir`。显式文件统一按 JSON5 解析，不执行默认文件发现、警告或回退。
 - 持久服务工作目录优先级为保存的 CLI 覆盖、配置 `cwd`、配置文件所在目录。CLI 相对

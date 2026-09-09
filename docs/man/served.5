@@ -1,0 +1,143 @@
+.Dd September 9, 2026
+.Dt SERVED 5
+.Os served
+.Sh NAME
+.Nm served
+.Nd service configuration and registration format
+.Sh DESCRIPTION
+Each file defines one service as a JSON5 object.
+Comments, unquoted keys, single-quoted strings, and trailing commas are accepted.
+Unknown fields are rejected.
+Use
+.Cm served edit
+for a commented template.
+.Sh CONFIGURATION DISCOVERY
+Automatic discovery prefers .served.json5.
+If only .served.json exists, use it as JSON5 and emit a deprecation warning.
+If both exist, ignore .served.json and warn.
+An invalid .served.json5 does not cause fallback.
+Explicit
+.Fl f , Fl Fl file
+selection accepts any filename and bypasses this discovery and its warnings.
+.Sh FIELDS
+.Bl -tag -width "log_max_bytes"
+.It Ic name
+Required, globally unique service name.
+Use ASCII letters, digits, dot, underscore, or hyphen.
+Empty names, a single dot, and two dots are invalid.
+Disable before renaming, then enable again.
+.It Ic command
+Required, nonempty shell command executed by /bin/sh -c.
+Real newlines and shell operators are allowed.
+This differs from the original argument boundaries preserved by served run.
+.It Ic cwd
+Optional string or null.
+Default: the configuration file's directory.
+Relative values are resolved against that directory, not the caller or manager directory.
+An enable --workdir override takes priority.
+.It Ic tty
+Boolean, default true.
+Allocate a runner-owned PTY; false uses pipes.
+.It Ic syncRowsCols
+Boolean, default true.
+Follow the active attach client's terminal dimensions for PTY services.
+Ignored for pipe services.
+.It Ic restart
+One of never (default), on-failure, or always.
+On-failure restarts nonzero exits; always also restarts successful exits.
+Repeated failures use backoff.
+.It Ic persist_logs
+Boolean, default false.
+Persist raw output instead of retaining only bounded memory history.
+.It Ic log_max_bytes
+Positive integer, default 10485760 (10 MiB).
+Rotate a persistent segment when this limit is reached.
+.It Ic log_max_files
+Positive integer, default 3.
+Number of archived persistent segments in addition to latest.log.
+.It Ic env
+Object mapping environment variable names to literal string values; default empty.
+Keys must be nonempty and contain neither an equals sign nor a NUL byte.
+Values are not expanded by the configuration loader.
+.El
+.Sh PATHS AND ENVIRONMENT
+The working directory is selected in this order:
+.Bl -enum -compact
+.It
+The saved enable --workdir override.
+.It
+The configuration's cwd value.
+.It
+The configuration file's parent directory.
+.El
+.Pp
+CLI relative file and directory paths use the invocation directory.
+Without --file, enable searches its --workdir directory, or the invocation directory if omitted.
+Configuration cwd does not affect configuration discovery.
+The final working directory must exist and be a directory.
+.Pp
+Environment values are layered in this order, with later values winning:
+.Bl -enum -compact
+.It
+The manager's startup environment snapshot.
+.It
+The optional .env.served beside the configuration file, parsed as dotenv.
+.It
+The configuration env object.
+.El
+.Pp
+The project's .env is never read by served.
+A separate workdir does not move the .env.served lookup location.
+Temporary services ignore both configuration and dotenv files and apply only CLI --env overrides.
+.Sh REGISTRATION AND RELOAD
+Ordinary directory enable creates a symlink from the enabled registry to the configuration directory.
+The link target is not changed by cwd.
+Enables using --file or --workdir instead create a private JSON registration at the same registry path.
+It records version 1, source with kind directory or file and an absolute path, and a nullable
+workdir override.
+Older directory links remain supported without migration.
+.Pp
+Restart and manager recovery load the registered source again.
+Directory sources perform default filename discovery again; explicit file sources keep the selected path.
+Working directory changes never change the configuration source.
+A saved CLI directory override survives restart and recovery.
+Disable and enable again to replace or remove that override; served does not rewrite the configuration.
+.Pp
+Editing a configuration does not immediately change a running process.
+Apply it with served restart and verify state and output.
+The manager validates the new definition before stopping the old process.
+.Sh FILES
+.Bl -tag -width "~/.config/served/enabled/"
+.It Pa ~/.config/served/enabled/
+Per-user enabled registrations, indexed by service name.
+Read an ordinary symlink to locate its configuration directory; a regular JSON record stores its source.
+Use lifecycle commands to manage registrations.
+.It Pa ~/.local/state/served/logs/
+Persistent logs by service name, including latest.log and rotated archives.
+Raw logs may contain terminal escape sequences; history --stdout and --json sanitize display content.
+.It Pa ~/.local/state/served/runtime/
+Private manager and runner sockets, metadata, and temporary service definitions.
+These are runtime implementation files, not project configuration.
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+{
+  name: "api",
+  command: "python app.py",
+  cwd: "/srv/api",
+  tty: false,
+  syncRowsCols: true,
+  restart: "on-failure",
+  persist_logs: true,
+  log_max_bytes: 10485760,
+  log_max_files: 3,
+  env: { PORT: "8080" },
+}
+.Ed
+.Sh COMPATIBILITY
+Independent configuration paths and working directories require served 0.9.0 or later.
+Client and manager must agree on the manager protocol version (v8 for these features).
+Runner protocol v1 remains compatible with existing runners.
+Use the official installation upgrade path when updating an installed manager.
+.Sh SEE ALSO
+.Xr served 1

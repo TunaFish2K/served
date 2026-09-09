@@ -2,6 +2,9 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/install-docs.sh
+source "$script_dir/install-docs.sh"
+served_docs_init "$script_dir" /usr/local
 binary_target="/usr/local/bin/served"
 template_name="served@.service"
 template_target="/etc/systemd/system/${template_name}"
@@ -235,6 +238,7 @@ backup_files() {
     ((had_binary == 0)) || root_cmd cp -a -- "$binary_target" "$backup_dir/served"
     ((had_template == 0)) || root_cmd cp -a -- "$template_target" "$backup_dir/served@.service"
     ((had_legacy_system == 0)) || root_cmd cp -a -- "$legacy_system_target" "$backup_dir/served.service"
+    served_docs_backup "$backup_dir/docs"
 }
 
 render_units() {
@@ -257,6 +261,7 @@ restore_files() {
     ((had_template == 0)) || root_cmd cp -a -- "$backup_dir/served@.service" "$template_target" || failed=1
     ((had_legacy_system == 0)) || root_cmd cp -a -- "$backup_dir/served.service" "$legacy_system_target" || failed=1
     systemctl_root daemon-reload || failed=1
+    served_docs_restore "$backup_dir/docs" || failed=1
     return "$failed"
 }
 
@@ -344,12 +349,13 @@ abort_install() {
 }
 
 install_files() {
-    root_cmd install -Dm755 "$script_dir/served" "$binary_target"
-    root_cmd install -Dm644 "$staging_dir/served@.service" "$template_target"
+    root_cmd install -Dm755 "$script_dir/served" "$binary_target" || return 1
+    root_cmd install -Dm644 "$staging_dir/served@.service" "$template_target" || return 1
     if ((legacy_system_present)); then
-        root_cmd install -Dm644 "$staging_dir/served.service" "$legacy_system_target"
+        root_cmd install -Dm644 "$staging_dir/served.service" "$legacy_system_target" || return 1
     fi
-    systemctl_root daemon-reload
+    systemctl_root daemon-reload || return 1
+    served_docs_install
 }
 
 reload_active_instances() {
@@ -455,11 +461,13 @@ if [[ -d "$binary_target" || -d "$template_target" || -d "$legacy_system_target"
     fatal "an installation target is a directory; refusing to replace it"
 fi
 
+served_docs_validate || fatal "invalid documentation payload"
 inspect_installation
 render_units
 if ((had_binary && had_template && legacy_system_present == 0 && legacy_user_present == 0)) &&
     cmp -s "$script_dir/served" "$binary_target" &&
     cmp -s "$staging_dir/served@.service" "$template_target"; then
+    served_docs_update_only || fatal "could not update documentation"
     printf 'served is already installed at %s\n' "$binary_target"
     if ((instance_active)); then
         printf '%s is active\n' "$instance_name"

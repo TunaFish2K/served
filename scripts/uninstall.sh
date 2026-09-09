@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/install-docs.sh
+source "$script_dir/install-docs.sh"
+served_docs_init "$script_dir" /usr/local
+
 binary_target="/usr/local/bin/served"
 template_name="served@.service"
 template_target="/etc/systemd/system/${template_name}"
@@ -234,6 +239,7 @@ fi
 
 if confirm_no "No other enabled or active instances were found. Remove the shared served binary and template?"; then
     root_cmd rm -f -- "$template_target" "$binary_target"
+    served_docs_remove || fatal "could not remove shared documentation"
     systemctl_root daemon-reload ||
         printf 'warning: system daemon-reload failed after removing shared served files\n' >&2
     printf 'shared served binary and systemd template removed; configuration and state were preserved.\n'

@@ -8,6 +8,29 @@ launchd 集成。
 
 Release 支持 macOS 和 Linux/glibc，并提供 amd64/x64 和 arm64 二进制。
 
+## man 手册与 AI skill
+
+完整发布包和在线安装器包含英文命令手册与配置手册：
+
+```sh
+man served
+man 5 served
+```
+
+通用的 [served skill](skills/served/SKILL.md) 指导 AI 配置、管理和排查服务，内含从同一份
+手册生成的离线参考。可从 GitHub Releases 下载 `served-v<version>-skill.tar.gz` 及其
+SHA-256 文件，也可复制已安装的 `/usr/local/share/served/skills/served/` 目录到所用
+AI 工具支持的技能目录。需复制整个目录，包括 `references/`。
+
+升级 served 后重新导入 skill。安装器更新共享副本，你导入到 AI 工具中的副本由你管理。
+单独下载二进制不包含这些文档。导入后可以让 AI “用 served 从两个配置文件运行同目录的
+API 和 worker”，或“查看 API 日志，解释这次重启为什么失败”。
+
+维护文档时修改 `docs/man/served.1` 和 `docs/man/served.5`，运行 `make docs` 并提交生成的
+参考文档。`make docs-check` 校验渲染、引用、打包、补齐和回滚，不写系统目录。
+这些目标需要 Python 3.9+ 和 mandoc；`make skill-dist` 在 `dist/` 生成独立技能包和校验文件。
+
+
 ## 适用范围
 
 个人非关键服务是指停止后不会影响主机基础维护能力的服务。机器人、Webhook、个人 API

@@ -1,0 +1,201 @@
+.Dd September 9, 2026
+.Dt SERVED 1
+.Os served
+.Sh NAME
+.Nm served
+.Nd manage personal services on Linux and macOS
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Cm edit
+.Op Fl f Ar file
+.Op Fl e Ar editor | Fl Fl path
+.Nm
+.Cm enable
+.Op Fl f Ar file
+.Op Fl Fl workdir Ar directory
+.Nm
+.Cm run
+.Op Ar options
+.Fl Fl
+.Ar program Op Ar arguments ...
+.Nm
+.Cm disable | restart | attach
+.Op Ar name
+.Nm
+.Cm history
+.Op Ar name
+.Op Fl Fl run Ar id
+.Op Fl e Ar editor | Fl Fl path | Fl Fl stdout | Fl Fl json
+.Nm
+.Cm list
+.Nm
+.Cm daemon
+.Op Fl Fl handoff | Fl Fl relinquish
+.Nm
+.Cm shutdown
+.Sh DESCRIPTION
+.Nm
+runs commands from prepared projects as per-user services.
+It does not upload code, install project dependencies, or build projects.
+Linux and macOS are supported.
+Run without a subcommand to open the service management TUI.
+A manager must already be running for service management commands;
+.Cm edit
+works without a manager.
+.Pp
+Service names are unique across enabled and temporary services.
+Multiple services may share a working directory.
+Lifecycle and history commands with no name match the current working directory.
+If several services match, the command fails and lists names to choose from.
+Named commands work from any directory.
+.Sh COMMANDS
+.Bl -tag -width "shutdown"
+.It Cm edit
+Open the selected configuration in an external editor.
+.Fl f , Fl Fl file Ar file
+selects any filename; otherwise discover the default configuration in the current directory.
+Create a commented JSON5 template when no configuration exists.
+Explicit file selection also creates missing parent directories.
+Existing text, including invalid configuration, is preserved.
+.Fl Fl path
+creates a missing template and prints its absolute path without opening an editor.
+Warnings go to standard error.
+.Fl e , Fl Fl editor Ar command
+selects the editor and conflicts with
+.Fl Fl path .
+.It Cm enable
+Load configuration, register an enabled service, and start it.
+.Fl f , Fl Fl file Ar file
+selects an explicit JSON5 file without filename discovery or deprecation warnings.
+A missing or invalid explicit file is an error; no fallback occurs.
+.Fl Fl workdir Ar directory
+sets a persistent working directory override.
+Without an explicit file, discover configuration in this directory, or in the current directory
+if no working directory was specified.
+The effective directory must exist.
+See
+.Xr served 5
+for resolution and registration details.
+.It Cm run
+Create and start a temporary service from the arguments after
+.Fl Fl .
+Arguments retain their original boundaries; use an explicit
+.Cm sh Fl c
+for shell syntax.
+This command ignores all project configuration and dotenv files.
+It prints the service name after successful creation.
+Temporary services support the same management commands as enabled services.
+They survive manager handoff and crash recovery while their runner remains alive.
+Normal manager shutdown removes them; they do not restart after a host reboot.
+.It Cm disable
+Stop the named service and remove its enable record or temporary runtime definition.
+Persistent logs remain available on disk.
+.It Cm restart
+Validate and reload an enabled service from its registered source before stopping its old process.
+An invalid configuration or directory leaves the old process running.
+Temporary services reuse their original launch definition.
+Renaming an enabled service requires disable, configuration edit, and enable.
+There are no separate service-level start, stop, or reload commands.
+.It Cm attach
+Connect directly without opening the management TUI.
+PTY services allow one interactive writer; pipe services allow multiple read-only observers.
+Show a short sanitized snapshot, then relay live output.
+Ctrl-C detaches and is not forwarded to the service.
+A terminal is needed for interactive attach; use history output in automation.
+.It Cm history
+Read the latest run by default, or select an archived run with
+.Fl Fl run Ar id .
+.Fl Fl stdout
+prints sanitized text;
+.Fl Fl json
+prints sanitized text and metadata as JSON.
+These modes also support memory-only history.
+.Fl Fl path
+prints the raw log path for a persisted run.
+Without an output mode, open the persisted raw log in an editor.
+.Fl e , Fl Fl editor Ar command
+chooses that editor.
+Editor, path, stdout, and JSON modes are mutually exclusive.
+Raw paths and editor mode are unavailable for memory-only runs.
+.It Cm list
+Print managed services, their kind, state, PID, TTY mode, restart policy, and effective directory.
+A listed service may have exited; inspect its state and history.
+.It Cm daemon
+Run the manager in the foreground under a process supervisor.
+The official installers integrate with systemd on Linux and launchd on macOS.
+.Fl Fl handoff
+replaces the running manager with the requesting executable while preserving runners.
+.Fl Fl relinquish
+asks the manager to exit with status 75 while preserving runners for another supervisor.
+These options are mutually exclusive.
+.It Cm shutdown
+Stop the manager and all managed runners.
+Enabled registrations remain for the next manager start; temporary definitions are removed.
+.El
+.Sh OPTIONS
+.Fl h , Fl Fl help
+prints help for the selected command.
+.Fl V , Fl Fl version
+prints the executable version when used without a subcommand.
+.Sh RUN OPTIONS
+.Bl -tag -width "--no-sync-rows-cols"
+.It Fl Fl name Ar name
+Service name; defaults to a sanitized form of the final working directory name.
+.It Fl Fl workdir Ar directory
+Process working directory; defaults to the invocation directory.
+.It Fl Fl no-tty
+Use pipes instead of the default PTY.
+.It Fl Fl no-sync-rows-cols
+Keep the initial PTY size instead of following the attach client's terminal size.
+.It Fl Fl restart Ar policy
+One of never, on-failure, or always.
+Default: never.
+.It Fl Fl persist-logs
+Persist raw output on disk.
+Default: memory-only output.
+.It Fl Fl log-max-bytes Ar bytes
+Maximum size of a persistent log segment.
+Default: 10485760; must be positive.
+.It Fl Fl log-max-files Ar count
+Number of archived persistent segments.
+Default: 3; must be positive.
+.It Fl Fl env Ar KEY=VALUE
+Override one manager environment value with a literal value.
+Repeat for multiple values; the last duplicate key wins.
+.El
+.Sh TUI CONTROLS
+Use Up/Down or j/k to select a service, r to restart, d to disable,
+a to attach, and h to browse history.
+Use q or Escape to leave a view.
+In history, Enter opens a run; PageUp/PageDown and Home/End navigate its content.
+The TUI does not edit service configuration.
+.Sh ENVIRONMENT
+.Bl -tag -width "EDITOR"
+.It Ev HOME
+Determines configuration and state paths for this user.
+XDG_CONFIG_HOME, XDG_STATE_HOME, and XDG_RUNTIME_DIR do not override these paths.
+.It Ev EDITOR
+Editor fallback after a command-line editor.
+Otherwise search PATH for editor, sensible-editor, nvim, vim, vi, nano, micro, then hx.
+Editor commands may contain arguments; the file path is appended as the last argument.
+.It Ev RUST_LOG
+Controls diagnostic logging.
+.El
+.Sh EXIT STATUS
+Zero indicates command success, not that the service will remain running.
+Errors return a nonzero status.
+Editor failures propagate their status.
+A manager intentionally relinquishing control exits with status 75.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+served edit -f /configs/api.json5
+served enable -f /configs/api.json5 --workdir /srv/api
+served run --name worker --workdir /srv/api -- ./worker
+served list
+served history api --json
+served restart api
+served disable worker
+.Ed
+.Sh SEE ALSO
+.Xr served 5

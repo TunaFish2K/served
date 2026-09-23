@@ -58,7 +58,8 @@
 - 公共协议 v9 增加 Start/Stop。runner additive v1 增加 StartService、StopService、
   ConfigureStopped 及默认缺省的能力和停止标记。旧 Stop 继续完整关闭 runner。
   旧 runner 的新操作报错，不自动迁移；disable 后重新 enable/run 会丢失内存历史。
-- TUI 增加 `s start`、`x stop`，保留 `r restart`、`d disable`；页脚按终端宽度换行。
+- TUI 采用 [无框单列设计规范](docs/TUI-DESIGN.md)：Enter 打开动作菜单，? 显示上下文帮助。
+  保留 a/s/x/r/h/d 快捷键，disable 默认取消；移除随机 tips，页脚固定一行。
 
 - 英文 `served(1)` 与 `served(5)` 是命令和配置参考的维护源，使用 mdoc；skill 的离线
   Markdown 参考由 mandoc 生成并提交。`make docs-check` 检查同步和引用。

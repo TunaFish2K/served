@@ -2465,3 +2465,100 @@ async fn wait_for_reaped_pid(pid: u32) {
     .await
     .expect("runner must be reaped, not retained as a zombie");
 }
+
+#[tokio::test]
+async fn tui_menu_drives_lifecycle_and_returns_from_attach() {
+    let mut harness = LifecycleHarness::new().await;
+    harness.config(true, "printf 'tui-ready\\n'; exec sleep 60", "never");
+    harness.ok(&["enable"]);
+    wait_for_state(&harness.paths, "api", ServiceState::Running).await;
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_served"));
+    command.env("HOME", &harness.home);
+    command.env("TERM", "xterm-256color");
+    command.cwd(&harness.directory);
+    struct TuiChild(Box<dyn PtyChild + Send + Sync>);
+    impl Drop for TuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = TuiChild(pair.slave.spawn_command(command).unwrap());
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let output_thread = std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        let mut terminal = vt100::Parser::new(24, 80, 0);
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    terminal.process(&buffer[..n]);
+                    if sender.send(terminal.screen().contents()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let wait_text = |needle: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut screen = String::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            screen = receiver
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("TUI did not display {needle}: {screen}"));
+            if screen.contains(needle) {
+                break;
+            }
+        }
+    };
+    let mut send = |keys: &[u8]| {
+        writer.write_all(keys).unwrap();
+        writer.flush().unwrap();
+    };
+    wait_text("enter actions");
+    send(b"\r?");
+    wait_text("Help");
+    send(b"qx");
+    harness.assert_stopped("api").await;
+    // Wait for the UI acknowledgment, not just the earlier runner state change.
+    wait_text("stopped api");
+    send(b"s");
+    wait_for_state(&harness.paths, "api", ServiceState::Running).await;
+    wait_text("started api");
+    // Cancel is the default, so Enter after d must not remove the service.
+    send(b"d\ra");
+    wait_for_attach_state(&harness.paths, "api", true).await;
+    send(&[3]);
+    wait_for_attach_state(&harness.paths, "api", false).await;
+    send(b"h");
+    wait_text("/ history");
+    send(b"\r");
+    wait_text("tui-ready");
+    // Close content and history, confirm disable from the original action menu.
+    send(b"qqdj\r");
+    wait_text("No services.");
+    let Response::Services { services } = client::request(&harness.paths, Request::List)
+        .await
+        .unwrap()
+    else {
+        panic!("list response");
+    };
+    assert!(services.is_empty());
+    send(b"q");
+    assert!(wait_for_pty_child(&mut child.0).success());
+    output_thread.join().unwrap();
+    harness.shutdown().await;
+}

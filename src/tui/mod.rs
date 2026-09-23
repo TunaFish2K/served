@@ -5,9 +5,7 @@ use std::{
 };
 
 use crate::{
-    client,
-    config::resolve_config_file,
-    editor,
+    client, editor,
     logs::DEFAULT_CHUNK_LIMIT,
     paths::ServedPaths,
     protocol::{Request, Response, Target},
@@ -22,7 +20,6 @@ use crossterm::{
         disable_raw_mode, enable_raw_mode, size,
     },
 };
-use rand::{seq::SliceRandom, thread_rng};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -33,25 +30,15 @@ mod model;
 mod view;
 
 use model::{
-    CrashLogPrompt, CrashPromptAction, HistoryView, LifecycleAction, PendingLifecycleAction,
-    crash_prompt_action,
+    CrashLogPrompt, CrashPromptAction, HistoryView, Intent, LifecycleAction, MainUi,
+    PendingLifecycleAction, Reader, ServiceAction, crash_prompt_action,
 };
-use view::{draw_history_content, draw_history_list, draw_main};
+use view::{draw_history_content, draw_history_list, draw_main, draw_reader};
 
 #[cfg(test)]
 use crate::protocol::{ServiceInfo, ServiceKind, ServiceState};
 #[cfg(test)]
-use view::{history_position, main_footer};
-
-const TIPS: &[&str] = &[
-    "services can share a working directory; select them by name",
-    "served run creates a temporary service without project configuration",
-    "the manager starts enabled services after a user-session restart",
-    "tty:false services support read-only attach",
-    "restart validates the new files before stopping the old process",
-    "history keeps live output separate from attach",
-    "persistent logs live below the XDG state directory",
-];
+use view::history_position;
 
 pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
     let result = match name {
@@ -118,10 +105,6 @@ async fn open_default_editor(path: &Path) -> Result<()> {
     editor::require_success(status)
 }
 
-fn random_tip() -> &'static str {
-    TIPS.choose(&mut thread_rng()).copied().unwrap_or(TIPS[0])
-}
-
 struct AttachScreen;
 
 impl AttachScreen {
@@ -165,14 +148,14 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     paths: ServedPaths,
 ) -> Result<()> {
-    let mut selected = 0_usize;
-    let mut services = Vec::new();
-    let mut notice = String::new();
+    let mut ui = MainUi {
+        unavailable: Some("Connecting to manager".to_owned()),
+        ..MainUi::default()
+    };
+    let mut refresh: Option<tokio::task::JoinHandle<Result<Response>>> = None;
     let mut crash_prompt: Option<CrashLogPrompt> = None;
     let mut pending_action: Option<PendingLifecycleAction> = None;
     let mut exit_when_idle = false;
-    let tip = random_tip();
-    let current_directory = std::env::current_dir().ok();
 
     loop {
         if pending_action
@@ -184,171 +167,159 @@ async fn run_loop(
                 .expect("finished lifecycle action")
                 .finish()
                 .await;
-            notice = outcome.notice;
-            if exit_when_idle && outcome.succeeded {
-                return Ok(());
+            if outcome.succeeded {
+                if exit_when_idle {
+                    return Ok(());
+                }
+                ui.notice = Some((outcome.notice, Instant::now() + Duration::from_secs(3)));
+            } else {
+                ui.help = None;
+                ui.message = Some(Reader::new("Operation failed", outcome.notice));
             }
             exit_when_idle = false;
         }
-
-        if pending_action.is_none() {
-            match client::request(&paths, Request::List).await {
-                Ok(Response::Services { services: latest }) => {
-                    services = latest;
-                    if !services.is_empty() {
-                        selected = selected.min(services.len() - 1);
-                    }
-                    if let Some(directory) = &current_directory {
-                        let local_config = resolve_config_file(directory);
-                        let enabled = services.iter().any(|service| {
-                            service.config_file.as_deref().is_some_and(|path| {
-                                local_config
-                                    .as_ref()
-                                    .is_some_and(|file| Path::new(path) == file.path())
-                            })
-                        });
-                        if local_config.is_some() && !enabled && notice.is_empty() {
-                            notice = "enable your service to manage it here!".to_owned();
-                        }
-                    }
+        if refresh
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            match refresh.take().expect("finished refresh").await {
+                Ok(Ok(Response::Services { services })) => ui.refresh(services),
+                Ok(Ok(response)) => {
+                    ui.unavailable = Some(format!("unexpected manager response: {response:?}"))
                 }
-                Err(error) => {
-                    if crash_prompt.is_none() {
-                        notice = format!("manager unavailable: {error}");
-                    }
-                }
-                Ok(response) => {
-                    if crash_prompt.is_none() {
-                        notice = format!("unexpected manager response: {response:?}");
-                    }
-                }
+                Ok(Err(error)) => ui.unavailable = Some(error.to_string()),
+                Err(error) => ui.unavailable = Some(format!("refresh failed: {error}")),
             }
         }
-
-        terminal.draw(|frame| draw_main(frame, &services, selected, tip, &notice))?;
+        if pending_action.is_none() && refresh.is_none() {
+            let paths = paths.clone();
+            refresh = Some(tokio::spawn(async move {
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    client::request(&paths, Request::List),
+                )
+                .await
+                .context("manager did not respond within two seconds")?
+            }));
+        }
+        let progress = pending_action
+            .as_ref()
+            .map(|action| action.progress_notice(exit_when_idle))
+            .unwrap_or_default();
+        terminal.draw(|frame| {
+            if crash_prompt.is_some() {
+                if let Some(message) = &mut ui.message {
+                    draw_reader(frame, message, "enter/y open log   n/esc cancel");
+                }
+            } else {
+                draw_main(frame, &mut ui, &progress);
+            }
+        })?;
         if !event::poll(Duration::from_millis(250)).context("poll terminal event")? {
             continue;
         }
         let Event::Key(key) = event::read().context("read terminal event")? else {
             continue;
         };
+        if key.kind == event::KeyEventKind::Release {
+            continue;
+        }
+        let area = terminal.size()?;
+        let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
+        let rows = view::body_rows(area);
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(pending) = &pending_action {
+            if pending_action.is_some() {
                 exit_when_idle = true;
-                notice = pending.progress_notice(true);
                 continue;
             }
             return Ok(());
         }
+        if !view::usable(area) && !matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            continue;
+        }
         if let Some(prompt) = crash_prompt.take() {
-            match crash_prompt_action(&key.code) {
+            match if key.code == KeyCode::Char('q') {
+                CrashPromptAction::Cancel
+            } else {
+                crash_prompt_action(&key.code)
+            } {
                 CrashPromptAction::Open => {
-                    notice = match open_editor_in_tui(terminal, &prompt.path).await {
-                        Ok(()) => prompt.warning,
-                        Err(error) => {
-                            format!("{}; cannot open latest.log: {error}", prompt.warning)
-                        }
-                    };
+                    ui.message = Some(Reader::new(
+                        "Attach unavailable",
+                        match open_editor_in_tui(terminal, &prompt.path).await {
+                            Ok(()) => prompt.warning,
+                            Err(error) => {
+                                format!("{}\nCannot open latest.log: {error}", prompt.warning)
+                            }
+                        },
+                    ));
                 }
-                CrashPromptAction::Cancel => {
-                    notice = prompt.warning;
-                }
-                CrashPromptAction::Ignore => crash_prompt = Some(prompt),
-            }
-            continue;
-        }
-        if let Some(pending) = &pending_action {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    exit_when_idle = true;
-                    notice = pending.progress_notice(true);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if !services.is_empty() {
-                        selected = (selected + 1).min(services.len() - 1);
+                CrashPromptAction::Cancel => ui.message = None,
+                CrashPromptAction::Ignore => {
+                    if let Some(message) = &mut ui.message {
+                        message.key(key.code, rows);
                     }
+                    crash_prompt = Some(prompt);
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    selected = selected.saturating_sub(1);
-                }
-                _ => {}
             }
             continue;
         }
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !services.is_empty() {
-                    selected = (selected + 1).min(services.len() - 1);
+        match ui.key(key.code, pending_action.is_some(), rows) {
+            Intent::None => {}
+            Intent::Quit => {
+                if pending_action.is_some() {
+                    exit_when_idle = true;
+                } else {
+                    return Ok(());
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                selected = selected.saturating_sub(1);
-            }
-            KeyCode::Char('s') | KeyCode::Char('x') => {
-                if let Some(service) = services.get(selected) {
-                    let action = if key.code == KeyCode::Char('s') {
-                        LifecycleAction::Start
-                    } else {
-                        LifecycleAction::Stop
-                    };
-                    let pending = start_lifecycle_action(&paths, action, service.name.clone());
-                    notice = pending.progress_notice(false);
-                    pending_action = Some(pending);
+            Intent::Act(action, name) => {
+                if let Some(lifecycle) = action.lifecycle() {
+                    ui.notice = None;
+                    if let Some(refresh) = refresh.take() {
+                        refresh.abort();
+                    }
+                    pending_action = Some(start_lifecycle_action(&paths, lifecycle, name));
+                    continue;
                 }
-            }
-            KeyCode::Char('r') => {
-                if let Some(service) = services.get(selected) {
-                    let name = service.name.clone();
-                    let pending = start_lifecycle_action(&paths, LifecycleAction::Restart, name);
-                    notice = pending.progress_notice(false);
-                    pending_action = Some(pending);
-                }
-            }
-            KeyCode::Char('d') => {
-                if let Some(service) = services.get(selected) {
-                    let name = service.name.clone();
-                    let pending = start_lifecycle_action(&paths, LifecycleAction::Disable, name);
-                    notice = pending.progress_notice(false);
-                    pending_action = Some(pending);
-                }
-            }
-            KeyCode::Char('a') => {
-                if let Some(service) = services.get(selected) {
-                    match client::attach(&paths, service.name.clone()).await {
-                        Ok(session) => {
-                            notice = "".to_owned();
-                            attach_in_tui(terminal, &paths, service.name.clone(), session).await?;
-                        }
-                        Err(error) => {
+                match action {
+                    ServiceAction::Attach => {
+                        let result = match client::attach(&paths, name.clone()).await {
+                            Ok(session) => attach_in_tui(terminal, &paths, name, session).await,
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = result {
                             if let Some(unavailable) =
                                 error.downcast_ref::<client::AttachUnavailable>()
                             {
                                 let warning = crash_warning(unavailable);
                                 if let Some(path) = unavailable.latest_log.clone() {
-                                    notice = format!("{warning}; open latest.log? [Y/n]");
+                                    ui.message = Some(Reader::new(
+                                        "Attach unavailable",
+                                        format!("{warning}\n\nOpen latest.log?"),
+                                    ));
                                     crash_prompt = Some(CrashLogPrompt { warning, path });
                                 } else {
-                                    notice = format!(
-                                        "{warning}; latest.log unavailable, use h history or enable persist_logs"
-                                    );
+                                    ui.message = Some(Reader::new(
+                                        "Attach unavailable",
+                                        format!(
+                                            "{warning}\n\nNo latest.log. Use history or enable persist_logs."
+                                        ),
+                                    ));
                                 }
                             } else {
-                                notice = format!("attach: {error}");
+                                ui.message = Some(Reader::new("Attach failed", error.to_string()));
                             }
                         }
                     }
-                }
-            }
-            KeyCode::Char('h') => {
-                if let Some(service) = services.get(selected) {
-                    match history_in_tui(terminal, &paths, &service.name, tip).await {
-                        Ok(()) => notice.clear(),
-                        Err(error) => notice = format!("history: {error}"),
+                    ServiceAction::History => {
+                        if let Err(error) = history_in_tui(terminal, &paths, &name).await {
+                            ui.message = Some(Reader::new("History failed", error.to_string()));
+                        }
                     }
+                    _ => unreachable!("lifecycle actions handled above"),
                 }
             }
-            _ => {}
         }
     }
 }
@@ -382,7 +353,6 @@ async fn history_in_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     paths: &ServedPaths,
     name: &str,
-    tip: &str,
 ) -> Result<()> {
     let response = client::request(
         paths,
@@ -396,13 +366,21 @@ async fn history_in_tui(
     };
     let mut selected = 0_usize;
     let mut view = None;
+    let mut help: Option<Reader> = None;
+    let mut message: Option<Reader> = None;
 
     loop {
-        if let Some(history_view) = view.as_ref() {
-            terminal.draw(|frame| draw_history_content(frame, name, history_view, tip))?;
-        } else {
-            terminal.draw(|frame| draw_history_list(frame, name, &records, selected, tip))?;
-        }
+        terminal.draw(|frame| {
+            if let Some(help) = &mut help {
+                draw_reader(frame, help, "↑↓ scroll   ?/esc/q back");
+            } else if let Some(message) = &mut message {
+                draw_reader(frame, message, "↑↓ scroll   esc/q back");
+            } else if let Some(history_view) = view.as_ref() {
+                draw_history_content(frame, name, history_view);
+            } else {
+                draw_history_list(frame, name, &records, selected);
+            }
+        })?;
         if !event::poll(Duration::from_millis(250)).context("poll history terminal event")? {
             continue;
         }
@@ -410,6 +388,45 @@ async fn history_in_tui(
             continue;
         };
 
+        if key.kind == event::KeyEventKind::Release {
+            continue;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(());
+        }
+        let size = terminal.size()?;
+        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+        let rows = view::body_rows(area);
+        if !view::usable(area) && !matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            continue;
+        }
+        if let Some(reader) = &mut help {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | '?')) {
+                help = None;
+            } else {
+                reader.key(key.code, rows);
+            }
+            continue;
+        }
+        if let Some(reader) = &mut message {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                message = None;
+            } else {
+                reader.key(key.code, rows);
+            }
+            continue;
+        }
+        if key.code == KeyCode::Char('?') {
+            help = Some(Reader::new(
+                "History / help",
+                if view.is_some() {
+                    "Up/Down, j/k  Scroll logical lines\nPgUp/PgDn  Page\ng/Home  First line\nG/End  Last line\nEsc/q  Back to history\n\nPosition counts logical lines, not wrapped rows."
+                } else {
+                    "Up/Down, j/k  Select run\nEnter  Read output\nEsc/q  Back to service\n\ndisk: persistent log\nmemory: bounded in-memory history"
+                },
+            ));
+            continue;
+        }
         if let Some(history_view) = view.as_mut() {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => view = None,
@@ -418,21 +435,28 @@ async fn history_in_tui(
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     history_view.scroll = history_view.scroll.saturating_add(1);
-                    load_history_if_needed(paths, name, history_view).await?;
+                    if let Err(error) = load_history_if_needed(paths, name, history_view).await {
+                        message = Some(Reader::new("History failed", error.to_string()));
+                    }
                     clamp_history_scroll(history_view);
                 }
                 KeyCode::PageUp => {
-                    history_view.scroll = history_view.scroll.saturating_sub(10);
+                    history_view.scroll = history_view.scroll.saturating_sub(rows as u64);
                 }
                 KeyCode::PageDown => {
-                    history_view.scroll = history_view.scroll.saturating_add(10);
-                    load_history_if_needed(paths, name, history_view).await?;
+                    history_view.scroll = history_view.scroll.saturating_add(rows as u64);
+                    if let Err(error) = load_history_if_needed(paths, name, history_view).await {
+                        message = Some(Reader::new("History failed", error.to_string()));
+                    }
                     clamp_history_scroll(history_view);
                 }
                 KeyCode::Home | KeyCode::Char('g') => history_view.scroll = 0,
                 KeyCode::End | KeyCode::Char('G') => {
                     while !history_view.eof {
-                        load_history_chunk(paths, name, history_view).await?;
+                        if let Err(error) = load_history_chunk(paths, name, history_view).await {
+                            message = Some(Reader::new("History failed", error.to_string()));
+                            break;
+                        }
                     }
                     history_view.scroll = history_view.total_lines.saturating_sub(1);
                 }
@@ -452,8 +476,12 @@ async fn history_in_tui(
             KeyCode::Enter => {
                 if let Some(record) = records.get(selected) {
                     let mut history_view = HistoryView::new(record.id.clone());
-                    load_history_chunk(paths, name, &mut history_view).await?;
-                    view = Some(history_view);
+                    match load_history_chunk(paths, name, &mut history_view).await {
+                        Ok(()) => view = Some(history_view),
+                        Err(error) => {
+                            message = Some(Reader::new("History failed", error.to_string()))
+                        }
+                    }
                 }
             }
             _ => {}
@@ -711,13 +739,19 @@ mod tests {
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
+        use unicode_width::UnicodeWidthStr;
+        let buffer = terminal.backend().buffer();
+        let mut result = String::new();
+        for y in 0..buffer.area.height {
+            let mut x = 0;
+            while x < buffer.area.width {
+                let symbol = buffer[(x, y)].symbol();
+                result.push_str(symbol);
+                x += symbol.width().max(1) as u16;
+            }
+            result.push('\n');
+        }
+        result
     }
 
     #[test]
@@ -726,45 +760,6 @@ mod tests {
         assert_eq!(history_position(0, 3), (1, 3));
         assert_eq!(history_position(1, 3), (2, 3));
         assert_eq!(history_position(99, 3), (3, 3));
-    }
-
-    #[test]
-    fn lifecycle_footer_remains_visible_in_a_narrow_terminal() {
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
-        terminal
-            .draw(|frame| draw_main(frame, &[service_info(false)], 0, "test tip", ""))
-            .unwrap();
-        let text = buffer_text(&terminal);
-        for action in [
-            "s start",
-            "x stop",
-            "r restart",
-            "d disable",
-            "a attach",
-            "h history",
-            "q/Esc quit",
-            "tips: test tip",
-        ] {
-            assert!(text.contains(action), "missing {action}: {text}");
-        }
-    }
-
-    #[test]
-    fn main_footer_describes_available_actions() {
-        assert_eq!(main_footer(&[], 0), "up/down/j/k move   q/Esc quit");
-
-        let tty_services = vec![service_info(true)];
-        let tty_footer = main_footer(&tty_services, 0);
-        assert!(tty_footer.contains("s start"));
-        assert!(tty_footer.contains("x stop"));
-        assert!(tty_footer.contains("r restart"));
-        assert!(tty_footer.contains("d disable"));
-        assert!(tty_footer.contains("a attach"));
-        assert!(tty_footer.contains("h history"));
-        assert!(!tty_footer.contains("unavailable"));
-
-        let pipe_services = vec![service_info(false)];
-        assert!(main_footer(&pipe_services, 0).contains("a attach"));
     }
 
     #[test]
@@ -840,59 +835,228 @@ mod tests {
     }
 
     #[test]
-    fn main_render_keeps_tip_and_contextual_footer() {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        let services = vec![service_info(true)];
-        terminal
-            .draw(|frame| draw_main(frame, &services, 0, "render tip", ""))
-            .expect("draw");
-
-        let text = buffer_text(&terminal);
-        assert!(text.contains("tips: render tip"));
-        assert!(text.contains("r restart"));
-        assert!(text.contains("a attach"));
-        assert!(text.contains("q/Esc quit"));
-        assert!(!text.contains("recent output"));
-        assert!(!text.contains("ready"));
-
-        let mut temporary = service_info(false);
-        temporary.kind = ServiceKind::Temporary;
-        terminal
-            .draw(|frame| draw_main(frame, &[temporary], 0, "render tip", ""))
-            .expect("draw temporary service");
-        assert!(buffer_text(&terminal).contains("temporary"));
+    fn borderless_layout_adapts_and_preserves_service_states() {
+        for (width, height) in [(40, 10), (80, 24), (120, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut ui = MainUi::default();
+            ui.refresh(vec![service_info(true)]);
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            let text = buffer_text(&terminal);
+            for expected in [
+                "served",
+                "api",
+                "running",
+                "enabled",
+                "enter actions",
+                "? help",
+                "q quit",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "missing {expected} at {width}x{height}: {text}"
+                );
+            }
+            assert!(!text.contains("tips:"));
+            assert!(!text.contains("ready"));
+            assert!(
+                !text
+                    .chars()
+                    .any(|c| matches!(c, '│' | '─' | '┌' | '┐' | '└' | '┘'))
+            );
+            let buffer = terminal.backend().buffer();
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
+            );
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .all(|cell| cell.bg == ratatui::style::Color::Reset)
+            );
+        }
     }
 
     #[test]
-    fn main_render_shows_lifecycle_progress() {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        let services = vec![service_info(true)];
-        let notice = LifecycleAction::Disable.progress_notice("api", false);
-
+    fn scrolling_long_unicode_lists_keeps_status_visible_after_resize() {
+        let mut ui = MainUi::default();
+        ui.refresh(
+            (0..50)
+                .map(|i| {
+                    let mut service = service_info(false);
+                    service.name = format!("{i:02}-服务名称很长很长很长很长");
+                    service.directory =
+                        format!("/very/long/path/{}/project-end", "项目/".repeat(40));
+                    service.state = ServiceState::Failed;
+                    service
+                })
+                .collect(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        for _ in 0..49 {
+            ui.key(KeyCode::Down, false, 32);
+        }
         terminal
-            .draw(|frame| draw_main(frame, &services, 0, "render tip", &notice))
-            .expect("draw");
-
-        assert!(buffer_text(&terminal).contains("disabling api..."));
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        terminal.backend_mut().resize(40, 10);
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("49-服务"));
+        assert!(text.contains("failed"));
+        assert!(text.contains("project-end"));
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.fg == ratatui::style::Color::Red)
+        );
+        ui.key(KeyCode::Enter, false, 2);
+        ui.key(KeyCode::End, false, 2);
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        assert!(buffer_text(&terminal).contains("enabled"));
+        assert!(matches!(ui.page, model::Page::Actions { scroll, .. } if scroll > 6));
     }
 
     #[test]
-    fn history_render_shows_position_tip_and_footer() {
-        let backend = TestBackend::new(100, 16);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        let mut view = HistoryView::new("latest".to_owned());
-        view.content = "first\nsecond\nthird".to_owned();
-        view.total_lines = 3;
-        view.scroll = 1;
+    fn actions_help_confirmation_and_errors_preserve_context() {
+        use model::Page;
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        let mut ui = MainUi::default();
+        ui.refresh(vec![service_info(true)]);
+        assert_eq!(ui.key(KeyCode::Enter, false, 2), Intent::None);
+        assert_eq!(
+            ui.key(KeyCode::Enter, false, 2),
+            Intent::Act(ServiceAction::Attach, "api".into())
+        );
+        for _ in 0..5 {
+            ui.key(KeyCode::Down, false, 2);
+        }
         terminal
-            .draw(|frame| draw_history_content(frame, "api", &view, "history tip"))
-            .expect("draw");
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        assert!(buffer_text(&terminal).contains("Disable"));
+        ui.key(KeyCode::Char('?'), false, 2);
+        ui.key(KeyCode::PageDown, false, 2);
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        ui.key(KeyCode::Char('?'), false, 2);
+        assert!(matches!(ui.page, Page::Actions { selected: 5, .. }));
+        ui.key(KeyCode::Enter, false, 2);
+        assert!(matches!(
+            ui.page,
+            Page::ConfirmDisable { confirm: false, .. }
+        ));
+        assert_eq!(ui.key(KeyCode::Enter, false, 2), Intent::None);
+        assert!(matches!(ui.page, Page::Actions { selected: 5, .. }));
+        ui.key(KeyCode::Enter, false, 2);
+        ui.key(KeyCode::Down, false, 2);
+        assert_eq!(
+            ui.key(KeyCode::Enter, false, 2),
+            Intent::Act(ServiceAction::Disable, "api".into())
+        );
+        ui.key(KeyCode::Enter, false, 2);
+        ui.key(KeyCode::Down, false, 2);
+        ui.message = Some(Reader::new("Failed", "error detail\n".repeat(30)));
+        ui.key(KeyCode::End, false, 2);
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        assert!(ui.message.as_ref().unwrap().scroll > 0);
+        ui.key(KeyCode::Esc, false, 2);
+        assert!(matches!(ui.page, Page::Actions { selected: 1, .. }));
+    }
 
+    #[test]
+    fn refresh_preserves_identity_and_disconnection_blocks_actions() {
+        let a = service_info(false);
+        let mut b = a.clone();
+        b.name = "worker".into();
+        let mut ui = MainUi::default();
+        ui.refresh(vec![a.clone(), b.clone()]);
+        ui.key(KeyCode::Down, false, 10);
+        ui.refresh(vec![b.clone(), a.clone()]);
+        assert_eq!(ui.services[ui.selected].name, "worker");
+        ui.unavailable = Some("connection refused".into());
+        for action in ServiceAction::ALL {
+            assert_eq!(ui.key(KeyCode::Char(action.key()), false, 10), Intent::None);
+        }
+        ui.key(KeyCode::Enter, false, 10);
+        assert_eq!(ui.key(KeyCode::Enter, false, 10), Intent::None);
+        ui.refresh(vec![b, a.clone()]);
+        assert_eq!(
+            ui.key(KeyCode::Enter, false, 10),
+            Intent::Act(ServiceAction::Attach, "worker".into())
+        );
+        ui.refresh(vec![a]);
+        assert!(matches!(ui.page, model::Page::Services));
+        ui.refresh(vec![]);
+        assert_eq!(ui.selected, 0);
+        assert_eq!(ui.key(KeyCode::Char('s'), false, 10), Intent::None);
+    }
+
+    #[test]
+    fn pending_operations_allow_navigation_help_and_quit_but_no_new_action() {
+        let mut ui = MainUi::default();
+        ui.refresh(vec![service_info(false)]);
+        for action in ServiceAction::ALL {
+            assert_eq!(ui.key(KeyCode::Char(action.key()), true, 10), Intent::None);
+        }
+        ui.key(KeyCode::Enter, true, 10);
+        assert_eq!(ui.key(KeyCode::Enter, true, 10), Intent::None);
+        ui.key(KeyCode::Char('?'), true, 10);
+        assert!(
+            ui.help
+                .as_ref()
+                .unwrap()
+                .content
+                .contains("Operation in progress")
+        );
+        ui.key(KeyCode::Esc, true, 10);
+        ui.key(KeyCode::Esc, true, 10);
+        assert_eq!(ui.key(KeyCode::Char('q'), true, 10), Intent::Quit);
+    }
+
+    #[test]
+    fn main_render_shows_lifecycle_progress_and_expires_success() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut ui = MainUi::default();
+        ui.refresh(vec![service_info(false)]);
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, "stopping api..."))
+            .unwrap();
+        assert!(buffer_text(&terminal).contains("stopping api..."));
+        let now = Instant::now();
+        ui.notice = Some(("stopped api".into(), now + Duration::from_secs(3)));
+        assert_eq!(ui.notice(now), "stopped api");
+        assert_eq!(ui.notice(now + Duration::from_secs(3)), "");
+    }
+
+    #[test]
+    fn history_render_shows_logical_position_and_contextual_help() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        let mut history = HistoryView::new("latest".into());
+        history.content = "first\nsecond\nthird".into();
+        history.total_lines = 3;
+        history.scroll = 1;
+        terminal
+            .draw(|frame| draw_history_content(frame, "api", &history))
+            .unwrap();
         let text = buffer_text(&terminal);
+        assert!(text.contains("second"));
         assert!(text.contains("2/3"));
-        assert!(text.contains("tips: history tip"));
-        assert!(text.contains("Esc/q back"));
+        assert!(text.contains("? help"));
+        assert!(text.contains("esc/q back"));
     }
 }

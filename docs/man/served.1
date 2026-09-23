@@ -191,7 +191,13 @@ Repeat for multiple values; the last duplicate key wins.
 .Sh TUI CONTROLS
 Use Up/Down or j/k to select a service, s to start, x to stop, r to restart, d to disable,
 a to attach, and h to browse history.
+Enter opens the action menu; ? opens contextual help.
+Disable requires confirmation and defaults to Cancel.
 Use q or Escape to leave a view.
+The borderless layout requires at least 40 columns and 10 rows.
+Long service details can be read on the actions page with PageUp/PageDown.
+While the manager is unavailable, the list is marked stale and service actions are blocked.
+Success messages clear after three seconds; errors remain until dismissed.
 In history, Enter opens a run; PageUp/PageDown and Home/End navigate its content.
 The TUI does not edit service configuration.
 .Sh ENVIRONMENT

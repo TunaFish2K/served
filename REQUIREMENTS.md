@@ -126,11 +126,7 @@ manager 在恢复、enable 和 restart 时把自动发现的 warning 写入 trac
 打开全局服务管理 TUI。它列出管理器已知的所有受管服务及其 `enabled` 或 `temporary` 类型。
 与当前工作目录无关。
 
-如果当前目录包含尚未启用的服务配置，TUI 可以显示如下提示：
-
-```text
-enable your service to manage it here!
-```
+空列表提示使用 `served enable` 或 `served run` 注册服务。
 
 未启用且未通过 `served run` 创建的目录不能由管理器控制。
 
@@ -312,24 +308,16 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 
 ## TUI
 
-全局 TUI 提供：
+全局 TUI 遵循 `docs/TUI-DESIGN.md` 的无框单列规范：
 
-- 受管服务列表、类型和当前状态；
-- start（`s`）、stop（`x`）和 restart（`r`）操作；
-- disable 操作；
-- 面向 PTY 和管道服务的 attach 操作；
-- 历史列表和可滚动的历史内容页，并显示逻辑行位置；
-- 通过外部编辑器命令 `served edit` 编辑配置；
-- 一行轮换显示的 tips：
-
-```text
-tips: <tip text>
-```
-
-tips 内置。每次启动 TUI 时随机选择一条；允许重复，不保存 tip 位置或其他管理器状态。
-
-TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示导航和退出；选中服务后，
-显示 start、stop、restart、disable、attach 和 history。窄终端中操作栏按宽度换行。
+- 服务列表显示名称和状态，底部显示选中项路径和类型；
+- Enter 打开固定顺序的操作菜单：Attach、Start、Stop、Restart、History、Disable；
+- 保留 a/s/x/r/h/d 直接快捷键，Disable 默认取消并确认后执行；
+- ? 显示上下文帮助；历史列表、内容、帮助、错误和确认复用无框页面；
+- 单行页脚只展示常用入口；移除随机 tips；
+- 进行中显示进度，成功提示三秒后消失，错误完整可读并由用户关闭；
+- manager 断连时旧数据标记 stale，重连前禁止服务操作；
+- 支持 40×10、80×24、120×40，按显示宽度截断名称和路径，菜单中可查看完整信息。
 
 `served edit` 是 CLI 编辑流程，不是 TUI 页面。生成的 JSON5 模板为每个字段写入行内说明，
 因此外部编辑器是唯一的配置编辑入口。
@@ -454,10 +442,10 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 8. PTY 服务可以 attach、detach 和 restart，且不会丢失管理器。
 9. 第二个 attach 客户端不能向活动会话写入。
 10. 替换管理器后，所有启用服务都能通过接管运行器恢复。
-11. TUI 的 tips 行在每次启动时从内置 tips 中随机选择一条。
+11. TUI 使用无框单列模板和单行页脚，不显示随机 tips；支持最小 40×10 窗口。
 12. 未启用的服务目录不能由全局管理器控制。
-13. 全局 TUI 操作栏根据是否选中服务显示不同内容，并为两种 `tty` 模式显示 attach 和
-    history。
+13. 全局 TUI 的 Enter 菜单和 ? 帮助覆盖全部动作；两种 `tty` 模式均可访问 attach 和
+    history。Disable 默认取消，确认后才发送请求。
 14. `served edit` 按 `-e/--editor COMMAND`、`$EDITOR` 和约定的 `PATH` 候选顺序打开选中的
     配置文件，并把配置路径作为最后一个参数追加。
 15. `served edit --path` 创建缺失的带注释模板，并只打印绝对路径；`--path` 与 `--editor`
@@ -534,7 +522,7 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 52. stop 取消自动重启退避；快速退出、连续 stop/start 和输出背压不得导致通道错误或旧
     事件污染。停止失败保留控制能力并返回错误。
 53. 新命令遇到旧 runner 返回迁移提示，保留 PID、注册和历史，不发送旧 Stop 等变更请求。
-54. CLI 支持名称或目录，不接受 -f；TUI 支持 s/x 及结果提示，窄终端显示完整操作栏。
+54. CLI 支持名称或目录，不接受 -f；TUI 支持 s/x 及结果提示，窄终端通过动作菜单和帮助访问全部操作。
 
 ## 手册与 AI 使用文档
 

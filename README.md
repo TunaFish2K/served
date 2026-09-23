@@ -304,9 +304,16 @@ Changes to shell startup files such as `/etc/profile` do not update a running ma
 
 ## Attach and TUI
 
-The global TUI shows service state and provides start (`s`), stop (`x`), restart (`r`), disable (`d`), attach, history, and rotating
-`tips:` messages. The footer shows the available actions. A narrow terminal can wrap the
-footer across enough lines to show all actions.
+The borderless TUI shows service names and states, with the selected service's directory and type below.
+Press Enter for actions or `?` for contextual help. Use arrows or `j/k` to move and Esc/q to go back.
+The direct shortcuts remain: `a` attach, `s` start, `x` stop, `r` restart, `h` history, and `d` disable.
+Disable requires confirmation and defaults to Cancel. Operations report progress; success messages clear
+after three seconds, while errors remain readable until dismissed. During a manager disconnection,
+the last list is marked stale and service actions are blocked until reconnection.
+
+The minimum usable size is 40×10. Long names and paths are shortened in the list; the actions page
+shows full details, scrollable with PgUp/PgDn. There are no random tips or decorative panels.
+See [TUI design rules](docs/TUI-DESIGN.md) for the shared page templates and interaction contract.
 
 TTY services provide a writable PTY attach. Pipe services provide a read-only attach. Pipe services
 can have multiple read-only observers. Both modes use the terminal's alternate screen.

@@ -18,9 +18,9 @@
 | 8 | `cargo test` | `manager_smoke::pty_service_accepts_one_attach_session` |
 | 9 | `cargo test` | `manager_smoke::pty_service_accepts_one_attach_session` |
 | 10 | `cargo test` | `manager_smoke::manager_crash_keeps_runner_and_service_alive_for_adoption` |
-| 11 | `cargo test` | TUI model/render tests；随机选择由 `rand` 启动路径执行 |
+| 11 | `cargo test` | `tui::tests::borderless_layout_adapts_and_preserves_service_states` |
 | 12 | `cargo test` | `client::rejects_directory_without_managed_service` |
-| 13 | `cargo test` | `tui::main_footer_describes_available_actions`、`tui::main_render_keeps_tip_and_contextual_footer` |
+| 13 | `cargo test` | `tui::tests::actions_help_confirmation_and_errors_preserve_context` |
 | 14 | `cargo test` | editor 优先级、`PATH` 候选顺序、CLI parser 和 `config_filename_cli` 路径测试 |
 | 15 | `cargo test` | `cli::edit_path_creates_template_without_editor`、Clap 冲突定义 |
 | 16 | `cargo test` | `config::template_does_not_rewrite_existing_source`、`config::template_keeps_deprecated_config_without_creating_current_file` |
@@ -61,7 +61,7 @@
 | 51 | `cargo test` | `manager_smoke::stopped_services_survive_adoption_but_only_enabled_services_return_after_shutdown`、`stopped_runner_replacement_does_not_launch_a_process`、`handoff_reaps_stopped_runners_and_preserves_manual_stop` |
 | 52 | `cargo test` | `manager_smoke::stop_cancels_backoff_and_start_stop_handle_quick_exits`、runner 停止失败与有界事件队列测试 |
 | 53 | `cargo test` | `manager::tests::old_runner_rejects_start_stop_without_receiving_a_mutating_request`、runner v1 能力缺省测试 |
-| 54 | `cargo test` | CLI start/stop parser、共享目录歧义测试、`tui::tests::lifecycle_footer_remains_visible_in_a_narrow_terminal` |
+| 54 | `cargo test` | CLI start/stop parser、共享目录歧义测试、`tui::tests::pending_operations_allow_navigation_help_and_quit_but_no_new_action` |
 
 ## 重写兼容 gate
 
@@ -91,3 +91,11 @@
 - `manager_smoke::handoff_reaps_stopped_runners_and_preserves_manual_stop` 覆盖 enabled/temporary：
   stop → handoff → 杀死 runner → 重建且保持停止 → start，以及第二次 handoff 后的 disable。
   测试要求旧 PID 被回收，不仅是业务进程已停止。
+
+## 无框 TUI
+
+`docs/TUI-DESIGN.md` 是页面和交互规范。`tui::tests` 与 `tui::view::tests` 覆盖窄屏、
+Unicode、选择身份、断连保护、菜单/帮助/确认/错误返回、成功提示过期和异步动作限制。
+
+`manager_smoke::tui_menu_drives_lifecycle_and_returns_from_attach` 在真实 PTY 中验证菜单、帮助、
+start/stop、默认取消、attach 返回、历史阅读、禁用确认与退出。

@@ -234,7 +234,7 @@ runner 会记录最近 60 秒内的非零退出和 worker 启动或运行错误�
 失败时出现，不改变服务列表状态。
 
 按 `h` 后先选择 `latest` 或时间归档，再按 `Enter` 查看清理后的日志内容。内容页支持
-上下键、`j/k`、`PgUp/PgDn` 和 `g/G`，并在内容与 `tips:` 之间显示当前逻辑行位置
+上下键、`j/k`、`PgUp/PgDn` 和 `g/G`，并在底部显示当前逻辑行位置
 `current/total`。总行数按清理后的 `str::lines()` 计算，视觉换行不会改变总数。历史页
 与 attach 分离，attach 不会回放旧的 PTY 控制状态。
 
@@ -371,10 +371,15 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 
 ## TUI 操作
 
-全局 TUI 底部同时显示随机 `tips:` 和上下文操作栏。没有选中服务时，操作栏显示
-`up/down/j/k move` 与退出。选中服务后会显示 `s start`、`x stop`、`r restart`、`d disable`、`a attach`
-和 `h history`。TTY 服务的 attach 可向服务写入；`tty: false` 服务的 attach 只读；两者
-都进入终端第二屏。窄终端会按宽度自动换行，显示全部操作。
+无框主屏显示服务名称和状态，底部显示选中项的目录和类型。上下键或 `j/k` 移动，
+Enter 打开操作菜单，`?` 查看当前页面帮助，Esc/q 返回。保留直接快捷键：`a` attach、
+`s` start、`x` stop、`r` restart、`h` history、`d` disable。禁用需要确认，默认取消。
+TTY attach 可写入，管道 attach 只读，两者都使用终端第二屏。
+
+操作期间显示进度并禁止重复提交；成功提示三秒后消失，错误完整显示到关闭为止。
+manager 断连时保留旧列表并标记 stale，重连前禁止服务操作。最小可用尺寸为 40×10。
+主屏截断长名称和路径，操作页提供完整信息，可用 PgUp/PgDn 滚动。不再显示随机 tips。
+新页面必须遵循 [TUI 设计规范](docs/TUI-DESIGN.md)，复用固定模板和组件。
 
 主 TUI 不再编辑服务配置。`served edit` 会直接把选中的配置文件交给外部编辑器：
 `-e/--editor COMMAND` 优先使用指定命令，其次使用 `$EDITOR`，最后按 `editor`、

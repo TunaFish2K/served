@@ -2083,3 +2083,302 @@ async fn wait_for_attach_state(paths: &ServedPaths, name: &str, expected: bool) 
 fn same_state(left: &ServiceState, right: &ServiceState) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
 }
+
+struct LifecycleHarness {
+    _root: TempDir,
+    home: std::path::PathBuf,
+    directory: std::path::PathBuf,
+    paths: ServedPaths,
+    daemon: DaemonGuard,
+}
+
+impl LifecycleHarness {
+    async fn new() -> Self {
+        let root = test_root();
+        let home = root.path().join("home");
+        let directory = root.path().join("service");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir(&directory).unwrap();
+        let paths = ServedPaths {
+            config_home: home.join(".config"),
+            runtime_dir: home.join(".local/state/served/runtime"),
+            state_home: home.join(".local/state"),
+        };
+        let daemon = DaemonGuard(Self::spawn(&home));
+        wait_for_path(&paths.socket_path()).await;
+        Self {
+            _root: root,
+            home,
+            directory,
+            paths,
+            daemon,
+        }
+    }
+
+    fn spawn(home: &Path) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_served"))
+            .arg("daemon")
+            .env("HOME", home)
+            .spawn()
+            .unwrap()
+    }
+
+    fn cli(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_served"))
+            .args(args)
+            .env("HOME", &self.home)
+            .current_dir(&self.directory)
+            .output()
+            .unwrap()
+    }
+
+    fn ok(&self, args: &[&str]) {
+        let result = self.cli(args);
+        assert!(result.status.success(), "{args:?}: {result:?}");
+    }
+
+    fn config(&self, tty: bool, command: &str, restart: &str) {
+        fs::write(
+            self.directory.join(".served.json5"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "api", "command": command, "tty": tty, "restart": restart, "persist_logs": tty
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    async fn status(&self, name: &str) -> served::runner_protocol::RunnerStatus {
+        let response = served::runner_protocol::request(
+            &self.paths.runner_socket(name),
+            name,
+            served::runner_protocol::RunnerRequest::Status,
+        )
+        .await
+        .unwrap();
+        let served::runner_protocol::RunnerResponse::Status { status } = response else {
+            panic!("status")
+        };
+        status
+    }
+
+    async fn assert_stopped(&self, name: &str) {
+        wait_for_state(&self.paths, name, ServiceState::Stopped).await;
+        let status = self.status(name).await;
+        assert!(status.manually_stopped);
+        assert!(status.pid.is_none());
+        assert!(self.paths.runner_metadata(name).exists());
+    }
+
+    async fn shutdown(&mut self) {
+        self.ok(&["shutdown"]);
+        for name in ["api", "temporary"] {
+            assert!(!self.paths.runner_socket(name).exists());
+        }
+        wait_for_absent(&self.paths.socket_path()).await;
+        self.daemon.0.wait().unwrap();
+        for name in ["api", "temporary"] {
+            wait_for_absent(&self.paths.runner_socket(name)).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn start_stop_preserve_registration_history_and_reload_only_when_stopped() {
+    for tty in [false, true] {
+        let mut h = LifecycleHarness::new().await;
+        h.config(tty, "printf 'first-run\\n'; exec sleep 60", "always");
+        h.ok(&["enable"]);
+        wait_for_output_tail(&h.paths, "api", "first-run").await;
+        let original = h.status("api").await;
+        let mut attach = client::attach(&h.paths, "api".to_owned()).await.unwrap();
+        read_until(&mut attach.stream, b"first-run").await;
+        fs::write(h.directory.join(".served.json5"), "invalid JSON5").unwrap();
+        h.ok(&["start"]); // Running start must not read invalid config or replace the PID.
+        assert_eq!(h.status("api").await.pid, original.pid);
+        h.ok(&["stop"]);
+        h.ok(&["stop", "api"]);
+        h.assert_stopped("api").await;
+        wait_for_process_exit(original.pid.unwrap()).await;
+        let mut tail = Vec::new();
+        timeout(Duration::from_secs(3), attach.stream.read_to_end(&mut tail))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(h.paths.registry_dir().join("api").exists());
+        assert!(
+            read_history(&h.paths, "api", "latest", 1024)
+                .await
+                .contains("first-run")
+        );
+        assert!(!h.cli(&["start"]).status.success());
+        h.assert_stopped("api").await;
+        h.config(tty, "printf 'second-run\\n'; exec sleep 60", "always");
+        h.ok(&["start", "api"]);
+        wait_for_output_tail(&h.paths, "api", "second-run").await;
+        let current = h.status("api").await;
+        assert!(!current.manually_stopped);
+        assert_eq!(current.runner_pid, original.runner_pid);
+        assert_ne!(current.pid, original.pid);
+        assert!(history_records(&h.paths, "api").await.len() >= 2);
+        for _ in 0..5 {
+            h.ok(&["stop"]);
+            h.ok(&["start"]);
+            wait_for_state(&h.paths, "api", ServiceState::Running).await;
+        }
+        h.ok(&["stop"]);
+        h.ok(&["restart"]);
+        wait_for_state(&h.paths, "api", ServiceState::Running).await;
+        h.ok(&["disable"]);
+        assert!(!h.cli(&["start", "api"]).status.success());
+        fs::write(h.directory.join(".served.json5"), "invalid JSON5").unwrap();
+        let mut args = vec!["run", "--name", "temporary", "--env", "SAVED=original"];
+        if !tty {
+            args.push("--no-tty");
+        }
+        args.extend(["--", "sh", "-c", "printf '%s\\n' \"$SAVED\"; exec sleep 60"]);
+        h.ok(&args);
+        wait_for_output_tail(&h.paths, "temporary", "original").await;
+        let temporary = h.status("temporary").await;
+        h.ok(&["stop", "temporary"]);
+        h.assert_stopped("temporary").await;
+        assert!(h.paths.transient_definition("temporary").exists());
+        assert!(
+            read_history(&h.paths, "temporary", "latest", 1024)
+                .await
+                .contains("original")
+        );
+        h.ok(&["start", "temporary"]);
+        wait_for_output_tail(&h.paths, "temporary", "original").await;
+        let restarted = h.status("temporary").await;
+        assert_eq!(temporary.runner_pid, restarted.runner_pid);
+        assert_ne!(temporary.pid, restarted.pid);
+        h.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn stopped_services_survive_adoption_but_only_enabled_services_return_after_shutdown() {
+    let mut h = LifecycleHarness::new().await;
+    h.config(false, "printf 'kept-history\\n'; exec sleep 60", "always");
+    h.ok(&["enable"]);
+    wait_for_output_tail(&h.paths, "api", "kept-history").await;
+    h.ok(&[
+        "run",
+        "--name",
+        "temporary",
+        "--env",
+        "SAVED=original",
+        "--",
+        "sh",
+        "-c",
+        "printf '%s\\n' \"$SAVED\"; exec sleep 60",
+    ]);
+    wait_for_output_tail(&h.paths, "temporary", "original").await;
+    assert!(!h.cli(&["stop"]).status.success()); // Shared workdir requires an explicit name.
+    assert!(!h.cli(&["start"]).status.success());
+    for name in ["api", "temporary"] {
+        h.ok(&["stop", name]);
+    }
+    let enabled_runner = h.status("api").await.runner_pid;
+    let temporary_runner = h.status("temporary").await.runner_pid;
+    // A broken edited configuration must not prevent adopting a manually stopped runner.
+    fs::write(h.directory.join(".served.json5"), "invalid JSON5").unwrap();
+    h.ok(&["daemon", "--handoff"]);
+    for name in ["api", "temporary"] {
+        h.assert_stopped(name).await;
+    }
+    h.daemon.0.kill().unwrap();
+    h.daemon.0.wait().unwrap();
+    h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+    for name in ["api", "temporary"] {
+        h.assert_stopped(name).await;
+    }
+    assert_eq!(h.status("api").await.runner_pid, enabled_runner);
+    assert_eq!(h.status("temporary").await.runner_pid, temporary_runner);
+    assert!(
+        read_history(&h.paths, "api", "latest", 1024)
+            .await
+            .contains("kept-history")
+    );
+    h.ok(&["daemon", "--relinquish"]);
+    h.daemon.0.wait().unwrap();
+    h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+    for name in ["api", "temporary"] {
+        h.assert_stopped(name).await;
+    }
+    h.ok(&["start", "temporary"]);
+    wait_for_output_tail(&h.paths, "temporary", "original").await;
+    h.ok(&["stop", "temporary"]);
+    h.config(false, "exec sleep 60", "always");
+    h.shutdown().await;
+    h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+    wait_for_state(&h.paths, "api", ServiceState::Running).await;
+    let Response::Services { services } = client::request(&h.paths, Request::List).await.unwrap()
+    else {
+        panic!("list")
+    };
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, "api");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_cancels_backoff_and_start_stop_handle_quick_exits() {
+    let mut h = LifecycleHarness::new().await;
+    h.config(false, "exit 1", "always");
+    h.ok(&["enable"]);
+    wait_for_state(&h.paths, "api", ServiceState::Restarting).await;
+    h.ok(&["start", "api"]);
+    h.ok(&["stop", "api"]);
+    h.assert_stopped("api").await;
+    sleep(Duration::from_millis(600)).await;
+    h.assert_stopped("api").await;
+    h.config(false, "exit 0", "never");
+    for _ in 0..20 {
+        h.ok(&["start", "api"]);
+        h.ok(&["stop", "api"]);
+        h.assert_stopped("api").await;
+    }
+    h.ok(&["disable", "api"]);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopped_runner_replacement_does_not_launch_a_process() {
+    let mut h = LifecycleHarness::new().await;
+    h.config(false, "exec sleep 60", "always");
+    h.ok(&["enable"]);
+    wait_for_state(&h.paths, "api", ServiceState::Running).await;
+    h.ok(&["stop", "api"]);
+    let old = h.status("api").await;
+    kill(
+        Pid::from_raw(old.runner_pid as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(served::runner_protocol::RunnerResponse::Status { status }) =
+                served::runner_protocol::request(
+                    &h.paths.runner_socket("api"),
+                    "api",
+                    served::runner_protocol::RunnerRequest::Status,
+                )
+                .await
+            {
+                if status.runner_pid != old.runner_pid && status.manually_stopped {
+                    assert!(status.pid.is_none());
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("manager must replace the failed runner without launching its service");
+    h.assert_stopped("api").await;
+    h.ok(&["start", "api"]);
+    wait_for_state(&h.paths, "api", ServiceState::Running).await;
+    h.shutdown().await;
+}

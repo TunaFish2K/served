@@ -112,6 +112,10 @@ enum Command {
     Disable { name: Option<String> },
     /// Restart the current service, or a managed service by name.
     Restart { name: Option<String> },
+    /// Start a stopped managed service without changing a running service.
+    Start { name: Option<String> },
+    /// Stop a service while retaining its registration and history.
+    Stop { name: Option<String> },
     /// Attach directly to the current service, or a managed service by name.
     Attach { name: Option<String> },
     /// Read service output history, open its raw file, or print its path.
@@ -231,6 +235,14 @@ pub async fn run() -> Result<()> {
                 Some(Command::Restart { name }) => {
                     let target = client::target(name, std::env::current_dir()?);
                     client::expect_ok(&paths, Request::Restart { target }).await
+                }
+                Some(Command::Start { name }) => {
+                    let target = client::target(name, std::env::current_dir()?);
+                    client::expect_ok(&paths, Request::Start { target }).await
+                }
+                Some(Command::Stop { name }) => {
+                    let target = client::target(name, std::env::current_dir()?);
+                    client::expect_ok(&paths, Request::Stop { target }).await
                 }
                 Some(Command::Attach { name }) => tui::attach(paths, name).await,
                 Some(Command::History {
@@ -545,6 +557,15 @@ fn format_kind(kind: &ServiceKind) -> &'static str {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn start_stop_accept_names_or_current_directory_but_not_config_files() {
+        for verb in ["start", "stop"] {
+            assert!(Cli::try_parse_from(["served", verb]).is_ok());
+            assert!(Cli::try_parse_from(["served", verb, "api"]).is_ok());
+            assert!(Cli::try_parse_from(["served", verb, "-f", "api.json5"]).is_err());
+        }
+    }
 
     #[test]
     fn attach_accepts_an_optional_name() {

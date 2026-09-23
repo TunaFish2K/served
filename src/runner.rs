@@ -18,7 +18,7 @@ use crate::{
         LaunchSpec, RunnerHistoryRecord, RunnerMetadata, RunnerRequest, RunnerResponse,
         RunnerServiceState as ServiceState, RunnerStatus,
     },
-    worker::{WorkerCommand, WorkerEvent, spawn_service},
+    worker::{WORKER_EVENT_CAPACITY, WorkerCommand, WorkerEvent, spawn_service},
 };
 
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -92,7 +92,9 @@ struct RunnerState {
     attach_active: bool,
     attach_token: Option<String>,
     failures: FailureTracker,
-    events: mpsc::Sender<WorkerEvent>,
+    events: mpsc::Receiver<WorkerEvent>,
+    worker_task: Option<tokio::task::JoinHandle<()>>,
+    manually_stopped: bool,
     status_updates: watch::Sender<RunnerStatus>,
 }
 
@@ -100,10 +102,10 @@ impl RunnerState {
     fn new(
         name: String,
         socket_path: PathBuf,
-        events: mpsc::Sender<WorkerEvent>,
         status_updates: watch::Sender<RunnerStatus>,
     ) -> Self {
         let metadata_path = socket_path.with_file_name("runner.json");
+        let (_, events) = mpsc::channel(WORKER_EVENT_CAPACITY);
         Self {
             name,
             metadata_path,
@@ -117,6 +119,8 @@ impl RunnerState {
             attach_token: None,
             failures: FailureTracker::default(),
             events,
+            worker_task: None,
+            manually_stopped: false,
             status_updates,
         }
     }
@@ -141,6 +145,34 @@ impl RunnerState {
                 log_directory,
             } => {
                 self.restart(spec, PathBuf::from(log_directory)).await?;
+                Ok(RunnerResponse::Ok)
+            }
+            RunnerRequest::StopService => {
+                self.stop_service().await?;
+                Ok(RunnerResponse::Ok)
+            }
+            RunnerRequest::StartService {
+                spec,
+                log_directory,
+            } => {
+                if !matches!(
+                    self.state,
+                    ServiceState::Starting | ServiceState::Running | ServiceState::Restarting
+                ) {
+                    self.restart(spec, PathBuf::from(log_directory)).await?;
+                }
+                Ok(RunnerResponse::Ok)
+            }
+            RunnerRequest::ConfigureStopped {
+                spec,
+                log_directory,
+            } => {
+                if self.spec.is_some() {
+                    return Err("runner is already configured".to_owned());
+                }
+                self.set_spec(spec, PathBuf::from(log_directory));
+                self.manually_stopped = true;
+                self.write_metadata();
                 Ok(RunnerResponse::Ok)
             }
             RunnerRequest::Stop => {
@@ -196,7 +228,7 @@ impl RunnerState {
     }
 
     async fn configure(&mut self, spec: LaunchSpec, log_directory: PathBuf) -> Result<(), String> {
-        if self.spec.as_ref() == Some(&spec) && self.worker.is_some() {
+        if self.manually_stopped || (self.spec.as_ref() == Some(&spec) && self.worker.is_some()) {
             return Ok(());
         }
         if self.spec.is_some() && self.worker.is_some() {
@@ -214,25 +246,12 @@ impl RunnerState {
     }
 
     async fn restart(&mut self, spec: LaunchSpec, log_directory: PathBuf) -> Result<(), String> {
-        if let Some(worker) = self.worker.clone() {
-            let (reply, receiver) = oneshot::channel();
-            worker
-                .send(WorkerCommand::Restart {
-                    service: spec
-                        .clone()
-                        .into_loaded()
-                        .map_err(|error| error.to_string())?,
-                    reply,
-                })
-                .await
-                .map_err(|_| "service worker is no longer available".to_owned())?;
-            receiver
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?;
-        }
+        self.finish_worker().await?;
+        self.set_spec(spec.clone(), log_directory);
+        self.spawn(spec)
+    }
 
-        self.spec = Some(spec.clone());
+    fn set_spec(&mut self, spec: LaunchSpec, log_directory: PathBuf) {
         if let Some(logs) = self.logs.as_mut() {
             logs.set_limits(spec.config.log_max_bytes, spec.config.log_max_files);
         } else {
@@ -242,9 +261,53 @@ impl RunnerState {
                 spec.config.log_max_files,
             ));
         }
-        if self.worker.is_none() {
-            self.spawn(spec)?;
+        self.spec = Some(spec);
+    }
+
+    // Each worker generation owns a separate event channel. Drain the old generation
+    // while waiting for termination so bounded output cannot block stop/restart.
+    async fn finish_worker(&mut self) -> Result<(), String> {
+        let Some(mut task) = self.worker_task.take() else {
+            if self.pid.is_some() {
+                return Err("worker unavailable; cannot confirm service termination".to_owned());
+            }
+            return Ok(());
+        };
+        let worker = self.worker.clone();
+        let result = {
+            let completion = async {
+                if let Some(worker) = worker {
+                    let (reply, receiver) = oneshot::channel();
+                    if worker.send(WorkerCommand::Stop { reply }).await.is_ok() {
+                        // A natural exit can drop the reply. Only a successful task
+                        // join below establishes that this is a completed worker.
+                        if let Ok(result) = receiver.await {
+                            result?;
+                        }
+                    }
+                }
+                (&mut task)
+                    .await
+                    .map_err(|error| format!("join service worker: {error}"))
+            };
+            tokio::pin!(completion);
+            loop {
+                tokio::select! {
+                    result = &mut completion => break result,
+                    Some(event) = self.events.recv() => self.handle_event(event),
+                }
+            }
+        };
+        if let Err(error) = result {
+            if !task.is_finished() {
+                self.worker_task = Some(task);
+            }
+            return Err(error);
         }
+        while let Ok(event) = self.events.try_recv() {
+            self.handle_event(event);
+        }
+        self.worker = None;
         Ok(())
     }
 
@@ -255,19 +318,29 @@ impl RunnerState {
         self.pid_start_time = None;
         self.attach_active = false;
         self.attach_token = None;
-        self.worker = Some(spawn_service(service, BTreeMap::new(), self.events.clone()));
+        self.manually_stopped = false;
+        let (events, receiver) = mpsc::channel(WORKER_EVENT_CAPACITY);
+        let (worker, task) = spawn_service(service, BTreeMap::new(), events);
+        self.events = receiver;
+        self.worker = Some(worker);
+        self.worker_task = Some(task);
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
-        if let Some(worker) = self.worker.take() {
-            stop_worker(worker).await?;
-        }
+    async fn stop_service(&mut self) -> Result<(), String> {
+        self.finish_worker().await?;
+        self.manually_stopped = true;
         self.state = ServiceState::Stopped;
         self.pid = None;
         self.pid_start_time = None;
         self.attach_active = false;
         self.attach_token = None;
+        self.write_metadata();
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), String> {
+        self.stop_service().await?;
         self.remove_metadata();
         Ok(())
     }
@@ -368,6 +441,8 @@ impl RunnerState {
             .unwrap_or((false, "never".to_owned(), false));
         let recent_failures = self.failures.recent_count(Instant::now());
         RunnerStatus {
+            supports_start_stop: true,
+            manually_stopped: self.manually_stopped,
             name: self.name.clone(),
             runner_pid: std::process::id(),
             state: self.state.clone(),
@@ -464,7 +539,7 @@ impl RunnerState {
                 self.worker = None;
                 self.attach_active = false;
                 self.attach_token = None;
-                self.remove_metadata();
+                self.write_metadata();
             }
             WorkerEvent::Failed { error, .. } => {
                 warn!(service = %self.name, %error, "service worker failure");
@@ -512,6 +587,8 @@ impl RunnerState {
 
 fn initial_status(name: &str) -> RunnerStatus {
     RunnerStatus {
+        supports_start_stop: true,
+        manually_stopped: false,
         name: name.to_owned(),
         runner_pid: std::process::id(),
         state: ServiceState::Stopped,
@@ -529,17 +606,6 @@ fn initial_status(name: &str) -> RunnerStatus {
     }
 }
 
-async fn stop_worker(worker: mpsc::Sender<WorkerCommand>) -> Result<(), String> {
-    let (reply, receiver) = oneshot::channel();
-    if worker.send(WorkerCommand::Stop { reply }).await.is_err() {
-        return Ok(());
-    }
-    receiver
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
-}
-
 fn restart_name(policy: crate::config::RestartPolicy) -> &'static str {
     match policy {
         crate::config::RestartPolicy::Never => "never",
@@ -552,14 +618,84 @@ fn restart_name(policy: crate::config::RestartPolicy) -> &'static str {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn failed_stop_retains_worker_control_and_does_not_mark_manual_stop() {
+        let directory = tempfile::tempdir().unwrap();
+        let (updates, _) = watch::channel(initial_status("api"));
+        let mut state = RunnerState::new(
+            "api".to_owned(),
+            directory.path().join("runner.sock"),
+            updates,
+        );
+        let (commands, mut receiver) = mpsc::channel(2);
+        state.worker = Some(commands);
+        state.state = ServiceState::Running;
+        state.pid = Some(42);
+        state.worker_task = Some(tokio::spawn(async move {
+            if let Some(WorkerCommand::Stop { reply }) = receiver.recv().await {
+                reply.send(Err("termination failed".to_owned())).unwrap();
+            }
+            if let Some(WorkerCommand::Stop { reply }) = receiver.recv().await {
+                reply.send(Ok(())).unwrap();
+            }
+        }));
+        assert_eq!(
+            state.stop_service().await.unwrap_err(),
+            "termination failed"
+        );
+        assert!(state.worker.is_some());
+        assert!(state.worker_task.is_some());
+        assert!(!state.manually_stopped);
+        assert_eq!(state.pid, Some(42));
+        state.stop_service().await.unwrap();
+        assert!(state.manually_stopped);
+        assert!(state.worker.is_none());
+        assert!(state.pid.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_drains_bounded_events_and_joins_a_worker_that_drops_its_reply() {
+        let directory = tempfile::tempdir().unwrap();
+        let (updates, _) = watch::channel(initial_status("api"));
+        let mut state = RunnerState::new(
+            "api".to_owned(),
+            directory.path().join("runner.sock"),
+            updates,
+        );
+        let (commands, mut receiver) = mpsc::channel(2);
+        let (events, event_receiver) = mpsc::channel(1);
+        state.events = event_receiver;
+        state.worker = Some(commands);
+        state.worker_task = Some(tokio::spawn(async move {
+            let request = receiver.recv().await.unwrap();
+            for _ in 0..10 {
+                events
+                    .send(WorkerEvent::Started {
+                        name: "api".to_owned(),
+                        pid: 42,
+                        tty: false,
+                    })
+                    .await
+                    .unwrap();
+            }
+            drop(request); // Natural exit won the race with the command.
+        }));
+        tokio::time::timeout(Duration::from_secs(2), state.stop_service())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.worker_task.is_none());
+        assert_eq!(state.state, ServiceState::Stopped);
+        assert!(state.pid.is_none());
+        assert!(state.events.try_recv().is_err());
+    }
+
     #[test]
     fn status_watchers_are_not_notified_when_the_value_is_unchanged() {
-        let (events, _) = mpsc::channel(1);
         let (status_updates, statuses) = watch::channel(initial_status("api"));
         let mut state = RunnerState::new(
             "api".to_owned(),
             PathBuf::from("/tmp/api.sock"),
-            events,
             status_updates,
         );
 

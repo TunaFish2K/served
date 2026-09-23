@@ -161,6 +161,10 @@ pub struct RunnerHistoryRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerStatus {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_start_stop: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manually_stopped: bool,
     pub name: String,
     pub runner_pid: u32,
     pub state: RunnerServiceState,
@@ -198,6 +202,17 @@ pub enum RunnerRequest {
         log_directory: String,
     },
     Restart {
+        spec: LaunchSpec,
+        log_directory: String,
+    },
+    /// Stop the process but retain the runner and its history.
+    StopService,
+    StartService {
+        spec: LaunchSpec,
+        log_directory: String,
+    },
+    /// Restore a manually stopped service into a replacement runner without spawning it.
+    ConfigureStopped {
         spec: LaunchSpec,
         log_directory: String,
     },
@@ -365,8 +380,35 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_capabilities_default_to_unsupported_for_old_runners() {
+        let mut value = serde_json::to_value(serde_json::json!({"name":"api","runner_pid":1,"state":"Stopped","pid":null,"pid_start_time":null,"tty":false,"restart":"never","persist_logs":false,"attach_active":false,"output_tail":"","recent_failures":0,"window_seconds":60,"latest_log":null,"spec":null})).unwrap();
+        value.as_object_mut().unwrap().remove("supports_start_stop");
+        value.as_object_mut().unwrap().remove("manually_stopped");
+        let status: RunnerStatus = serde_json::from_value(value).unwrap();
+        assert!(!status.supports_start_stop);
+        assert!(!status.manually_stopped);
+        for request in [
+            RunnerRequest::StopService,
+            RunnerRequest::ConfigureStopped {
+                spec: spec(),
+                log_directory: "/tmp/logs".to_owned(),
+            },
+            RunnerRequest::StartService {
+                spec: spec(),
+                log_directory: "/tmp/logs".to_owned(),
+            },
+        ] {
+            let encoded = serde_json::to_vec(&request).unwrap();
+            let _: RunnerRequest = serde_json::from_slice(&encoded).unwrap();
+        }
+        assert_eq!(RUNNER_PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
     fn runner_status_keeps_the_v1_wire_shape() {
         let status = RunnerStatus {
+            supports_start_stop: false,
+            manually_stopped: false,
             name: "api".to_owned(),
             runner_pid: 10,
             state: RunnerServiceState::Running,

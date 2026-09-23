@@ -126,6 +126,8 @@ served enable          Enable and start the current service
 served run [options] -- <program> [args...]
                        Create a temporary service without project configuration
 served disable [name]  Disable the current or named service
+served start [name]    Start a stopped managed service
+served stop [name]     Stop a service and retain its registration and history
 served restart [name]  Restart the current or named service
 served attach [name]   Attach to the current or named service
 served history [name]  Open latest.log in an editor
@@ -146,8 +148,27 @@ Commands without a name match the current process working directory. If several 
 served reports their names and requires an explicit name. Named commands work from any directory.
 
 Use `served disable` when you no longer want to manage a project. Use `served restart`
-after you change its configuration. served does not provide separate service-level `start`,
-`stop`, or `reload` commands.
+after you change its configuration. There is no separate service-level `reload` command.
+
+`served stop [name]` stops the process and cancels automatic restarts, including `restart=always`.
+It keeps the registration, runner, and log history. `served start [name]` starts a stopped managed
+service; it does not register an unknown service. Both commands are idempotent. Start leaves a
+running, starting, or automatically restarting service unchanged, without reading edited configuration.
+When stopped, an enabled service reloads and validates its registered configuration before starting;
+a temporary service reuses its original command, options, and environment. Invalid configuration
+leaves the service stopped. Restart also starts a stopped service.
+
+Manual stop survives manager handoff, relinquish, and crash recovery while the runner is alive.
+After normal shutdown and a fresh manager start, or a host reboot, enabled services start again;
+temporary services are removed. A live manager preserves a known manual stop when replacing a failed
+runner. There is no durable stop flag if both manager and runner are lost. Stop closes attach sessions;
+history remains readable, and the next start creates a new run record.
+
+Client and manager use protocol v9. Handoff can retain an older runner that does not support
+start/stop. These commands report an error without changing it. To use them, disable the service,
+then enable it again with its original configuration source and working-directory override, or run
+the temporary service again with its original arguments and environment. This recreation loses
+in-memory history; persistent logs remain.
 
 ### Temporary Services
 
@@ -215,7 +236,7 @@ and `enable` accept `-f`; use names for subsequent management.
 Ordinary directory enables retain the existing `~/.config/served/enabled/<name>` directory symlink.
 Enables with `-f` or `--workdir` instead store a private, versioned JSON record at that path, containing
 the source location and directory override. Existing links need no migration. Client and manager
-must both support manager protocol v8; runner protocol v1 remains compatible with existing runners.
+must both support manager protocol v9; runner protocol v1 remains compatible with existing runners.
 
 
 Run `served edit` in the service directory. If neither supported configuration file exists, served
@@ -283,9 +304,9 @@ Changes to shell startup files such as `/etc/profile` do not update a running ma
 
 ## Attach and TUI
 
-The global TUI shows service state and provides restart, disable, attach, history, and rotating
+The global TUI shows service state and provides start (`s`), stop (`x`), restart (`r`), disable (`d`), attach, history, and rotating
 `tips:` messages. The footer shows the available actions. A narrow terminal can wrap the
-footer to two lines.
+footer across enough lines to show all actions.
 
 TTY services provide a writable PTY attach. Pipe services provide a read-only attach. Pipe services
 can have multiple read-only observers. Both modes use the terminal's alternate screen.
@@ -474,8 +495,8 @@ signatures and are not notarized. The workflow does not build musl or Windows ta
   processes.
 - A runner at `$HOME/.local/state/served/runtime/runners/<name>/` owns the service process,
   PTY, log cache, restart state, and crash-loop window. A manager crash does not stop these items.
-- `served shutdown` performs a graceful shutdown for all runners. `served disable` and
-  `served restart` stop or replace the matching runner. A manager reload uses
+- `served shutdown` performs a graceful shutdown for all runners. `served disable` stops the
+  matching runner. `served stop` and `served restart` retain it and its history. A manager reload uses
   handoff and keeps the service PID. A first upgrade from the old worker architecture may need one
   controlled restart.
 - The system service sets `HOME` from the installation user's login environment. It starts

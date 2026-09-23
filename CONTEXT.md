@@ -49,6 +49,17 @@
 
 ## 已确认的决策
 
+- ADR 0015 定义 start/stop：stop 保留注册、runner 和历史，取消自动重启；start 只启动
+  已受管的停止服务，运行、启动或退避中为无操作，不读取配置。已启用服务真正 start 前
+  重新加载并校验来源；临时服务复用创建定义。restart 也解除手动停止。
+- 手动停止跨存活 runner 的 manager handoff、relinquish 和崩溃接管保留；接管不应用
+  编辑后的配置。manager 存活时重建 runner 保留已知意图；两者都丢失时不承诺恢复。
+  正常 shutdown 后重启 manager 或主机重启，enabled 服务恢复，temporary 服务不恢复。
+- 公共协议 v9 增加 Start/Stop。runner additive v1 增加 StartService、StopService、
+  ConfigureStopped 及默认缺省的能力和停止标记。旧 Stop 继续完整关闭 runner。
+  旧 runner 的新操作报错，不自动迁移；disable 后重新 enable/run 会丢失内存历史。
+- TUI 增加 `s start`、`x stop`，保留 `r restart`、`d disable`；页脚按终端宽度换行。
+
 - 英文 `served(1)` 与 `served(5)` 是命令和配置参考的维护源，使用 mdoc；skill 的离线
   Markdown 参考由 mandoc 生成并提交。`make docs-check` 检查同步和引用。
 - 通用 `served` skill 面向操作服务，使用 `SKILL.md` 和按需加载的参考。中英文 README
@@ -106,7 +117,7 @@
 - 每个服务的环境优先级为 manager 启动环境、旧版 `.env.served` dotenv 值、JSON5 字面量
   `env` 值。新模板不创建 `.env.served`，项目 `.env` 永远不读取。
 - `persist_logs` 默认值为 `false`，下次进程启动或重启时生效。持久化日志使用
-  `$HOME/.local/state/served/logs/<service>/`，保留 `latest.log` 和 100 个归档，并使用
+  `$HOME/.local/state/served/logs/<service>/`，默认保留 `latest.log` 和 3 个磁盘归档（每段 10 MiB，可配置），并使用
   `0700`/`0600` 私有权限。
 - 每次进程启动都会按 `.latest.started` 旋转已有的 `latest.log`，即使新运行不持久化，
   这样历史模型仍然有一个 `latest` 记录。
@@ -128,8 +139,8 @@
 - 在线脚本检测 Linux/macOS 与 amd64/arm64，下载最新稳定 full 包并验证 SHA-256。重复运行
   同一命令即升级；不提供 CLI 自更新或自动更新任务。
 - 每个受管服务在 `$HOME/.local/state/served/runtime/runners/<name>/` 下拥有一个 runner。
-  manager 失败或收到非预期信号时，不会停止 runner 或服务。明确的 shutdown、disable 和
-  服务 restart 会停止它。
+  manager 失败或收到非预期信号时，不会停止 runner 或服务。明确的 shutdown、disable 会停止
+  runner；服务 stop/restart 保留 runner 及其历史。
 - runner 状态包含有上限的内存历史、重启退避和近期崩溃窗口。manager 重启不会清除这些
   状态。已有 attach 流是 manager 代理，在 manager 替换时会断开。
 - manager 维护 runner 状态缓存，`served list` 和 TUI 列表只读取缓存。新 runner 通过
@@ -145,7 +156,7 @@
 `Request::Attach { name }` 仍然使用服务名称。manager 根据受管服务定义选择 PTY 或管道
 relay。协议版本 3 增加精确的清理后历史行数。版本 5 增加结构化崩溃循环 attach 诊断，
 以及 manager handoff 和 shutdown 请求。版本 6 为 handoff 增加目标可执行文件的绝对路径，
-并增加 relinquish 请求。版本 7 增加 `Run` 和服务类型。版本 8 增加 Enable 的文件与
+并增加 relinquish 请求。版本 7 增加 `Run` 和服务类型。版本 9 增加 Start/Stop 请求。版本 8 增加 Enable 的文件与
 目录覆盖字段及 ServiceInfo 的配置路径；客户端与 manager 必须同步升级。
 
 成功 attach 仍返回 opaque token。尺寸控制使用单独 framed connection 上的

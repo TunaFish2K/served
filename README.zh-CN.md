@@ -156,6 +156,8 @@ served enable          启用当前目录并立即运行
 served run [选项] -- <程序> [参数...]
                        不使用项目配置创建临时服务
 served disable [name]  禁用当前服务，或按名称禁用
+served start [name]    启动已受管的停止服务
+served stop [name]     停止服务，保留注册、runner 和历史
 served restart [name]  重启当前服务，或按名称重启
 served attach [name]   直接 attach 当前服务，或按名称 attach
 served history [name]  用 $EDITOR 打开 latest.log
@@ -197,7 +199,7 @@ served run --name api --no-tty --restart on-failure \
 `--` 后的参数保持原始边界。served 不解释这些参数中的 shell 语法。命令需要管道、重定向
 或变量展开时，请显式使用 `sh -c`。
 
-TUI 和 `served list` 都会显示临时服务。临时服务也支持 attach、history、restart 和
+TUI 和 `served list` 都会显示临时服务。临时服务也支持 start、stop、attach、history、restart 和
 disable。程序退出后，服务保持 `stopped` 状态。此时仍可查看历史或重启服务。
 `served disable` 删除私有 runtime 描述。它不会删除持久化日志。
 
@@ -262,7 +264,24 @@ TTY 日志保存原始 PTY 字节；pipe 日志按 runner 收到的顺序合并 
 会移除 ANSI 和不可见控制序列。持久化写入失败时服务继续运行，并降级到内存，同时记录
 manager warning。
 
-V1 不提供面向服务的独立 `start`、`stop` 或 `reload` 命令。修改配置后使用 `restart`；
+`served stop [name]` 停止服务进程并取消自动重启，包括 `restart=always`，但保留注册、
+runner 和日志历史。attach 会断开，history 仍可读取。重复 stop 成功返回。
+`served start [name]` 启动已受管的停止服务，不会注册未知服务。正在运行、启动或自动重启
+退避中的服务保持原样，此时 start 不读取修改后的配置。
+
+已启用服务停止后 start 会重新加载并校验原配置来源；校验失败则保持停止。临时服务使用
+创建时保存的命令、选项和环境。restart 也能启动停止服务。下一次启动创建新的运行历史。
+
+手动停止跨 manager handoff、relinquish 和崩溃接管保留，前提是 runner 仍存活。
+正常 shutdown 后重新启动 manager 或主机重启时，已启用服务自动启动，临时服务不恢复。
+manager 存活时重建故障 runner 也会保留已知的手动停止意图；如果两者都丢失，则没有永久
+停止标记可恢复。
+
+升级时保留的旧 runner 可能不支持 start/stop。这两个命令会报错并保持服务不变。
+需先 disable，再使用原配置来源和工作目录覆盖重新 enable；临时服务则使用原命令、选项
+和环境重新 run。重建会丢失内存历史，持久化日志保留。
+
+不提供独立的 `reload` 命令。修改配置后使用 `restart`；
 manager 会先完整校验新配置，校验失败时保留旧进程不变。启用服务后，注册链接位于：
 
 ```text
@@ -289,12 +308,12 @@ CLI 相对路径以调用目录为基准，配置中的相对 `cwd` 以配置文
 
 工作目录必须已存在。restart 按原配置来源重新加载并验证，验证失败时保留旧进程。
 命令行目录覆盖值在 restart 和 manager 恢复后保留；更换或清除它需要 disable 后重新 enable，
-不会改写用户配置。后续管理使用名称；restart、disable、attach、history 不接受 `-f`。
+不会改写用户配置。后续管理使用名称；start、stop、restart、disable、attach、history 不接受 `-f`。
 省略名称时按当前进程工作目录匹配服务，匹配多个时列出候选名称并拒绝操作。
 
 普通目录启用继续使用上面的目录软链接；显式使用 `-f` 或 `--workdir` 时，同一注册表路径
 保存权限为 `0600` 的版本化 JSON 记录，包含配置来源和目录覆盖值。旧链接无需迁移。
-客户端与 manager 需同步支持协议 v8；runner v1 协议保持兼容，可接管已有 runner。
+客户端与 manager 需同步支持协议 v9；runner v1 协议保持兼容，可接管已有 runner。
 
 ## 默认服务配置
 
@@ -353,9 +372,9 @@ manager 启动时记录自己的环境快照。服务启动时按 manager 环境
 ## TUI 操作
 
 全局 TUI 底部同时显示随机 `tips:` 和上下文操作栏。没有选中服务时，操作栏显示
-`up/down/j/k move` 与退出。选中服务后会显示 `r restart`、`d disable`、`a attach`
+`up/down/j/k move` 与退出。选中服务后会显示 `s start`、`x stop`、`r restart`、`d disable`、`a attach`
 和 `h history`。TTY 服务的 attach 可向服务写入；`tty: false` 服务的 attach 只读；两者
-都进入终端第二屏。窄终端会把操作栏自动换成两行。
+都进入终端第二屏。窄终端会按宽度自动换行，显示全部操作。
 
 主 TUI 不再编辑服务配置。`served edit` 会直接把选中的配置文件交给外部编辑器：
 `-e/--editor COMMAND` 优先使用指定命令，其次使用 `$EDITOR`，最后按 `editor`、
@@ -404,8 +423,8 @@ musl 或 Windows 目标。
   runner，并保留服务 PID。
 - runner 位于 `$HOME/.local/state/served/runtime/runners/<name>/`，持有服务进程、PTY、
   日志缓存、自动重启状态和 crash-loop 窗口。manager 异常退出不会停止它们。
-- `served shutdown` 通过 graceful shutdown 停止所有 runner；`served disable` 和
-  `served restart` 也会停止或替换对应 runner。升级使用 manager handoff 保留服务 PID；
+- `served shutdown` 通过 graceful shutdown 停止所有 runner；`served disable` 停止对应
+  runner。`served stop` 和 `served restart` 保留 runner 及其历史。升级使用 manager handoff 保留服务 PID；
   首次从旧 worker 架构升级时可能需要一次受控重启。
 - system service 按安装用户的登录环境设置 `HOME`，并通过 login shell 启动 manager，
   因此 `/etc/profile` 等环境会在 manager 启动时被读取。manager 运行期间仍使用启动时的

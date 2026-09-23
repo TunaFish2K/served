@@ -131,6 +131,8 @@ mod tests {
 
     fn stopped_status() -> RunnerStatus {
         RunnerStatus {
+            supports_start_stop: false,
+            manually_stopped: false,
             name: "api".to_owned(),
             runner_pid: 42,
             state: RunnerServiceState::Stopped,

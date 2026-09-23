@@ -16,6 +16,22 @@ pub(super) fn draw_main(
     tip: &str,
     notice: &str,
 ) {
+    let mut footer = String::new();
+    let mut column = 0;
+    for word in main_footer(services, selected).split("   ") {
+        if column > 0 {
+            if column + 1 + word.len() > usize::from(frame.area().width) {
+                footer.push('\n');
+                column = 0;
+            } else {
+                footer.push(' ');
+                column += 1;
+            }
+        }
+        footer.push_str(word);
+        column += word.len();
+    }
+    let footer_rows = footer.lines().count().max(1) as u16;
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -23,7 +39,7 @@ pub(super) fn draw_main(
             Constraint::Min(6),
             Constraint::Length(2),
             Constraint::Length(1),
-            Constraint::Length(2),
+            Constraint::Length(footer_rows),
         ])
         .split(frame.area());
 
@@ -60,10 +76,7 @@ pub(super) fn draw_main(
 
     frame.render_widget(Paragraph::new(notice).wrap(Wrap { trim: false }), areas[2]);
     frame.render_widget(Paragraph::new(format!("tips: {tip}")), areas[3]);
-    frame.render_widget(
-        Paragraph::new(main_footer(services, selected)).wrap(Wrap { trim: false }),
-        areas[4],
-    );
+    frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), areas[4]);
 }
 
 pub(super) fn main_footer(services: &[ServiceInfo], selected: usize) -> String {
@@ -71,7 +84,9 @@ pub(super) fn main_footer(services: &[ServiceInfo], selected: usize) -> String {
     if services.get(selected).is_none() {
         return format!("{navigation}   q/Esc quit");
     }
-    format!("{navigation}   r restart   d disable   a attach   h history   q/Esc quit")
+    format!(
+        "{navigation}   s start   x stop   r restart   d disable   a attach   h history   q/Esc quit"
+    )
 }
 
 fn state_name(state: &ServiceState) -> &'static str {

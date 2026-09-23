@@ -23,7 +23,7 @@ SERVED(1) - General Commands Manual
 **-**&zwnj;**-**
 *program*&nbsp;\[*arguments&nbsp;...*]\
 **served**
-**disable**&nbsp;|&nbsp;**restart**&nbsp;|&nbsp;**attach**
+**start**&nbsp;|&nbsp;**stop**&nbsp;|&nbsp;**disable**&nbsp;|&nbsp;**restart**&nbsp;|&nbsp;**attach**
 \[*name*]\
 **served**
 **history**
@@ -102,13 +102,41 @@ Named commands work from any directory.
 > Stop the named service and remove its enable record or temporary runtime definition.
 > Persistent logs remain available on disk.
 
+**start**
+
+> Start a stopped or failed managed service.
+> Do not register an unknown service.
+> A running, starting, or automatically restarting service is unchanged, without reloading configuration.
+> For a stopped enabled service, reload and validate its registered source before starting.
+> Invalid configuration leaves it stopped.
+> Temporary services reuse their original definition and environment.
+
+**stop**
+
+> Stop the service process and cancel automatic restarts, even with restart=always.
+> Keep its registration, runner, and log history.
+> An already stopped service is unchanged.
+> Close active attach sessions; history remains readable.
+> Manual stop survives handoff, relinquish, and manager crash recovery while the runner is alive.
+> A live manager also preserves a known manual stop when replacing a failed runner.
+> If both are lost, there is no durable stop flag.
+> Normal shutdown followed by a fresh manager start, or a host reboot, starts enabled services again;
+> temporary services are not restored.
+
 **restart**
 
 > Validate and reload an enabled service from its registered source before stopping its old process.
 > An invalid configuration or directory leaves the old process running.
 > Temporary services reuse their original launch definition.
 > Renaming an enabled service requires disable, configuration edit, and enable.
-> There are no separate service-level start, stop, or reload commands.
+> Restart also starts a stopped service.
+> There is no separate service-level reload command.
+
+> Start and stop require a runner with support for these operations.
+> An older runner retained during an upgrade returns an error and is left unchanged.
+> Disable it, then enable again with its original configuration source and working directory override,
+> or run the temporary service again with its original arguments and environment.
+> This recreation discards in-memory history; persistent logs remain.
 
 **attach**
 
@@ -201,7 +229,7 @@ prints the executable version when used without a subcommand.
 
 # TUI CONTROLS
 
-Use Up/Down or j/k to select a service, r to restart, d to disable,
+Use Up/Down or j/k to select a service, s to start, x to stop, r to restart, d to disable,
 a to attach, and h to browse history.
 Use q or Escape to leave a view.
 In history, Enter opens a run; PageUp/PageDown and Home/End navigate its content.
@@ -245,4 +273,4 @@ A manager intentionally relinquishing control exits with status 75.
 
 [served(5)](config.md)
 
-served - September 9, 2026
+served - September 23, 2026

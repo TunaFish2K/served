@@ -174,18 +174,39 @@ enable your service to manage it here!
 - `--` 后必须至少有一个 UTF-8 参数。参数必须保持原始边界。served 不得解释 shell
   元字符。需要 shell 语法时，用户必须显式传入 `sh -c`。
 
-临时服务必须支持 list、TUI、attach、history、restart 和 disable。进程退出后，服务必须
+临时服务必须支持 list、TUI、start、stop、attach、history、restart 和 disable。进程退出后，服务必须
 保持 `stopped` 状态。manager handoff、relinquish 或异常崩溃后，新 manager 必须接管仍在
 运行的 runner。显式 shutdown、正常停止 manager 或主机重启后不得恢复临时服务。
 
 ### `served disable [name]`
 
 停止并移除服务。不带名称时使用当前工作目录。提供名称后，可以从任意目录控制受管服务。
-restart、disable、attach、history 均不接受 `-f`。目录匹配多个服务时拒绝操作，按名称排序
+start、stop、restart、disable、attach、history 均不接受 `-f`。目录匹配多个服务时拒绝操作，按名称排序
 列出候选并要求指定名称；不能任意选择一个服务。
 已启用服务同时删除启用记录。临时服务删除私有 runtime 描述。两种服务都保留持久化日志。
 
-没有独立的 `stop` 命令。
+### `served start [name]` 与 `served stop [name]`
+
+两个命令只操作已受管服务，沿用按名称或当前目录定位的规则。start 不自动注册服务。
+start 对运行、启动和自动重启退避中的服务成功返回，不更换进程、不读取配置。
+对停止或失败的已启用服务，start 重新加载注册配置并校验；失败保持停止。
+临时服务使用创建时的命令、选项和环境。stop 对停止服务成功返回。
+
+stop 终止进程组并取消自动重启，保留注册、runner、身份元数据和全部现存日志历史。
+停止成功后 PID 为空、状态为 stopped；attach 断开，history 仍可用。
+停止失败必须返回错误并保留控制能力，不能假报成功。快速自然退出与停止命令竞争时，
+必须确认 worker 完成，不能单凭通道关闭判断停止成功。不同运行的事件不能互相覆盖状态。
+
+手动停止由 runner 保存。manager handoff、relinquish 和崩溃接管保持该状态，
+即使磁盘配置已编辑为无效内容也不得启动进程；显式 start/restart 才读取新配置。
+manager 存活期间重建故障 runner 保留已知停止意图。manager 和 runner 同时丢失时不承诺
+恢复该意图。不引入永久停止文件。正常 shutdown 后完整启动 manager 或主机重启时，
+已启用服务自动启动，临时服务不恢复。
+
+公共 manager 协议使用 v9。runner 协议保持 additive v1，通过可缺省能力字段区分支持情况。
+旧 runner 不支持新操作时返回迁移提示，不能自动替换或退回完整关闭请求。
+需 disable 后按原来源与工作目录覆盖重新 enable，或按原命令、选项和环境重新 run；
+提示该操作丢失内存历史、保留磁盘日志。
 
 ### `served restart [name]`
 
@@ -237,7 +258,8 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
   清理。
 - 停止操作要求服务运行器向受管 shell 发送 `SIGTERM`。
 - 如果进程在终止超时前没有退出，运行器发送 `SIGKILL`。
-- `restart=never` 在服务退出后保持停止，直到显式 restart。
+- `restart=never` 在服务退出后保持停止，直到显式 start 或 restart。
+- 手动 stop 优先于所有自动重启策略；start/restart 开始新的重启尝试周期。
 - `restart=on-failure` 在非成功退出后重启。
 - `restart=always` 在每次退出后重启。
 - 自动重启使用带最大延迟的指数退避，并持续重试。
@@ -273,7 +295,7 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 - `persist_logs: true` 时，完整记录保存到 `$HOME/.local/state/served/logs/<name>/`。
 - 当前记录为 `latest.log`；旧记录使用上一次运行的开始时间，格式为
   `YYYYMMDD-HHMMSS.log`，冲突时追加数字后缀。
-- 持久化存储保留 100 个归档和一个 `latest.log`。目录权限为 `0700`，文件权限为 `0600`。
+- 持久化存储默认保留 3 个归档和一个 `latest.log`，每段默认 10 MiB，可配置。目录权限为 `0700`，文件权限为 `0600`。
 - `persist_logs: false` 时，当前记录和 100 个归档保存在运行器内存中，每条记录保留最后
   64 KiB。普通管理器重启和服务重启后仍可查看；终止运行器会清除它们。已有磁盘记录
   仍可查看。
@@ -293,7 +315,7 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 全局 TUI 提供：
 
 - 受管服务列表、类型和当前状态；
-- restart 操作；
+- start（`s`）、stop（`x`）和 restart（`r`）操作；
 - disable 操作；
 - 面向 PTY 和管道服务的 attach 操作；
 - 历史列表和可滚动的历史内容页，并显示逻辑行位置；
@@ -307,7 +329,7 @@ tips: <tip text>
 tips 内置。每次启动 TUI 时随机选择一条；允许重复，不保存 tip 位置或其他管理器状态。
 
 TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示导航和退出；选中服务后，
-显示 restart、disable、attach 和 history。窄终端中操作栏换成两行，不会被截断。
+显示 start、stop、restart、disable、attach 和 history。窄终端中操作栏按宽度换行。
 
 `served edit` 是 CLI 编辑流程，不是 TUI 页面。生成的 JSON5 模板为每个字段写入行内说明，
 因此外部编辑器是唯一的配置编辑入口。
@@ -327,8 +349,8 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - 所有受管服务使用与管理器相同的用户身份。
 - 不提供 root 模式、提权、容器隔离、namespace 策略、资源限制、依赖图或健康检查协议。
 - 每个受管服务拥有独立运行器。manager 崩溃或被守护程序重启时，接管机制会保留 runner
-  和服务进程。systemd 集成还使用 `KillMode=process`。明确的 shutdown、disable 或服务
-  restart 会停止对应运行器。
+  和服务进程。systemd 集成还使用 `KillMode=process`。明确的 shutdown、disable 停止对应
+  运行器；stop/restart 保留运行器及其历史。
 - `served daemon` 与 system service 使用同一组固定的 HOME 路径。第二个 daemon 遇到已
   占用的 socket 时会拒绝接管。
 
@@ -411,7 +433,7 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 - 发行版包管理器元数据和模块。
 - 一个 JSON 文件中配置多个服务。
 - 服务依赖或就绪检查。
-- 公共 `served` CLI 中独立的 `start`、`stop` 或 `reload` 命令。
+- 公共 `served` CLI 中独立的 `reload` 命令。
 - 任意位置的 `.env.served` 文件。
 - 自动发现无关进程或端口。
 - runit、s6、supervisord 等其他守护程序的安装器或配置生成器。
@@ -503,7 +525,16 @@ TUI 同时保留 `tips:` 和操作栏。没有选中服务时，操作栏显示�
 48. enabled 与 temporary 服务可共用工作目录。按目录操作遇到多个候选时拒绝执行并列出
     名称；按名称操作只影响指定服务。
 49. `enable --workdir` 未传 `-f` 时从指定目录发现配置；`run --workdir` 的默认名称取最终
-    工作目录名，仍忽略项目配置。manager 协议为 v8，runner wire 保持 v1。
+    工作目录名，仍忽略项目配置。manager 协议为 v9，runner wire 保持 v1。
+
+50. PTY 和 pipe 服务支持 start/stop；重复操作成功，运行中 start 不读取配置，停止后 start
+    校验新配置，失败保持停止。保留注册、runner、历史，stop 断开 attach，restart 可解除停止。
+51. 手动停止跨 handoff、崩溃接管和 relinquish 保留，包括配置已无效和临时服务；完整
+    shutdown 后启动只恢复 enabled 服务。活跃 manager 重建停止 runner 时不得启动进程。
+52. stop 取消自动重启退避；快速退出、连续 stop/start 和输出背压不得导致通道错误或旧
+    事件污染。停止失败保留控制能力并返回错误。
+53. 新命令遇到旧 runner 返回迁移提示，保留 PID、注册和历史，不发送旧 Stop 等变更请求。
+54. CLI 支持名称或目录，不接受 -f；TUI 支持 s/x 及结果提示，窄终端显示完整操作栏。
 
 ## 手册与 AI 使用文档
 

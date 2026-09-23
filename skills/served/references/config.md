@@ -62,6 +62,7 @@ selection accepts any filename and bypasses this discovery and its warnings.
 
 > One of never (default), on-failure, or always.
 > On-failure restarts nonzero exits; always also restarts successful exits.
+> An explicit served stop cancels automatic restarts for every policy.
 > Repeated failures use backoff.
 
 **persist\_logs**
@@ -117,7 +118,8 @@ It records version 1, source with kind directory or file and an absolute path, a
 workdir override.
 Older directory links remain supported without migration.
 
-Restart and manager recovery load the registered source again.
+Restart, start of a stopped service, and fresh manager startup load the registered source again.
+Adopting a manually stopped runner preserves its loaded definition until explicit start or restart.
 Directory sources perform default filename discovery again; explicit file sources keep the selected path.
 Working directory changes never change the configuration source.
 A saved CLI directory override survives restart and recovery.
@@ -163,7 +165,7 @@ The manager validates the new definition before stopping the old process.
 # COMPATIBILITY
 
 Independent configuration paths and working directories require served 0.9.0 or later.
-Client and manager must agree on the manager protocol version (v8 for these features).
+Client and manager must agree on the manager protocol version (v9 for start/stop).
 Runner protocol v1 remains compatible with existing runners.
 Use the official installation upgrade path when updating an installed manager.
 
@@ -171,4 +173,4 @@ Use the official installation upgrade path when updating an installed manager.
 
 [served(1)](cli.md)
 
-served - September 9, 2026
+served - September 23, 2026

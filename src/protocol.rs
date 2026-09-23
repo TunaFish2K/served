@@ -8,7 +8,7 @@ pub use crate::ipc::{
     Frame, HandoffStream, MAX_FRAME_LENGTH, framed, into_handoff, receive_json, send_json,
 };
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,6 +56,12 @@ pub enum Request {
         target: Target,
     },
     Restart {
+        target: Target,
+    },
+    Start {
+        target: Target,
+    },
+    Stop {
         target: Target,
     },
     Attach {

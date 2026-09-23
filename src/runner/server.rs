@@ -16,7 +16,6 @@ use super::{AttachError, CRASH_WINDOW, RunnerCommand, RunnerState, initial_statu
 use crate::{
     ipc::{framed, into_handoff, receive_json, send_json},
     runner_protocol::{RUNNER_PROTOCOL_VERSION, RunnerRequest, RunnerResponse, RunnerStatus},
-    worker::WORKER_EVENT_CAPACITY,
 };
 
 pub async fn run(name: String, socket_path: PathBuf) -> Result<()> {
@@ -33,15 +32,9 @@ pub async fn run(name: String, socket_path: PathBuf) -> Result<()> {
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
         .context("set runner socket permissions")?;
 
-    let (events, mut event_receiver) = mpsc::channel(WORKER_EVENT_CAPACITY);
     let (commands, mut command_receiver) = mpsc::channel(64);
     let (status_updates, _) = watch::channel(initial_status(&name));
-    let mut state = RunnerState::new(
-        name.clone(),
-        socket_path.clone(),
-        events,
-        status_updates.clone(),
-    );
+    let mut state = RunnerState::new(name.clone(), socket_path.clone(), status_updates.clone());
     info!(service = %name, "served runner is ready");
 
     let result = loop {
@@ -75,7 +68,7 @@ pub async fn run(name: String, socket_path: PathBuf) -> Result<()> {
                 }
                 RunnerCommand::Exit => break Ok(()),
             },
-            Some(event) = event_receiver.recv() => state.handle_event(event),
+            Some(event) = state.events.recv() => state.handle_event(event),
             else => break Ok(()),
         }
     };
@@ -236,7 +229,7 @@ async fn handle_connection(
             Err(message) => RunnerResponse::Error { message },
         };
         send_json(&mut frame, &response).await?;
-        if stop {
+        if stop && matches!(response, RunnerResponse::Ok) {
             commands.send(RunnerCommand::Exit).await.ok();
             return Ok(());
         }

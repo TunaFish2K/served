@@ -285,6 +285,18 @@ async fn run_loop(
             KeyCode::Up | KeyCode::Char('k') => {
                 selected = selected.saturating_sub(1);
             }
+            KeyCode::Char('s') | KeyCode::Char('x') => {
+                if let Some(service) = services.get(selected) {
+                    let action = if key.code == KeyCode::Char('s') {
+                        LifecycleAction::Start
+                    } else {
+                        LifecycleAction::Stop
+                    };
+                    let pending = start_lifecycle_action(&paths, action, service.name.clone());
+                    notice = pending.progress_notice(false);
+                    pending_action = Some(pending);
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some(service) = services.get(selected) {
                     let name = service.name.clone();
@@ -347,6 +359,12 @@ fn start_lifecycle_action(
     name: String,
 ) -> PendingLifecycleAction {
     let request = match action {
+        LifecycleAction::Start => Request::Start {
+            target: Target::Name(name.clone()),
+        },
+        LifecycleAction::Stop => Request::Stop {
+            target: Target::Name(name.clone()),
+        },
         LifecycleAction::Disable => Request::Disable {
             target: Target::Name(name.clone()),
         },
@@ -711,11 +729,34 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_footer_remains_visible_in_a_narrow_terminal() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| draw_main(frame, &[service_info(false)], 0, "test tip", ""))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        for action in [
+            "s start",
+            "x stop",
+            "r restart",
+            "d disable",
+            "a attach",
+            "h history",
+            "q/Esc quit",
+            "tips: test tip",
+        ] {
+            assert!(text.contains(action), "missing {action}: {text}");
+        }
+    }
+
+    #[test]
     fn main_footer_describes_available_actions() {
         assert_eq!(main_footer(&[], 0), "up/down/j/k move   q/Esc quit");
 
         let tty_services = vec![service_info(true)];
         let tty_footer = main_footer(&tty_services, 0);
+        assert!(tty_footer.contains("s start"));
+        assert!(tty_footer.contains("x stop"));
         assert!(tty_footer.contains("r restart"));
         assert!(tty_footer.contains("d disable"));
         assert!(tty_footer.contains("a attach"));

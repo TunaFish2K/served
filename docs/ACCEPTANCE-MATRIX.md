@@ -2,7 +2,7 @@
 
 状态：当前开发版验收基线。
 
-本文把 `REQUIREMENTS.md` 的 49 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元
+本文把 `REQUIREMENTS.md` 的 54 个验收场景映射到自动化 gate。`cargo test` 表示 Rust 单元
 测试或集成测试。`release CI` 必须在目标操作系统或打包环境中执行。单台开发机的结果不能
 替代该 gate。
 
@@ -57,6 +57,11 @@
 | 47 | `cargo test` | `manager_smoke::custom_sources_and_shared_workdirs_survive_recovery`、`workdir_discovery_and_legacy_sources_remain_distinct` |
 | 48 | `cargo test` | `manager_smoke::custom_sources_and_shared_workdirs_survive_recovery` |
 | 49 | `cargo test` | `manager_smoke::workdir_discovery_and_legacy_sources_remain_distinct`、runner v1 wire tests |
+| 50 | `cargo test` | `manager_smoke::start_stop_preserve_registration_history_and_reload_only_when_stopped` |
+| 51 | `cargo test` | `manager_smoke::stopped_services_survive_adoption_but_only_enabled_services_return_after_shutdown`、`stopped_runner_replacement_does_not_launch_a_process` |
+| 52 | `cargo test` | `manager_smoke::stop_cancels_backoff_and_start_stop_handle_quick_exits`、runner 停止失败与有界事件队列测试 |
+| 53 | `cargo test` | `manager::tests::old_runner_rejects_start_stop_without_receiving_a_mutating_request`、runner v1 能力缺省测试 |
+| 54 | `cargo test` | CLI start/stop parser、共享目录歧义测试、`tui::tests::lifecycle_footer_remains_visible_in_a_narrow_terminal` |
 
 ## 重写兼容 gate
 

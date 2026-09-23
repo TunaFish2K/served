@@ -8,6 +8,8 @@ use tokio::task::JoinHandle;
 pub(super) enum LifecycleAction {
     Disable,
     Restart,
+    Start,
+    Stop,
 }
 
 impl LifecycleAction {
@@ -15,6 +17,8 @@ impl LifecycleAction {
         let action = match self {
             Self::Disable => "disabling",
             Self::Restart => "restarting",
+            Self::Start => "starting",
+            Self::Stop => "stopping",
         };
         let exit = if exit_when_complete {
             "; quitting when complete"
@@ -28,6 +32,8 @@ impl LifecycleAction {
         let action = match self {
             Self::Disable => "disabled",
             Self::Restart => "restarted",
+            Self::Start => "started",
+            Self::Stop => "stopped",
         };
         format!("{action} {name}")
     }
@@ -36,6 +42,8 @@ impl LifecycleAction {
         let action = match self {
             Self::Disable => "disable",
             Self::Restart => "restart",
+            Self::Start => "start",
+            Self::Stop => "stop",
         };
         format!("{action} {name}: {error}")
     }

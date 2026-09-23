@@ -4,7 +4,7 @@ use std::{
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::Duration,
 };
 
@@ -189,9 +189,11 @@ impl ManagerState {
         for entry in entries.flatten() {
             let link = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            match EnabledDefinition::read(&link)
-                .and_then(|definition| definition.load(&self.base_environment))
-            {
+            let loaded = match EnabledDefinition::read(&link) {
+                Ok(definition) => self.load_for_restore(&name, &definition).await,
+                Err(error) => Err(error),
+            };
+            match loaded {
                 Ok(service) if service.config.name == name => {
                     if self.services.contains_key(&name) {
                         warn!(service = %name, "ignoring duplicate enabled service");
@@ -209,6 +211,33 @@ impl ManagerState {
                 Err(error) => warn!(service = %name, %error, "ignoring invalid enabled service"),
             }
         }
+    }
+
+    async fn load_for_restore(
+        &self,
+        name: &str,
+        definition: &EnabledDefinition,
+    ) -> Result<LoadedService, String> {
+        validate_target_name(name)?;
+        if let Ok(status) = self
+            .fetch_runner_status(&self.paths.runner_socket(name), name)
+            .await
+        {
+            if status.manually_stopped {
+                if let Some(spec) = status.spec {
+                    let mut service = spec.into_loaded().map_err(|error| error.to_string())?;
+                    service.config_file = match &definition.source {
+                        ServiceSource::File(file) => Some(file.clone()),
+                        ServiceSource::Directory(directory) => {
+                            crate::config::resolve_config_file(directory)
+                                .map(|file| file.path().to_owned())
+                        }
+                    };
+                    return Ok(service);
+                }
+            }
+        }
+        definition.load(&self.base_environment)
     }
 
     async fn restore_transients(&mut self) {
@@ -290,27 +319,55 @@ impl ManagerState {
         let name = service.config.name.clone();
         validate_target_name(&name)?;
         let runner_socket = self.ensure_runner_socket(&name).await?;
+        let status = self.fetch_runner_status(&runner_socket, &name).await?;
+        if status.manually_stopped {
+            return self.track_service(service, kind, runner_socket, status);
+        }
+        let preserve_stop = self
+            .services
+            .get(&name)
+            .is_some_and(|service| service.status.manually_stopped);
         let spec = LaunchSpec::from_loaded(&service);
-        let log_directory = self.paths.logs_dir().join(&name);
-        match crate::runner_protocol::request(
-            &runner_socket,
-            &name,
+        let log_directory = self.paths.logs_dir().join(&name).display().to_string();
+        let request = if preserve_stop && status.spec.is_none() {
+            RunnerRequest::ConfigureStopped {
+                spec,
+                log_directory,
+            }
+        } else {
             RunnerRequest::Configure {
                 spec,
-                log_directory: log_directory.display().to_string(),
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?
-        {
-            RunnerResponse::Ok => {}
-            response => {
-                return Err(format!(
-                    "unexpected runner configure response: {response:?}"
-                ));
+                log_directory,
             }
-        }
+        };
+        self.runner_ok(&runner_socket, &name, request).await?;
         let status = self.fetch_runner_status(&runner_socket, &name).await?;
+        self.track_service(service, kind, runner_socket, status)
+    }
+
+    async fn runner_ok(
+        &self,
+        socket: &Path,
+        name: &str,
+        request: RunnerRequest,
+    ) -> Result<(), String> {
+        match crate::runner_protocol::request(socket, name, request)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RunnerResponse::Ok => Ok(()),
+            response => Err(format!("unexpected runner response: {response:?}")),
+        }
+    }
+
+    fn track_service(
+        &mut self,
+        service: LoadedService,
+        kind: ServiceKind,
+        runner_socket: PathBuf,
+        status: RunnerStatus,
+    ) -> Result<(), String> {
+        let name = service.config.name.clone();
         let watcher_generation = self.next_watcher_generation;
         self.next_watcher_generation = self.next_watcher_generation.wrapping_add(1).max(1);
         let watcher = watcher::spawn(
@@ -359,7 +416,7 @@ impl ManagerState {
         }
         remove_stale_runner_files(&self.paths, name);
         let binary = std::env::current_exe().map_err(|error| error.to_string())?;
-        Command::new(binary)
+        let mut child = tokio::process::Command::new(binary)
             .arg("runner")
             .arg("--name")
             .arg(name)
@@ -370,6 +427,9 @@ impl ManagerState {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("spawn runner for {name:?}: {error}"))?;
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
 
         for _ in 0..RUNNER_START_ATTEMPTS {
             if crate::runner_protocol::connect(&socket, name).await.is_ok() {
@@ -410,7 +470,9 @@ impl ManagerState {
             }
             Request::Run { spec } => self.run_temporary(spec).await,
             Request::Disable { target } => self.disable(target).await,
-            Request::Restart { target } => self.restart(target).await,
+            Request::Restart { target } => self.restart(target, false).await,
+            Request::Start { target } => self.restart(target, true).await,
+            Request::Stop { target } => self.stop_service(target).await,
             Request::Attach { .. } => Err("attach requires a raw socket handoff".to_owned()),
             Request::Resize {
                 name,
@@ -665,15 +727,58 @@ impl ManagerState {
         Ok(Response::Ok)
     }
 
-    async fn restart(&mut self, target: Target) -> std::result::Result<Response, String> {
+    async fn stop_service(&mut self, target: Target) -> Result<Response, String> {
         let (name, _, kind) = self.resolve_target(&target)?;
+        let service = self.services[&name].definition.clone();
+        let socket = self.ensure_runner_socket(&name).await?;
+        let status = self.fetch_runner_status(&socket, &name).await?;
+        require_start_stop(&name, kind, &status)?;
+        if status.spec.is_none() {
+            self.runner_ok(
+                &socket,
+                &name,
+                RunnerRequest::ConfigureStopped {
+                    spec: LaunchSpec::from_loaded(&service),
+                    log_directory: self.paths.logs_dir().join(&name).display().to_string(),
+                },
+            )
+            .await?;
+        } else {
+            self.runner_ok(&socket, &name, RunnerRequest::StopService)
+                .await?;
+        }
+        let status = self.fetch_runner_status(&socket, &name).await?;
+        self.track_service(service, kind, socket, status)?;
+        Ok(Response::Ok)
+    }
+
+    async fn restart(
+        &mut self,
+        target: Target,
+        start_only: bool,
+    ) -> std::result::Result<Response, String> {
+        let (name, _, kind) = self.resolve_target(&target)?;
+        if start_only {
+            let socket = self.ensure_runner_socket(&name).await?;
+            let status = self.fetch_runner_status(&socket, &name).await?;
+            require_start_stop(&name, kind, &status)?;
+            if matches!(
+                status.state,
+                RunnerServiceState::Starting
+                    | RunnerServiceState::Running
+                    | RunnerServiceState::Restarting
+            ) {
+                self.services.get_mut(&name).unwrap().status = status;
+                return Ok(Response::Ok);
+            }
+        }
         let service = match kind {
             ServiceKind::Enabled => {
                 let service = EnabledDefinition::read(&self.paths.registry_dir().join(&name))?
                     .load(&self.base_environment)?;
                 if service.config.name != name {
                     return Err(format!(
-                        "restart cannot rename enabled service from {name:?} to {:?}; disable it first",
+                        "start/restart cannot rename enabled service from {name:?} to {:?}; disable it first",
                         service.config.name
                     ));
                 }
@@ -687,41 +792,21 @@ impl ManagerState {
         };
         let socket = self.ensure_runner_socket(&name).await?;
         let spec = LaunchSpec::from_loaded(&service);
-        let response = crate::runner_protocol::request(
-            &socket,
-            &name,
+        let log_directory = self.paths.logs_dir().join(&name).display().to_string();
+        let request = if start_only {
+            RunnerRequest::StartService {
+                spec,
+                log_directory,
+            }
+        } else {
             RunnerRequest::Restart {
                 spec,
-                log_directory: self.paths.logs_dir().join(&name).display().to_string(),
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        if !matches!(response, RunnerResponse::Ok) {
-            return Err(format!("unexpected runner restart response: {response:?}"));
-        }
+                log_directory,
+            }
+        };
+        self.runner_ok(&socket, &name, request).await?;
         let status = self.fetch_runner_status(&socket, &name).await?;
-        let watcher_generation = self.next_watcher_generation;
-        self.next_watcher_generation = self.next_watcher_generation.wrapping_add(1).max(1);
-        let watcher = watcher::spawn(
-            socket.clone(),
-            name.clone(),
-            watcher_generation,
-            self.runner_updates.clone(),
-        );
-        if let Some(previous) = self.services.insert(
-            name.clone(),
-            ManagedService {
-                definition: service,
-                kind,
-                runner_socket: socket,
-                status,
-                watcher_generation,
-                watcher,
-            },
-        ) {
-            previous.watcher.abort();
-        }
+        self.track_service(service, kind, socket, status)?;
         info!(service = %name, "service restarted");
         Ok(Response::Ok)
     }
@@ -979,6 +1064,21 @@ impl ManagerState {
     }
 }
 
+fn require_start_stop(name: &str, kind: ServiceKind, status: &RunnerStatus) -> Result<(), String> {
+    if status.supports_start_stop {
+        return Ok(());
+    }
+    let recreate = match kind {
+        ServiceKind::Enabled => {
+            "enable it again with its original configuration source and working-directory override"
+        }
+        ServiceKind::Temporary => "run it again with its original command, options and environment",
+    };
+    Err(format!(
+        "service {name:?} uses an older runner without start/stop support; disable it, then {recreate}. This stops the service and discards its in-memory history; persistent logs are retained"
+    ))
+}
+
 fn shell_command(argv: &[String]) -> String {
     argv.iter()
         .map(|argument| format!("'{}'", argument.replace('\'', "'\\''")))
@@ -1065,7 +1165,19 @@ async fn stop_runner(socket: &Path, name: &str) -> Result<(), String> {
         .await
         .map_err(|error| error.to_string())?
     {
-        RunnerResponse::Ok => Ok(()),
+        RunnerResponse::Ok => {
+            // The runner acknowledges process termination before closing its socket.
+            // Do not let a following enable or fresh manager adopt that retiring runner.
+            for _ in 0..RUNNER_START_ATTEMPTS {
+                if !socket.exists() {
+                    return Ok(());
+                }
+                sleep(RUNNER_START_DELAY).await;
+            }
+            Err(format!(
+                "runner for {name:?} did not close its socket after stopping"
+            ))
+        }
         response => Err(format!("unexpected runner stop response: {response:?}")),
     }
 }
@@ -1217,6 +1329,96 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn old_runner_rejects_start_stop_without_receiving_a_mutating_request() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let root = tempdir().unwrap();
+        let paths = ServedPaths::from_home(root.path());
+        fs::create_dir_all(paths.runner_dir("api")).unwrap();
+        let socket = paths.runner_socket("api");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let status: RunnerStatus = serde_json::from_value(serde_json::json!({
+            "name":"api", "runner_pid":10, "state":"Running", "pid":11, "pid_start_time":12,
+            "tty":false, "restart":"always", "persist_logs":false, "attach_active":false,
+            "output_tail":"kept", "recent_failures":0, "window_seconds":60, "latest_log":null, "spec":null
+        })).unwrap();
+        let unexpected = Arc::new(AtomicUsize::new(0));
+        let received = unexpected.clone();
+        let old_status = status.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut frame = crate::ipc::framed(stream);
+                let request = crate::ipc::receive_json::<RunnerRequest>(&mut frame)
+                    .await
+                    .unwrap();
+                assert!(matches!(request, RunnerRequest::Hello { .. }));
+                crate::ipc::send_json(
+                    &mut frame,
+                    &RunnerResponse::Hello {
+                        version: 1,
+                        name: "api".to_owned(),
+                    },
+                )
+                .await
+                .unwrap();
+                if let Ok(request) = crate::ipc::receive_json::<RunnerRequest>(&mut frame).await {
+                    let response = match request {
+                        RunnerRequest::Status => RunnerResponse::Status {
+                            status: old_status.clone(),
+                        },
+                        _ => {
+                            received.fetch_add(1, Ordering::SeqCst);
+                            RunnerResponse::Error {
+                                message: "unsupported request".to_owned(),
+                            }
+                        }
+                    };
+                    crate::ipc::send_json(&mut frame, &response).await.unwrap();
+                }
+            }
+        });
+        let (updates, _) = mpsc::channel(16);
+        let mut manager = ManagerState::new(paths, Default::default(), updates);
+        let mut config = ServiceConfig::template(root.path());
+        config.name = "api".to_owned();
+        manager.services.insert(
+            "api".to_owned(),
+            ManagedService {
+                definition: LoadedService {
+                    config_file: None,
+                    directory: root.path().to_owned(),
+                    config,
+                    environment: Default::default(),
+                },
+                kind: ServiceKind::Enabled,
+                runner_socket: socket,
+                status,
+                watcher_generation: 1,
+                watcher: tokio::spawn(std::future::pending()),
+            },
+        );
+        let start = manager
+            .restart(Target::Name("api".to_owned()), true)
+            .await
+            .unwrap_err();
+        let stop = manager
+            .stop_service(Target::Name("api".to_owned()))
+            .await
+            .unwrap_err();
+        for error in [start, stop] {
+            assert!(error.contains("older runner"));
+            assert!(error.contains("in-memory history"));
+        }
+        assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+        assert_eq!(manager.services["api"].status.pid, Some(11));
+        manager.services.remove("api").unwrap().watcher.abort();
+        server.abort();
+    }
 
     #[test]
     fn enabled_definition_does_not_replace_existing_registrations() {

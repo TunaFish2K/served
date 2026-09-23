@@ -74,15 +74,15 @@ pub fn spawn_service(
     service: LoadedService,
     manager_environment: BTreeMap<String, String>,
     events: mpsc::Sender<WorkerEvent>,
-) -> mpsc::Sender<WorkerCommand> {
+) -> (mpsc::Sender<WorkerCommand>, tokio::task::JoinHandle<()>) {
     let (commands, receiver) = mpsc::channel(16);
-    tokio::spawn(runtime::run_service(
+    let task = tokio::spawn(runtime::run_service(
         service,
         manager_environment,
         events,
         receiver,
     ));
-    commands
+    (commands, task)
 }
 
 pub fn backoff(attempt: u32) -> Duration {

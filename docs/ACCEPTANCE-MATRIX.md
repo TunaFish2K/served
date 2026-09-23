@@ -58,7 +58,7 @@
 | 48 | `cargo test` | `manager_smoke::custom_sources_and_shared_workdirs_survive_recovery` |
 | 49 | `cargo test` | `manager_smoke::workdir_discovery_and_legacy_sources_remain_distinct`、runner v1 wire tests |
 | 50 | `cargo test` | `manager_smoke::start_stop_preserve_registration_history_and_reload_only_when_stopped` |
-| 51 | `cargo test` | `manager_smoke::stopped_services_survive_adoption_but_only_enabled_services_return_after_shutdown`、`stopped_runner_replacement_does_not_launch_a_process` |
+| 51 | `cargo test` | `manager_smoke::stopped_services_survive_adoption_but_only_enabled_services_return_after_shutdown`、`stopped_runner_replacement_does_not_launch_a_process`、`handoff_reaps_stopped_runners_and_preserves_manual_stop` |
 | 52 | `cargo test` | `manager_smoke::stop_cancels_backoff_and_start_stop_handle_quick_exits`、runner 停止失败与有界事件队列测试 |
 | 53 | `cargo test` | `manager::tests::old_runner_rejects_start_stop_without_receiving_a_mutating_request`、runner v1 能力缺省测试 |
 | 54 | `cargo test` | CLI start/stop parser、共享目录歧义测试、`tui::tests::lifecycle_footer_remains_visible_in_a_narrow_terminal` |
@@ -81,3 +81,13 @@
 - `make docs-check` 校验 mdoc、生成参考同步、skill 的可移植引用及独立包校验和。
 - `tests/docs_install.sh` 在临时目录验证权限、补齐、故障回滚和只删除所属文件。
 - macOS release smoke 校验 man 查询、文档修复保留 PID、升级回滚及多用户卸载保留。
+
+## handoff 后的 runner 回收
+
+- `process::tests::zombie_keeps_its_identity_but_is_not_alive` 验证僵尸保留身份但不阻止重建。
+- Linux stat 解析测试区分僵尸、死亡与暂停、不可中断睡眠；缺失 PID 和启动时间不匹配仍拒绝。
+- `manager::reaper` 测试验证只回收启动时捕获的子进程，不抢走 Tokio 新子进程的退出状态，
+  并排除非子进程及不匹配的身份。
+- `manager_smoke::handoff_reaps_stopped_runners_and_preserves_manual_stop` 覆盖 enabled/temporary：
+  stop → handoff → 杀死 runner → 重建且保持停止 → start，以及第二次 handoff 后的 disable。
+  测试要求旧 PID 被回收，不仅是业务进程已停止。

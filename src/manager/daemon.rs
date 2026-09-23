@@ -46,6 +46,10 @@ enum ManagerCommand {
 pub async fn run_daemon(paths: ServedPaths) -> Result<DaemonExit> {
     bootstrap_paths(&paths)?;
     let (listener, socket_path, generation_path) = bind_manager_socket(&paths).await?;
+    // Register before scanning/reaping so an exit during startup cannot be missed.
+    let mut sigchld = signal(SignalKind::child()).context("install SIGCHLD handler")?;
+    let mut inherited = super::reaper::InheritedRunners::capture(&paths);
+    inherited.reap();
     let (commands, mut command_receiver) = mpsc::channel(64);
     let (runner_updates, mut runner_update_receiver) = mpsc::channel(256);
     let mut state = ManagerState::new(paths, manager_environment(), runner_updates);
@@ -94,6 +98,7 @@ pub async fn run_daemon(paths: ServedPaths) -> Result<DaemonExit> {
             Some(update) = runner_update_receiver.recv() => {
                 state.handle_runner_update(update).await;
             }
+            _ = sigchld.recv() => inherited.reap(),
             _ = sigterm.recv() => {
                 let _ = state.stop_all().await;
                 break;

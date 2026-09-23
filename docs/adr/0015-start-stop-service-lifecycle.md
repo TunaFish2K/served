@@ -36,6 +36,17 @@ StopService、ConfigureStopped；最后一个请求只用于初始化未配置�
 配置来源和工作目录覆盖重新 enable，临时服务则按原命令、选项和环境重新 run。
 迁移提示必须说明内存历史会丢失、持久化日志保留。
 
+## handoff 后的进程回收
+
+handoff 使用 exec，原 manager 的 Tokio 子进程等待任务不会保留。新 manager 在创建任何
+runner 前注册 SIGCHLD 并捕获已有 runner 的 PID 与启动时间，立即检查并在退出信号到来时
+按具体 PID 非阻塞回收。非当前进程的子进程按 ECHILD 移出跟踪；新创建的 runner 继续由
+Tokio Child 等待任务管理。避免使用 waitpid(-1)，以免抢走其他子进程的退出状态。
+
+僵尸或已死亡进程不计为存活，但保留可查询的启动时间供回收前身份验证使用。
+Linux 的暂停、不可中断睡眠状态仍计为存活；macOS sysinfo 的 Dead 表示线程不可中断睡眠，
+不能将其当作进程已退出。
+
 ## 验证
 
 测试覆盖 PTY/pipe、幂等调用、配置加载时机、内存历史、attach 断开、自动重启取消、

@@ -2382,3 +2382,86 @@ async fn stopped_runner_replacement_does_not_launch_a_process() {
     wait_for_state(&h.paths, "api", ServiceState::Running).await;
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn handoff_reaps_stopped_runners_and_preserves_manual_stop() {
+    let mut h = LifecycleHarness::new().await;
+    h.config(false, "exec sleep 60", "always");
+    h.ok(&["enable"]);
+    h.ok(&[
+        "run",
+        "--name",
+        "temporary",
+        "--restart",
+        "always",
+        "--",
+        "sleep",
+        "60",
+    ]);
+    let mut old_runners = Vec::new();
+    for name in ["api", "temporary"] {
+        wait_for_state(&h.paths, name, ServiceState::Running).await;
+        h.ok(&["stop", name]);
+        old_runners.push(h.status(name).await.runner_pid);
+    }
+    h.ok(&["daemon", "--handoff"]);
+    for name in ["api", "temporary"] {
+        h.assert_stopped(name).await;
+    }
+    for old in &old_runners {
+        kill(
+            Pid::from_raw(*old as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap();
+    }
+    for (name, old) in ["api", "temporary"].into_iter().zip(old_runners) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(served::runner_protocol::RunnerResponse::Status { status }) =
+                    served::runner_protocol::request(
+                        &h.paths.runner_socket(name),
+                        name,
+                        served::runner_protocol::RunnerRequest::Status,
+                    )
+                    .await
+                {
+                    if status.runner_pid != old && status.manually_stopped {
+                        assert!(status.pid.is_none());
+                        break;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("handoff must not prevent stopped runner replacement");
+        // kill(pid, 0) still succeeds for zombies: require actual reaping, not only
+        // the absence of a running process reported by process_exists().
+        wait_for_reaped_pid(old).await;
+        h.assert_stopped(name).await;
+        h.ok(&["start", name]);
+        wait_for_state(&h.paths, name, ServiceState::Running).await;
+    }
+    // A second handoff must also reap orderly exits whose metadata was removed.
+    h.ok(&["daemon", "--handoff"]);
+    for name in ["api", "temporary"] {
+        let runner = h.status(name).await.runner_pid;
+        h.ok(&["disable", name]);
+        wait_for_reaped_pid(runner).await;
+    }
+    h.shutdown().await;
+}
+
+async fn wait_for_reaped_pid(pid: u32) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if kill(Pid::from_raw(pid as i32), None) == Err(Errno::ESRCH) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("runner must be reaped, not retained as a zombie");
+}

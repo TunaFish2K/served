@@ -45,6 +45,7 @@ pub enum DaemonExit {
 }
 
 mod daemon;
+mod reaper;
 mod watcher;
 
 pub use daemon::run_daemon;

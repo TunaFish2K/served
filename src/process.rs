@@ -15,7 +15,7 @@ pub(crate) fn matches(pid: u32, expected_start_time: Option<u64>) -> bool {
     })
 }
 
-// Keep identity available for zombies so the manager can safely reap inherited children.
+// Some platforms retain zombie identity; macOS may no longer expose it after exit.
 pub(crate) fn start_time(pid: u32) -> Option<u64> {
     inspect(pid).map(|info| info.start_time)
 }
@@ -70,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn zombie_keeps_its_identity_but_is_not_alive() {
+    fn zombie_is_not_alive_even_when_identity_is_unavailable() {
         let mut child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()
@@ -88,7 +88,10 @@ mod tests {
         child.wait().unwrap();
         assert!(!still_alive);
         assert!(!still_matches);
+        #[cfg(target_os = "linux")]
         assert_eq!(zombie_identity, Some(started));
+        #[cfg(target_os = "macos")]
+        assert!(zombie_identity.is_none_or(|identity| identity == started));
     }
 
     #[cfg(target_os = "linux")]

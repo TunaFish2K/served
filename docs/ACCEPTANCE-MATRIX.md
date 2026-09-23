@@ -84,7 +84,7 @@
 
 ## handoff 后的 runner 回收
 
-- `process::tests::zombie_keeps_its_identity_but_is_not_alive` 验证僵尸保留身份但不阻止重建。
+- `process::tests::zombie_is_not_alive_even_when_identity_is_unavailable` 验证僵尸不阻止重建，包括 macOS 无法再查询身份的情况。
 - Linux stat 解析测试区分僵尸、死亡与暂停、不可中断睡眠；缺失 PID 和启动时间不匹配仍拒绝。
 - `manager::reaper` 测试验证只回收启动时捕获的子进程，不抢走 Tokio 新子进程的退出状态，
   并排除非子进程及不匹配的身份。

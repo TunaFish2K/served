@@ -1337,7 +1337,10 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         };
-        let root = tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("served-old-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let paths = ServedPaths::from_home(root.path());
         fs::create_dir_all(paths.runner_dir("api")).unwrap();
         let socket = paths.runner_socket("api");

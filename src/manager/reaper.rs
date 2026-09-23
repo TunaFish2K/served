@@ -31,7 +31,11 @@ impl InheritedRunners {
                 if pid <= 0 {
                     continue;
                 }
-                let Some(started) = process::start_time(metadata.runner_pid) else {
+                // macOS may stop exposing process information for an unreaped child.
+                // Keep its recorded identity so waitpid can still confirm and reap it.
+                let Some(started) =
+                    process::start_time(metadata.runner_pid).or(metadata.runner_start_time)
+                else {
                     continue;
                 };
                 if metadata
@@ -48,7 +52,7 @@ impl InheritedRunners {
 
     pub(super) fn reap(&mut self) {
         self.0.retain(|&(pid, started)| {
-            if process::start_time(pid.as_raw() as u32) != Some(started) {
+            if process::start_time(pid.as_raw() as u32).is_some_and(|actual| actual != started) {
                 return false;
             }
             match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
@@ -116,6 +120,29 @@ mod tests {
             Some(Errno::ECHILD as i32)
         );
         assert_eq!(later.wait().await.unwrap().code(), Some(7));
+    }
+
+    #[test]
+    fn reaps_child_that_exited_before_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ServedPaths::from_home(root.path());
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        record(&paths, "api", pid, process::start_time(pid).unwrap());
+        child.kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while process::matches(pid, None) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!process::matches(pid, None));
+        let mut inherited = InheritedRunners::capture(&paths);
+        assert_eq!(inherited.0.len(), 1);
+        inherited.reap();
+        assert!(inherited.0.is_empty());
+        assert_eq!(
+            child.wait().unwrap_err().raw_os_error(),
+            Some(Errno::ECHILD as i32)
+        );
     }
 
     #[test]

@@ -1,10 +1,11 @@
 use std::{
-    io::{self, IsTerminal, Write, stdout},
+    io::{self, stdout},
     path::Path,
     time::{Duration, Instant},
 };
 
 use crate::{
+    attach::{attach_session, crash_warning},
     client, editor,
     logs::DEFAULT_CHUNK_LIMIT,
     paths::ServedPaths,
@@ -17,14 +18,10 @@ use crossterm::{
     execute,
     terminal::{
         Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-        disable_raw_mode, enable_raw_mode, size,
+        disable_raw_mode, enable_raw_mode,
     },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    time::interval,
-};
 
 mod model;
 mod view;
@@ -40,99 +37,6 @@ use view::{draw_history_content, draw_history_list, draw_main, draw_reader};
 use crate::protocol::{ServiceInfo, ServiceKind, ServiceState};
 #[cfg(test)]
 use view::history_position;
-
-pub async fn attach(paths: ServedPaths, name: Option<String>) -> Result<()> {
-    let result = match name {
-        Some(name) => client::attach(&paths, name.clone())
-            .await
-            .map(|session| (name, session)),
-        None => {
-            let directory = std::env::current_dir().context("read current directory")?;
-            client::attach_current(&paths, directory).await
-        }
-    };
-    let (service_name, session) = match result {
-        Ok(session) => session,
-        Err(error) => return handle_direct_attach_error(error).await,
-    };
-    let _screen = AttachScreen::enter()?;
-    attach_session(&paths, service_name, session).await
-}
-
-async fn handle_direct_attach_error(error: anyhow::Error) -> Result<()> {
-    let Some(unavailable) = error.downcast_ref::<client::AttachUnavailable>() else {
-        return Err(error);
-    };
-    let warning = crash_warning(unavailable);
-    let latest_log = unavailable.latest_log.clone();
-    eprintln!("{warning}");
-    let Some(path) = latest_log else {
-        eprintln!("latest.log is unavailable; enable persist_logs or use the TUI history browser");
-        return Err(error);
-    };
-    eprintln!("latest log: {}", path.display());
-
-    if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        eprint!("Open latest.log? [y/N] ");
-        if let Err(prompt_error) = io::stderr().flush() {
-            eprintln!("cannot show latest.log prompt: {prompt_error}");
-            return Err(error);
-        }
-        let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_ok() && is_affirmative(&answer) {
-            if let Err(editor_error) = open_default_editor(&path).await {
-                eprintln!("cannot open latest.log: {editor_error}");
-            }
-        }
-    }
-
-    Err(error)
-}
-
-fn crash_warning(unavailable: &client::AttachUnavailable) -> String {
-    format!(
-        "warning: service {:?} is not running after {} failures in {} seconds",
-        unavailable.name, unavailable.recent_failures, unavailable.window_seconds
-    )
-}
-
-fn is_affirmative(answer: &str) -> bool {
-    matches!(answer.trim(), "y" | "Y")
-}
-
-async fn open_default_editor(path: &Path) -> Result<()> {
-    let editor = editor::resolve(None)?;
-    let status = editor::run(&editor, path).await?;
-    editor::require_success(status)
-}
-
-struct AttachScreen;
-
-impl AttachScreen {
-    fn enter() -> Result<Self> {
-        enable_raw_mode().context("enable attach raw mode")?;
-        let mut output = stdout();
-        if let Err(error) = execute!(
-            output,
-            EnterAlternateScreen,
-            TerminalClear(ClearType::All),
-            MoveTo(0, 0),
-            Show
-        ) {
-            disable_raw_mode().ok();
-            return Err(error).context("enter attach alternate screen");
-        }
-        Ok(Self)
-    }
-}
-
-impl Drop for AttachScreen {
-    fn drop(&mut self) {
-        disable_raw_mode().ok();
-        let mut output = stdout();
-        let _ = execute!(output, LeaveAlternateScreen, Show);
-    }
-}
 
 pub async fn run(paths: ServedPaths) -> Result<()> {
     let backend = CrosstermBackend::new(stdout());
@@ -576,7 +480,7 @@ async fn attach_in_tui(
     session: client::AttachSession,
 ) -> Result<()> {
     clear_attach_screen(terminal)?;
-    let attach_result = attach_session(paths, name, session).await;
+    let attach_result = attach_session(paths, name, session, true, true).await;
     let restore_result = clear_attach_screen(terminal);
     if let Err(error) = attach_result {
         restore_result?;
@@ -620,126 +524,6 @@ fn clear_attach_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) ->
     terminal.clear().context("clear attach screen")?;
     execute!(terminal.backend_mut(), MoveTo(0, 0), Show).context("reset attach cursor")?;
     Ok(())
-}
-
-struct ResizeController<'a> {
-    paths: &'a ServedPaths,
-    name: String,
-    token: String,
-    frame: Option<crate::protocol::Frame>,
-    current_size: Option<(u16, u16)>,
-    applied_size: Option<(u16, u16)>,
-    retry_at: Instant,
-    retry_delay: Duration,
-}
-
-impl<'a> ResizeController<'a> {
-    const BASE_RETRY: Duration = Duration::from_millis(250);
-    const MAX_RETRY: Duration = Duration::from_secs(5);
-
-    fn new(paths: &'a ServedPaths, name: String, token: String) -> Self {
-        Self {
-            paths,
-            name,
-            token,
-            frame: None,
-            current_size: None,
-            applied_size: None,
-            retry_at: Instant::now(),
-            retry_delay: Self::BASE_RETRY,
-        }
-    }
-
-    async fn sync(&mut self) {
-        if let Ok((cols, rows)) = size() {
-            if cols > 0 && rows > 0 {
-                self.current_size = Some((cols, rows));
-            }
-        }
-        let Some((cols, rows)) = self.current_size else {
-            return;
-        };
-
-        if self.frame.is_none() {
-            if Instant::now() < self.retry_at {
-                return;
-            }
-            match client::open_resize_control(self.paths).await {
-                Ok(frame) => {
-                    self.frame = Some(frame);
-                    self.applied_size = None;
-                    self.retry_delay = Self::BASE_RETRY;
-                }
-                Err(_) => {
-                    self.schedule_retry();
-                    return;
-                }
-            }
-        }
-
-        if self.applied_size == Some((cols, rows)) {
-            return;
-        }
-        let result = match self.frame.as_mut() {
-            Some(frame) => client::send_resize(frame, &self.name, &self.token, cols, rows).await,
-            None => return,
-        };
-        match result {
-            Ok(()) => {
-                self.applied_size = Some((cols, rows));
-                self.retry_delay = Self::BASE_RETRY;
-            }
-            Err(_) => {
-                self.frame = None;
-                self.schedule_retry();
-            }
-        }
-    }
-
-    fn schedule_retry(&mut self) {
-        self.retry_at = Instant::now() + self.retry_delay;
-        self.retry_delay = self.retry_delay.saturating_mul(2).min(Self::MAX_RETRY);
-    }
-}
-
-async fn attach_session(
-    paths: &ServedPaths,
-    name: String,
-    session: client::AttachSession,
-) -> Result<()> {
-    let client::AttachSession { stream, token } = session;
-    let (mut socket_read, mut socket_write) = tokio::io::split(stream);
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    let mut input = [0_u8; 8192];
-    let mut output = [0_u8; 8192];
-    let mut resize = ResizeController::new(paths, name, token);
-    resize.sync().await;
-    let mut resize_tick = interval(Duration::from_millis(250));
-    loop {
-        tokio::select! {
-            count = stdin.read(&mut input) => {
-                let count = count?;
-                if count == 0 || input_requests_detach(&input[..count]) {
-                    return Ok(());
-                }
-                socket_write.write_all(&input[..count]).await?;
-            }
-            count = socket_read.read(&mut output) => {
-                let count = count?;
-                if count == 0 {
-                    return Ok(());
-                }
-                stdout.write_all(&output[..count]).await?;
-                stdout.flush().await?;
-            }
-            _ = resize_tick.tick() => resize.sync().await,
-        }
-    }
-}
-
-fn input_requests_detach(input: &[u8]) -> bool {
-    input.contains(&0x03)
 }
 
 #[cfg(test)]
@@ -816,13 +600,6 @@ mod tests {
         assert_eq!(history_position(99, 3), (3, 3));
     }
 
-    #[test]
-    fn ctrl_c_is_the_attach_detach_byte() {
-        assert!(input_requests_detach(b"output\x03"));
-        assert!(!input_requests_detach(b"output\x1d"));
-        assert!(!input_requests_detach(b"output"));
-    }
-
     #[tokio::test]
     async fn lifecycle_action_starts_without_waiting_and_reports_success() {
         let (release, waiting) = tokio::sync::oneshot::channel();
@@ -857,15 +634,6 @@ mod tests {
         let outcome = pending.finish().await;
         assert!(!outcome.succeeded);
         assert_eq!(outcome.notice, "restart api: runner unavailable");
-    }
-
-    #[test]
-    fn attach_log_prompt_accepts_only_explicit_yes() {
-        assert!(is_affirmative("y\n"));
-        assert!(is_affirmative("Y"));
-        assert!(!is_affirmative(""));
-        assert!(!is_affirmative("n\n"));
-        assert!(!is_affirmative("yes"));
     }
 
     #[test]

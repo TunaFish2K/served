@@ -3,6 +3,7 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("served supports Linux and macOS only");
 
+pub mod attach;
 pub mod cli;
 pub mod client;
 pub mod config;
@@ -15,5 +16,6 @@ mod process;
 pub mod protocol;
 pub mod runner;
 pub mod runner_protocol;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod worker;

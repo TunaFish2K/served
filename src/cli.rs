@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    client,
+    attach, client,
     config::{
         DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_MAX_FILES, default_service_name, prepare_config_file,
         prepare_explicit_config,
@@ -16,11 +16,13 @@ use crate::{
     manager,
     paths::ServedPaths,
     protocol::{HistoryRecord, Request, Response, RunSpec, ServiceKind, Target},
-    runner, tui,
+    runner,
 };
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
+#[cfg(feature = "tui")]
+use std::io::IsTerminal;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing_subscriber::EnvFilter;
 
@@ -117,7 +119,15 @@ enum Command {
     /// Stop a service while retaining its registration and history.
     Stop { name: Option<String> },
     /// Attach directly to the current service, or a managed service by name.
-    Attach { name: Option<String> },
+    Attach {
+        name: Option<String>,
+        /// Transfer raw bytes without terminal setup or prompts.
+        #[arg(long)]
+        stream: bool,
+        /// Receive output without reading stdin.
+        #[arg(long)]
+        no_stdin: bool,
+    },
     /// Read service output history, open its raw file, or print its path.
     History {
         name: Option<String>,
@@ -159,7 +169,14 @@ pub async fn run() -> Result<()> {
         command => {
             let paths = ServedPaths::from_environment().context("served requires HOME")?;
             match command {
-                None => tui::run(paths).await,
+                None => {
+                    #[cfg(feature = "tui")]
+                    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                        return crate::tui::run(paths).await;
+                    }
+                    Cli::command().print_help()?;
+                    Ok(())
+                }
                 Some(Command::Daemon {
                     handoff,
                     relinquish,
@@ -244,7 +261,11 @@ pub async fn run() -> Result<()> {
                     let target = client::target(name, std::env::current_dir()?);
                     client::expect_ok(&paths, Request::Stop { target }).await
                 }
-                Some(Command::Attach { name }) => tui::attach(paths, name).await,
+                Some(Command::Attach {
+                    name,
+                    stream,
+                    no_stdin,
+                }) => attach::attach(paths, name, stream, no_stdin).await,
                 Some(Command::History {
                     name,
                     run,
@@ -572,14 +593,14 @@ mod tests {
         let without_name = Cli::try_parse_from(["served", "attach"]).expect("parse attach");
         assert!(matches!(
             without_name.command,
-            Some(Command::Attach { name: None })
+            Some(Command::Attach { name: None, .. })
         ));
 
         let with_name =
             Cli::try_parse_from(["served", "attach", "api"]).expect("parse named attach");
         assert!(matches!(
             with_name.command,
-            Some(Command::Attach { name: Some(name) }) if name == "api"
+            Some(Command::Attach { name: Some(name), .. }) if name == "api"
         ));
     }
 

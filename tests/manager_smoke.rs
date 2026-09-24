@@ -2466,6 +2466,7 @@ async fn wait_for_reaped_pid(pid: u32) {
     .expect("runner must be reaped, not retained as a zombie");
 }
 
+#[cfg(feature = "tui")]
 #[tokio::test]
 async fn tui_menu_drives_lifecycle_and_returns_from_attach() {
     let mut harness = LifecycleHarness::new().await;
@@ -2561,4 +2562,93 @@ async fn tui_menu_drives_lifecycle_and_returns_from_attach() {
     assert!(wait_for_pty_child(&mut child.0).success());
     output_thread.join().unwrap();
     harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn stream_attach_keeps_output_after_stdin_eof_and_preserves_control_bytes() {
+    use std::process::Stdio;
+    let mut h = LifecycleHarness::new().await;
+    h.config(true, "stty raw -echo; printf 'ready'; dd bs=1 count=3 2>/dev/null; sleep 0.2; printf 'delayed'; exit 7", "never");
+    h.ok(&["enable"]);
+    wait_for_output_tail(&h.paths, "api", "ready").await;
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_served"))
+        .args(["attach", "api", "--stream"])
+        .env("HOME", &h.home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"a\x03b")
+        .await
+        .unwrap();
+    let result = timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert!(
+        result.stdout.windows(3).any(|bytes| bytes == b"a\x03b"),
+        "{result:?}"
+    );
+    assert!(result.stdout.ends_with(b"delayed"), "{result:?}");
+    assert!(
+        !result.stdout.contains(&0x1b),
+        "attach added terminal escapes"
+    );
+    assert!(result.stderr.is_empty(), "{result:?}");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn stream_attach_cancels_blocked_input_and_output_without_stopping_service() {
+    use nix::sys::signal::Signal;
+    use std::process::Stdio;
+    let mut h = LifecycleHarness::new().await;
+    h.config(
+        false,
+        "while true; do printf 'data-data-data-data\\n'; done",
+        "never",
+    );
+    h.ok(&["enable"]);
+    wait_for_state(&h.paths, "api", ServiceState::Running).await;
+    for (args, signal, expected) in [
+        (vec!["attach", "api"], Some(Signal::SIGTERM), 143),
+        (
+            vec!["attach", "api", "--no-stdin"],
+            Some(Signal::SIGINT),
+            130,
+        ),
+        (vec!["attach", "api", "--stream"], None, 0),
+    ] {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_served"))
+            .args(args)
+            .env("HOME", &h.home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        wait_for_attach_state(&h.paths, "api", true).await;
+        sleep(Duration::from_millis(200)).await;
+        if let Some(signal) = signal {
+            kill(Pid::from_raw(child.id().unwrap() as i32), signal).unwrap();
+        } else {
+            drop(child.stdout.take());
+        }
+        let status = timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.code(), Some(expected));
+        wait_for_attach_state(&h.paths, "api", false).await;
+        wait_for_state(&h.paths, "api", ServiceState::Running).await;
+    }
+    h.shutdown().await;
 }

@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
@@ -46,16 +46,41 @@ fn footer_width(footer: Footer) -> usize {
         + footer.len().saturating_sub(1) * 3
 }
 
-fn footer_rows(area: Rect, footer: Footer) -> u16 {
-    if usize::from(inner_width(area)) >= footer_width(footer) + 2 + 20 {
+fn footer_rows(width: u16, footer: Footer) -> u16 {
+    if usize::from(width) >= footer_width(footer) + 2 + 20 {
         1
     } else {
         2
     }
 }
 
-pub(super) fn body_rows(area: Rect, footer: Footer) -> usize {
-    usize::from(area.height.saturating_sub(5 + footer_rows(area, footer))).max(1)
+fn work_width(area: Rect, items: Option<usize>) -> u16 {
+    if items.is_some() {
+        inner_width(area).min(76)
+    } else {
+        inner_width(area)
+    }
+}
+
+pub(super) fn body_rows(area: Rect, footer: Footer, items: Option<usize>) -> usize {
+    let available = usize::from(
+        area.height
+            .saturating_sub(5 + footer_rows(work_width(area, items), footer)),
+    )
+    .max(1);
+    items.map_or(available, |count| count.max(6).min(available))
+}
+
+pub(super) fn main_rows(area: Rect, ui: &MainUi) -> usize {
+    let items = if ui.help.is_some() || ui.message.is_some() {
+        None
+    } else {
+        Some(match ui.page {
+            Page::Services => ui.services.len(),
+            _ => 6,
+        })
+    };
+    body_rows(area, main_footer(ui), items)
 }
 
 pub(super) fn main_footer(ui: &MainUi) -> Footer {
@@ -79,52 +104,46 @@ struct PageAreas {
 }
 
 /// All managed screens share this borderless frame. Attach owns the raw terminal.
-fn page(frame: &mut Frame<'_>, title: &str, count: &str, footer: Footer) -> Option<PageAreas> {
+fn page(
+    frame: &mut Frame<'_>,
+    title: &str,
+    count: &str,
+    footer: Footer,
+    items: Option<usize>,
+) -> Option<PageAreas> {
     let area = frame.area();
     if !usable(area) {
         frame.render_widget(Paragraph::new("Resize to 40x10\nq quit / Esc back"), area);
         return None;
     }
     let margin = if area.width < 80 { 1 } else { 2 };
-    let inner = Rect::new(
+    let width = work_width(area, items);
+    let body = Rect::new(
         area.x + margin,
-        area.y + 1,
-        area.width - margin * 2,
-        area.height - 2,
+        area.y + 3,
+        width,
+        body_rows(area, footer, items) as u16,
     );
-    let regions = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(footer_rows(area, footer)),
-        ])
-        .split(inner);
-    let count_width = count.width().min(usize::from(inner.width)) as u16;
-    let title_width = inner
-        .width
-        .saturating_sub(count_width + u16::from(!count.is_empty()));
-    frame.render_widget(
-        Paragraph::new(clip(title, usize::from(title_width), false))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-        Rect {
-            width: title_width,
-            ..regions[0]
-        },
+    let footer_area = Rect::new(body.x, body.bottom() + 1, width, footer_rows(width, footer));
+    let count = if count.is_empty() {
+        String::new()
+    } else {
+        format!(" · {count}")
+    };
+    let title = clip(
+        title,
+        usize::from(width).saturating_sub(count.width()),
+        false,
     );
     frame.render_widget(
-        Paragraph::new(count).style(muted()),
-        Rect {
-            x: inner.right() - count_width,
-            width: count_width,
-            ..regions[0]
-        },
+        Paragraph::new(Line::from(vec![
+            Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(count, muted()),
+        ])),
+        Rect::new(body.x, area.y + 1, width, 1),
     );
     let width = footer_width(footer) as u16;
-    let footer_area = regions[4];
-    let keys = Rect::new(inner.right() - width, footer_area.bottom() - 1, width, 1);
+    let keys = Rect::new(body.right() - width, footer_area.bottom() - 1, width, 1);
     let mut spans = Vec::new();
     for (index, (key, description)) in footer.iter().enumerate() {
         if index > 0 {
@@ -135,14 +154,14 @@ fn page(frame: &mut Frame<'_>, title: &str, count: &str, footer: Footer) -> Opti
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), keys);
     Some(PageAreas {
-        body: regions[2],
+        body,
         detail: Rect::new(
-            inner.x,
+            body.x,
             footer_area.y,
             if footer_area.height == 1 {
-                inner.width - width - 2
+                body.width - width - 2
             } else {
-                inner.width
+                body.width
             },
             1,
         ),
@@ -227,7 +246,7 @@ fn text_page(
     footer: Footer,
     detail: &str,
 ) {
-    let Some(areas) = page(frame, title, "", footer) else {
+    let Some(areas) = page(frame, title, "", footer, None) else {
         return;
     };
     *scroll = (*scroll).min(lines.len().saturating_sub(usize::from(areas.body.height)));
@@ -277,7 +296,8 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
     let viewport = (frame.area().width, frame.area().height);
     if ui.viewport != viewport {
         if let Page::Actions { selected, scroll } = &mut ui.page {
-            *scroll = selected.saturating_sub(body_rows(frame.area(), ACTIONS).saturating_sub(1));
+            *scroll = selected
+                .saturating_sub(body_rows(frame.area(), ACTIONS, Some(6)).saturating_sub(1));
         }
         ui.viewport = viewport;
     }
@@ -300,8 +320,13 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             let Some(service) = service else {
                 return;
             };
-            let Some(areas) = page(frame, &format!("{} / actions", service.name), "", ACTIONS)
-            else {
+            let Some(areas) = page(
+                frame,
+                &format!("{} / actions", service.name),
+                "",
+                ACTIONS,
+                Some(6),
+            ) else {
                 return;
             };
             let rows = usize::from(areas.body.height);
@@ -342,8 +367,13 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             let Some(service) = service else {
                 return;
             };
-            let Some(areas) = page(frame, &format!("{} / disable", service.name), "", CONFIRM)
-            else {
+            let Some(areas) = page(
+                frame,
+                &format!("{} / disable", service.name),
+                "",
+                CONFIRM,
+                Some(6),
+            ) else {
                 return;
             };
             frame.render_widget(
@@ -359,6 +389,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 Rect {
                     y: areas.body.y + 1,
                     height: areas.body.height - 1,
+                    width: 9,
                     ..areas.body
                 },
                 items,
@@ -396,7 +427,7 @@ fn draw_services(
         )
     };
     let footer = if services.is_empty() { EMPTY } else { SERVICES };
-    let Some(areas) = page(frame, "served", &count, footer) else {
+    let Some(areas) = page(frame, "served", &count, footer, Some(services.len())) else {
         return;
     };
     if services.is_empty() {
@@ -407,7 +438,13 @@ fn draw_services(
         };
         frame.render_widget(Paragraph::new(message).style(muted()), areas.body);
     } else {
-        let name_width = usize::from(areas.body.width.saturating_sub(14));
+        let name_width = services
+            .iter()
+            .map(|service| service.name.width())
+            .max()
+            .unwrap_or(0)
+            .clamp(10, 24)
+            .min(usize::from(areas.body.width.saturating_sub(13)));
         let items = services
             .iter()
             .map(|service| {
@@ -426,7 +463,16 @@ fn draw_services(
                 ]))
             })
             .collect();
-        list(frame, areas.body, items, selected);
+        // Keep names and states together, like the compact action menu.
+        list(
+            frame,
+            Rect {
+                width: (name_width + 13) as u16,
+                ..areas.body
+            },
+            items,
+            selected,
+        );
     }
     draw_service_detail(frame, areas.detail, services.get(selected), stale, notice);
 }
@@ -510,6 +556,7 @@ pub(super) fn draw_history_list(
         &format!("{name} / history"),
         &format!("{} runs", records.len()),
         HISTORY,
+        Some(records.len()),
     ) else {
         return;
     };
@@ -519,6 +566,25 @@ pub(super) fn draw_history_list(
             areas.body,
         );
     }
+    let suffix_width = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{} B {}",
+                record.bytes,
+                if record.persisted { "disk" } else { "memory" }
+            )
+            .width()
+        })
+        .max()
+        .unwrap_or(0);
+    let id_width = records
+        .iter()
+        .map(|record| record.id.width())
+        .max()
+        .unwrap_or(0)
+        .clamp(10, 24)
+        .min(usize::from(areas.body.width).saturating_sub(suffix_width + 3));
     let items = records
         .iter()
         .map(|record| {
@@ -527,7 +593,7 @@ pub(super) fn draw_history_list(
                 record.bytes,
                 if record.persisted { "disk" } else { "memory" }
             );
-            let width = usize::from(areas.body.width).saturating_sub(suffix.width() + 3);
+            let width = id_width;
             let id = clip(&record.id, width, false);
             ListItem::new(format!(
                 "{id}{} {suffix}",
@@ -535,7 +601,15 @@ pub(super) fn draw_history_list(
             ))
         })
         .collect();
-    list(frame, areas.body, items, selected);
+    list(
+        frame,
+        Rect {
+            width: (id_width + suffix_width + 3).min(usize::from(areas.body.width)) as u16,
+            ..areas.body
+        },
+        items,
+        selected,
+    );
     if let Some(record) = records.get(selected) {
         frame.render_widget(
             Paragraph::new(clip(&record.id, usize::from(areas.detail.width), false)).style(muted()),
@@ -545,7 +619,13 @@ pub(super) fn draw_history_list(
 }
 
 pub(super) fn draw_history_content(frame: &mut Frame<'_>, name: &str, history: &HistoryView) {
-    let Some(areas) = page(frame, &format!("{name} / {}", history.id), "", CONTENT) else {
+    let Some(areas) = page(
+        frame,
+        &format!("{name} / {}", history.id),
+        "",
+        CONTENT,
+        None,
+    ) else {
         return;
     };
     // Preserve logical-line scrolling and avoid Paragraph's u16 scroll truncation.
@@ -605,8 +685,11 @@ mod tests {
                 terminal
                     .draw(|frame| {
                         let area = frame.area();
-                        let areas = page(frame, "Title", "", footer).unwrap();
-                        assert_eq!(usize::from(areas.body.height), body_rows(area, footer));
+                        let areas = page(frame, "Title", "", footer, None).unwrap();
+                        assert_eq!(
+                            usize::from(areas.body.height),
+                            body_rows(area, footer, None)
+                        );
                         assert_eq!(areas.detail.y, if width < threshold { 7 } else { 8 });
                         assert!(areas.detail.width >= 20);
                         frame.render_widget(Paragraph::new("detail").style(muted()), areas.detail);

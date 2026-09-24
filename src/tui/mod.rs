@@ -226,14 +226,11 @@ async fn run_loop(
         }
         let area = terminal.size()?;
         let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
-        let rows = view::body_rows(
-            area,
-            if crash_prompt.is_some() {
-                view::CRASH
-            } else {
-                view::main_footer(&ui)
-            },
-        );
+        let rows = if crash_prompt.is_some() {
+            view::body_rows(area, view::CRASH, None)
+        } else {
+            view::main_rows(area, &ui)
+        };
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if pending_action.is_some() {
                 exit_when_idle = true;
@@ -413,6 +410,11 @@ async fn history_in_tui(
                 view::CONTENT
             } else {
                 view::HISTORY
+            },
+            if help.is_none() && message.is_none() && view.is_none() {
+                Some(records.len())
+            } else {
+                None
             },
         );
         if !view::usable(area) && !matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
@@ -1089,8 +1091,16 @@ mod tests {
     fn actual_pages_follow_the_footer_contract() {
         use model::Page;
         for width in (40..=62).chain([80, 120]) {
-            let mut terminal =
-                Terminal::new(TestBackend::new(width, if width < 80 { 10 } else { 24 })).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(
+                width,
+                match width {
+                    60 => 16,
+                    80 => 24,
+                    120 => 40,
+                    _ => 10,
+                },
+            ))
+            .unwrap();
             let mut ui = MainUi::default();
             let mut service = service_info(false);
             service.directory = "/projects/api".into();
@@ -1126,7 +1136,7 @@ mod tests {
                 assert!(baseline.contains(keys));
                 let lines: Vec<_> = baseline.lines().collect();
                 let height = terminal.backend().buffer().area.height;
-                let rows = view::body_rows(ratatui::layout::Rect::new(0, 0, width, height), footer);
+                let rows = view::main_rows(ratatui::layout::Rect::new(0, 0, width, height), &ui);
                 let body = lines[3..3 + rows].join("\n");
                 assert!(!body.contains("/projects"));
                 assert!(!body.contains("enabled"));
@@ -1262,7 +1272,11 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         for width in [40, 60, 120, 40] {
             terminal.backend_mut().resize(width, 10);
-            let rows = view::body_rows(ratatui::layout::Rect::new(0, 0, width, 10), view::ACTIONS);
+            let rows = view::body_rows(
+                ratatui::layout::Rect::new(0, 0, width, 10),
+                view::ACTIONS,
+                Some(6),
+            );
             for (key, expected) in [
                 (KeyCode::Home, 0),
                 (KeyCode::PageDown, rows.min(5)),
@@ -1290,6 +1304,93 @@ mod tests {
             .draw(|frame| draw_main(frame, &mut ui, ""))
             .unwrap();
         assert!(ui.help.as_ref().unwrap().scroll > 0);
+    }
+
+    #[test]
+    fn compact_lists_grow_then_scroll_without_stretching_to_window_width() {
+        for (width, height) in [(40, 10), (60, 16), (80, 24), (120, 40)] {
+            for count in [0usize, 1, 6, 7, 50] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let mut ui = MainUi::default();
+                ui.refresh(
+                    (0..count)
+                        .map(|i| {
+                            let mut service = service_info(false);
+                            service.name = format!("service-{i:02}");
+                            service
+                        })
+                        .collect(),
+                );
+                ui.selected = count.saturating_sub(1);
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let text = buffer_text(&terminal);
+                let lines: Vec<_> = text.lines().collect();
+                let footer_y = lines
+                    .iter()
+                    .position(|line| line.contains("q quit"))
+                    .unwrap();
+                if height >= 24 {
+                    assert_eq!(footer_y, 4 + count.clamp(6, (height - 6) as usize));
+                }
+                if count > 0 {
+                    assert!(text.contains(&format!("> service-{:02}", count - 1)));
+                }
+                assert!(lines[1].contains(&format!("served · {count} service")));
+                if width == 120 {
+                    let buffer = terminal.backend().buffer();
+                    assert!(
+                        (0..height).all(|y| (78..width).all(|x| buffer[(x, y)].symbol() == " "))
+                    );
+                }
+                export_page(&terminal, &format!("services-{count}"));
+            }
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut reader = Reader::new("Help", "row\n".repeat(100));
+            terminal
+                .draw(|frame| draw_reader(frame, &mut reader, view::HELP))
+                .unwrap();
+            let text = buffer_text(&terminal);
+            assert!(
+                text.lines()
+                    .nth(height as usize - 2)
+                    .unwrap()
+                    .contains("?/esc/q back")
+            );
+        }
+    }
+
+    #[test]
+    fn main_keeps_status_next_to_names_like_actions() {
+        use ratatui::style::Modifier;
+        for width in [40, 80, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            let mut ui = MainUi::default();
+            ui.refresh(vec![service_info(false)]);
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            let margin = if width < 80 { 1 } else { 2 };
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(margin + 13, 3)].symbol(), "r");
+            assert!(
+                !buffer[(width - margin - 1, 3)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+            ui.key(KeyCode::Enter, false, 18);
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(margin + 13, 3)].symbol(), "a");
+            assert!(
+                !buffer[(width - margin - 1, 3)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+        }
     }
 
     #[test]

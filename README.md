@@ -304,7 +304,8 @@ Changes to shell startup files such as `/etc/profile` do not update a running ma
 
 ## Attach and TUI
 
-The borderless TUI shows service names and states, with the selected service's directory and type below.
+The borderless TUI groups service names and states in a compact workspace, up to 76 columns wide.
+Details and key hints follow the list; long lists scroll. Logs, help, and errors use the full window.
 Press Enter for actions or `?` for contextual help. Use arrows or `j/k` to move and Esc/q to go back.
 The direct shortcuts remain: `a` attach, `s` start, `x` stop, `r` restart, `h` history, and `d` disable.
 Disable requires confirmation and defaults to Cancel. Operations report progress; success messages clear

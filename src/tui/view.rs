@@ -412,6 +412,15 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             ) else {
                 return;
             };
+            frame.render_widget(
+                Paragraph::new(clip(
+                    &display_path(&service.directory),
+                    usize::from(areas.body.width),
+                    true,
+                ))
+                .style(muted()),
+                Rect::new(areas.body.x, areas.body.y - 1, areas.body.width, 1),
+            );
             let rows = usize::from(areas.body.height);
             *scroll = (*scroll)
                 .min(*selected)
@@ -600,6 +609,21 @@ fn draw_services(
     draw_service_detail(frame, areas.detail, services.get(selected), stale, notice);
 }
 
+fn display_path(directory: &str) -> String {
+    std::env::var("HOME")
+        .ok()
+        .and_then(|home| {
+            if directory == home {
+                Some("~".to_owned())
+            } else {
+                directory
+                    .strip_prefix(&format!("{home}/"))
+                    .map(|rest| format!("~/{rest}"))
+            }
+        })
+        .unwrap_or_else(|| directory.to_owned())
+}
+
 fn draw_service_detail(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -617,19 +641,7 @@ fn draw_service_detail(
         clip(&notice.text, usize::from(area.width), false)
     } else if let Some(service) = service {
         let kind = kind_name(&service.kind);
-        let path = std::env::var("HOME")
-            .ok()
-            .and_then(|home| {
-                if service.directory == home {
-                    Some("~".to_owned())
-                } else {
-                    service
-                        .directory
-                        .strip_prefix(&format!("{home}/"))
-                        .map(|rest| format!("~/{rest}"))
-                }
-            })
-            .unwrap_or_else(|| service.directory.clone());
+        let path = display_path(&service.directory);
         format!(
             "{} · {kind}",
             clip(

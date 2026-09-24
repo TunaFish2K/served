@@ -5,6 +5,10 @@ use crossterm::event::KeyCode;
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthStr;
 
+pub(super) fn is_help_key(key: KeyCode) -> bool {
+    matches!(key, KeyCode::Char('?' | '？'))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LifecycleAction {
     Disable,
@@ -333,7 +337,7 @@ impl MainUi {
 
     pub(super) fn key(&mut self, key: KeyCode, pending: bool, rows: usize) -> Intent {
         if let Some(help) = &mut self.help {
-            if matches!(key, KeyCode::Esc | KeyCode::Char('q' | '?')) {
+            if matches!(key, KeyCode::Esc | KeyCode::Char('q')) || is_help_key(key) {
                 self.help = None;
             } else {
                 help.key(key, rows);
@@ -348,7 +352,7 @@ impl MainUi {
             }
             return Intent::None;
         }
-        if key == KeyCode::Char('?') {
+        if is_help_key(key) {
             let (title, keys) = match self.page {
                 Page::Services => (
                     "Help / services",

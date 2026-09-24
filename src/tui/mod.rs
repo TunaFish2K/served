@@ -28,7 +28,7 @@ mod view;
 
 use model::{
     CrashLogPrompt, CrashPromptAction, HistoryView, Intent, LifecycleAction, MainUi,
-    PendingLifecycleAction, Reader, ServiceAction, crash_prompt_action,
+    PendingLifecycleAction, Reader, ServiceAction, crash_prompt_action, is_help_key,
 };
 use model::{Notice, Tone};
 use view::{draw_history_content, draw_history_list, draw_main, draw_reader};
@@ -329,7 +329,7 @@ async fn history_in_tui(
             continue;
         }
         if let Some(reader) = &mut help {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | '?')) {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) || is_help_key(key.code) {
                 help = None;
             } else {
                 reader.key(key.code, rows);
@@ -344,7 +344,7 @@ async fn history_in_tui(
             }
             continue;
         }
-        if key.code == KeyCode::Char('?') {
+        if is_help_key(key.code) {
             help = Some(Reader::new(
                 "History / help",
                 if view.is_some() {
@@ -819,6 +819,90 @@ mod tests {
         assert!(ui.message.as_ref().unwrap().scroll > 0);
         ui.key(KeyCode::Esc, false, 2);
         assert!(matches!(ui.page, Page::Actions { selected: 1, .. }));
+    }
+
+    #[test]
+    fn both_question_marks_toggle_help_without_changing_page() {
+        for open in ['?', '？'] {
+            for close in ['?', '？'] {
+                for page in [
+                    model::Page::Services,
+                    model::Page::Actions {
+                        selected: 4,
+                        scroll: 2,
+                    },
+                    model::Page::ConfirmDisable {
+                        confirm: false,
+                        menu: Some((5, 2)),
+                    },
+                ] {
+                    let mut ui = MainUi::default();
+                    ui.refresh(vec![service_info(false)]);
+                    ui.page = page;
+                    let before = std::mem::discriminant(&ui.page);
+                    assert!(is_help_key(KeyCode::Char(open)));
+                    assert_eq!(ui.key(KeyCode::Char(open), false, 3), Intent::None);
+                    assert!(ui.help.is_some());
+                    assert_eq!(ui.key(KeyCode::Char(close), false, 3), Intent::None);
+                    assert!(ui.help.is_none());
+                    assert_eq!(std::mem::discriminant(&ui.page), before);
+                    if let model::Page::Actions { selected, scroll } = ui.page {
+                        assert_eq!((selected, scroll), (4, 2));
+                    }
+                }
+            }
+        }
+        assert!(!is_help_key(KeyCode::Char('/')));
+    }
+
+    #[test]
+    fn actions_show_path_above_menu_and_keep_footer() {
+        use ratatui::style::{Color, Modifier};
+        for width in [40, 80, 120] {
+            for path in [
+                "/services/sillytavern/SillyTavern".to_owned(),
+                format!("/{}终e\u{301}", "项目/".repeat(40)),
+            ] {
+                let mut ui = MainUi::default();
+                let mut service = service_info(false);
+                service.name = "SillyTavern".into();
+                service.directory = path.clone();
+                ui.refresh(vec![service]);
+                let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                assert!(
+                    buffer_text(&terminal)
+                        .lines()
+                        .nth(2)
+                        .unwrap()
+                        .trim()
+                        .is_empty()
+                );
+                ui.key(KeyCode::Enter, false, 6);
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let text = buffer_text(&terminal);
+                let line = text.lines().nth(2).unwrap().trim();
+                if path.starts_with("/services") {
+                    assert_eq!(line, path);
+                    export_page(&terminal, "actions-path");
+                } else {
+                    assert!(line.starts_with('…'));
+                    assert!(line.ends_with("终e\u{301}"));
+                }
+                assert!(text.lines().nth(3).unwrap().contains("Attach"));
+                assert!(text.contains("enabled"));
+                assert!(text.contains("enter select   ? help   esc/q back"));
+                let margin = if width < 80 { 1 } else { 2 };
+                let cell = &terminal.backend().buffer()[(margin, 2)];
+                assert_eq!(cell.fg, Color::Reset);
+                assert!(cell.modifier.contains(Modifier::DIM));
+                assert!(!cell.modifier.contains(Modifier::REVERSED));
+            }
+        }
     }
 
     #[test]

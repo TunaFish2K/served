@@ -49,6 +49,28 @@ impl LifecycleAction {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Tone {
+    Accent,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Notice {
+    pub(super) text: String,
+    pub(super) tone: Tone,
+}
+impl Notice {
+    pub(super) fn new(text: impl Into<String>, tone: Tone) -> Self {
+        Self {
+            text: text.into(),
+            tone,
+        }
+    }
+}
+
 pub(super) struct LifecycleOutcome {
     pub(super) succeeded: bool,
     pub(super) notice: String,
@@ -217,6 +239,7 @@ pub(super) enum Page {
 }
 
 pub(super) struct Reader {
+    pub(super) tone: Tone,
     pub(super) title: String,
     pub(super) content: String,
     pub(super) scroll: usize,
@@ -225,9 +248,17 @@ pub(super) struct Reader {
 impl Reader {
     pub(super) fn new(title: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
+            tone: Tone::Accent,
             title: title.into(),
             content: content.into(),
             scroll: 0,
+        }
+    }
+
+    pub(super) fn error(title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            tone: Tone::Error,
+            ..Self::new(title, content)
         }
     }
 
@@ -263,7 +294,7 @@ pub(super) struct MainUi {
     pub(super) help: Option<Reader>,
     pub(super) message: Option<Reader>,
     pub(super) unavailable: Option<String>,
-    pub(super) notice: Option<(String, std::time::Instant)>,
+    pub(super) notice: Option<(Notice, std::time::Instant)>,
     pub(super) viewport: (u16, u16),
 }
 
@@ -279,11 +310,11 @@ impl MainUi {
         self.unavailable = None;
     }
 
-    pub(super) fn notice(&self, now: std::time::Instant) -> &str {
+    pub(super) fn notice(&self, now: std::time::Instant) -> Option<&Notice> {
         self.notice
             .as_ref()
             .filter(|(_, until)| now < *until)
-            .map_or("", |(text, _)| text)
+            .map(|(notice, _)| notice)
     }
 
     pub(super) fn key(&mut self, key: KeyCode, pending: bool, rows: usize) -> Intent {

@@ -8,8 +8,30 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::model::{HistoryView, MainUi, Page, Reader, ServiceAction};
+use super::model::{HistoryView, MainUi, Notice, Page, Reader, ServiceAction, Tone};
 use crate::protocol::{HistoryRecord, ServiceInfo, ServiceKind, ServiceState};
+
+pub(super) fn colors_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+}
+
+fn tone_style(tone: Tone) -> Style {
+    if !colors_enabled() {
+        return Style::default();
+    }
+    Style::default().fg(match tone {
+        Tone::Accent => Color::Cyan,
+        Tone::Success => Color::Green,
+        Tone::Warning => Color::Yellow,
+        Tone::Error => Color::Red,
+    })
+}
+
+fn marker_style() -> Style {
+    tone_style(Tone::Accent)
+        .add_modifier(Modifier::BOLD)
+        .remove_modifier(Modifier::REVERSED)
+}
 
 fn muted() -> Style {
     Style::default().add_modifier(Modifier::DIM)
@@ -110,6 +132,7 @@ fn page(
     count: &str,
     footer: Footer,
     items: Option<usize>,
+    tone: Tone,
 ) -> Option<PageAreas> {
     let area = frame.area();
     if !usable(area) {
@@ -137,7 +160,7 @@ fn page(
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(title, tone_style(tone).add_modifier(Modifier::BOLD)),
             Span::styled(count, muted()),
         ])),
         Rect::new(body.x, area.y + 1, width, 1),
@@ -149,7 +172,7 @@ fn page(
         if index > 0 {
             spans.push(Span::raw("   "));
         }
-        spans.push(Span::raw(*key));
+        spans.push(Span::styled(*key, tone_style(Tone::Accent)));
         spans.push(Span::styled(format!(" {description}"), muted()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), keys);
@@ -224,7 +247,7 @@ fn wrapped(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn list(frame: &mut Frame<'_>, area: Rect, items: Vec<ListItem<'_>>, selected: usize) {
+fn list(frame: &mut Frame<'_>, area: Rect, items: Vec<ListItem<'_>>, selected: usize) -> ListState {
     let mut state = ListState::default();
     if !items.is_empty() {
         state.select(Some(selected.min(items.len() - 1)));
@@ -236,6 +259,16 @@ fn list(frame: &mut Frame<'_>, area: Rect, items: Vec<ListItem<'_>>, selected: u
         area,
         &mut state,
     );
+    if let Some(selected) = state.selected() {
+        let row = selected.saturating_sub(state.offset());
+        if row < usize::from(area.height) {
+            frame.render_widget(
+                Paragraph::new(Span::styled("> ", marker_style())),
+                Rect::new(area.x, area.y + row as u16, 2, 1),
+            );
+        }
+    }
+    state
 }
 
 fn text_page(
@@ -245,8 +278,9 @@ fn text_page(
     scroll: &mut usize,
     footer: Footer,
     detail: &str,
+    tone: Tone,
 ) {
-    let Some(areas) = page(frame, title, "", footer, None) else {
+    let Some(areas) = page(frame, title, "", footer, None, tone) else {
         return;
     };
     *scroll = (*scroll).min(lines.len().saturating_sub(usize::from(areas.body.height)));
@@ -281,7 +315,15 @@ pub(super) fn draw_reader(frame: &mut Frame<'_>, reader: &mut Reader, footer: Fo
         .into_iter()
         .map(Line::from)
         .collect();
-    text_page(frame, &reader.title, lines, &mut reader.scroll, footer, "");
+    text_page(
+        frame,
+        &reader.title,
+        lines,
+        &mut reader.scroll,
+        footer,
+        "",
+        reader.tone,
+    );
 }
 
 pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) {
@@ -301,12 +343,11 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
         }
         ui.viewport = viewport;
     }
-    let notice = if progress.is_empty() {
-        ui.notice(std::time::Instant::now())
-    } else {
-        progress
-    }
-    .to_owned();
+    let progress_notice = (!progress.is_empty()).then(|| Notice::new(progress, Tone::Warning));
+    let notice = progress_notice
+        .as_ref()
+        .or_else(|| ui.notice(std::time::Instant::now()))
+        .cloned();
     let service = ui.services.get(ui.selected);
     match &mut ui.page {
         Page::Services => draw_services(
@@ -314,7 +355,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             &ui.services,
             ui.selected,
             ui.unavailable.is_some(),
-            &notice,
+            notice.as_ref(),
         ),
         Page::Actions { selected, scroll } => {
             let Some(service) = service else {
@@ -326,6 +367,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 "",
                 ACTIONS,
                 Some(6),
+                Tone::Accent,
             ) else {
                 return;
             };
@@ -340,12 +382,14 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 .skip(*scroll)
                 .take(rows)
                 .map(|(i, action)| {
-                    Line::from(format!(
-                        "{} {:<10} {}",
-                        if i == *selected { ">" } else { " " },
-                        action.label(),
-                        action.key()
-                    ))
+                    Line::from(vec![
+                        Span::styled(if i == *selected { "> " } else { "  " }, marker_style()),
+                        Span::raw(format!("{:<10} ", action.label())),
+                        Span::styled(
+                            action.key().to_string(),
+                            tone_style(Tone::Accent).remove_modifier(Modifier::REVERSED),
+                        ),
+                    ])
                     .style(if i == *selected {
                         selected_style()
                     } else {
@@ -359,7 +403,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 areas.detail,
                 Some(service),
                 ui.unavailable.is_some(),
-                &notice,
+                notice.as_ref(),
             );
         }
 
@@ -373,11 +417,12 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 "",
                 CONFIRM,
                 Some(6),
+                Tone::Accent,
             ) else {
                 return;
             };
             frame.render_widget(
-                Paragraph::new("Stops and unregisters service.").style(muted()),
+                Paragraph::new("Stops and unregisters service.").style(tone_style(Tone::Error)),
                 Rect {
                     height: 1,
                     ..areas.body
@@ -400,7 +445,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 areas.detail,
                 Some(service),
                 ui.unavailable.is_some(),
-                &notice,
+                notice.as_ref(),
             );
         }
     }
@@ -411,7 +456,7 @@ fn draw_services(
     services: &[ServiceInfo],
     selected: usize,
     stale: bool,
-    notice: &str,
+    notice: Option<&Notice>,
 ) {
     let count = if stale {
         "stale".to_owned()
@@ -427,7 +472,14 @@ fn draw_services(
         )
     };
     let footer = if services.is_empty() { EMPTY } else { SERVICES };
-    let Some(areas) = page(frame, "served", &count, footer, Some(services.len())) else {
+    let Some(areas) = page(
+        frame,
+        "served",
+        &count,
+        footer,
+        Some(services.len()),
+        Tone::Accent,
+    ) else {
         return;
     };
     if services.is_empty() {
@@ -436,7 +488,14 @@ fn draw_services(
         } else {
             "No services. Use served enable,\nor served run -- <command>."
         };
-        frame.render_widget(Paragraph::new(message).style(muted()), areas.body);
+        frame.render_widget(
+            Paragraph::new(message).style(if stale {
+                tone_style(Tone::Warning)
+            } else {
+                muted()
+            }),
+            areas.body,
+        );
     } else {
         let name_width = services
             .iter()
@@ -450,21 +509,14 @@ fn draw_services(
             .map(|service| {
                 let name = clip(&service.name, name_width, false);
                 let spacing = " ".repeat(name_width.saturating_sub(name.width()) + 1);
-                let style = match service.state {
-                    ServiceState::Failed => Style::default().fg(Color::Red),
-                    ServiceState::Starting | ServiceState::Restarting => {
-                        Style::default().fg(Color::Yellow)
-                    }
-                    _ => Style::default(),
-                };
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("{name}{spacing}")),
-                    Span::styled(state_name(&service.state), style),
+                    Span::styled(state_name(&service.state), state_style(&service.state)),
                 ]))
             })
             .collect();
         // Keep names and states together, like the compact action menu.
-        list(
+        let state = list(
             frame,
             Rect {
                 width: (name_width + 13) as u16,
@@ -473,6 +525,16 @@ fn draw_services(
             items,
             selected,
         );
+        // List highlighting is applied after spans. Restore semantic foreground
+        // on the selected status instead of turning it into a colored background.
+        if let Some(service) = services.get(selected) {
+            let y = areas.body.y + selected.saturating_sub(state.offset()) as u16;
+            frame.render_widget(
+                Paragraph::new(state_name(&service.state))
+                    .style(state_style(&service.state).remove_modifier(Modifier::REVERSED)),
+                Rect::new(areas.body.x + name_width as u16 + 3, y, 10, 1),
+            );
+        }
     }
     draw_service_detail(frame, areas.detail, services.get(selected), stale, notice);
 }
@@ -482,7 +544,7 @@ fn draw_service_detail(
     area: Rect,
     service: Option<&ServiceInfo>,
     stale: bool,
-    notice: &str,
+    notice: Option<&Notice>,
 ) {
     let detail = if stale {
         clip(
@@ -490,8 +552,8 @@ fn draw_service_detail(
             usize::from(area.width),
             false,
         )
-    } else if !notice.is_empty() {
-        clip(notice, usize::from(area.width), false)
+    } else if let Some(notice) = notice {
+        clip(&notice.text, usize::from(area.width), false)
     } else if let Some(service) = service {
         let kind = kind_name(&service.kind);
         let path = std::env::var("HOME")
@@ -518,7 +580,23 @@ fn draw_service_detail(
     } else {
         String::new()
     };
-    frame.render_widget(Paragraph::new(detail).style(muted()), area);
+    let style = if stale {
+        tone_style(Tone::Warning)
+    } else if let Some(notice) = notice {
+        tone_style(notice.tone)
+    } else {
+        muted()
+    };
+    frame.render_widget(Paragraph::new(detail).style(style), area);
+}
+
+fn state_style(state: &ServiceState) -> Style {
+    match state {
+        ServiceState::Running => tone_style(Tone::Success),
+        ServiceState::Starting | ServiceState::Restarting => tone_style(Tone::Warning),
+        ServiceState::Failed => tone_style(Tone::Error),
+        ServiceState::Stopped => Style::default(),
+    }
 }
 
 fn state_name(state: &ServiceState) -> &'static str {
@@ -557,6 +635,7 @@ pub(super) fn draw_history_list(
         &format!("{} runs", records.len()),
         HISTORY,
         Some(records.len()),
+        Tone::Accent,
     ) else {
         return;
     };
@@ -625,6 +704,7 @@ pub(super) fn draw_history_content(frame: &mut Frame<'_>, name: &str, history: &
         "",
         CONTENT,
         None,
+        Tone::Accent,
     ) else {
         return;
     };
@@ -685,7 +765,7 @@ mod tests {
                 terminal
                     .draw(|frame| {
                         let area = frame.area();
-                        let areas = page(frame, "Title", "", footer, None).unwrap();
+                        let areas = page(frame, "Title", "", footer, None, Tone::Accent).unwrap();
                         assert_eq!(
                             usize::from(areas.body.height),
                             body_rows(area, footer, None)
@@ -732,6 +812,7 @@ mod tests {
                         &mut reader.scroll,
                         ACTIONS,
                         detail,
+                        Tone::Accent,
                     );
                 })
                 .unwrap();

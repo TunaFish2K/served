@@ -33,6 +33,7 @@ use model::{
     CrashLogPrompt, CrashPromptAction, HistoryView, Intent, LifecycleAction, MainUi,
     PendingLifecycleAction, Reader, ServiceAction, crash_prompt_action,
 };
+use model::{Notice, Tone};
 use view::{draw_history_content, draw_history_list, draw_main, draw_reader};
 
 #[cfg(test)]
@@ -171,10 +172,13 @@ async fn run_loop(
                 if exit_when_idle {
                     return Ok(());
                 }
-                ui.notice = Some((outcome.notice, Instant::now() + Duration::from_secs(3)));
+                ui.notice = Some((
+                    Notice::new(outcome.notice, Tone::Success),
+                    Instant::now() + Duration::from_secs(3),
+                ));
             } else {
                 ui.help = None;
-                ui.message = Some(Reader::new("Operation failed", outcome.notice));
+                ui.message = Some(Reader::error("Operation failed", outcome.notice));
             }
             exit_when_idle = false;
         }
@@ -248,7 +252,7 @@ async fn run_loop(
                 crash_prompt_action(&key.code)
             } {
                 CrashPromptAction::Open => {
-                    ui.message = Some(Reader::new(
+                    ui.message = Some(Reader::error(
                         "Attach unavailable",
                         match open_editor_in_tui(terminal, &prompt.path).await {
                             Ok(()) => prompt.warning,
@@ -298,13 +302,13 @@ async fn run_loop(
                             {
                                 let warning = crash_warning(unavailable);
                                 if let Some(path) = unavailable.latest_log.clone() {
-                                    ui.message = Some(Reader::new(
+                                    ui.message = Some(Reader::error(
                                         "Attach unavailable",
                                         format!("{warning}\n\nOpen latest.log?"),
                                     ));
                                     crash_prompt = Some(CrashLogPrompt { warning, path });
                                 } else {
-                                    ui.message = Some(Reader::new(
+                                    ui.message = Some(Reader::error(
                                         "Attach unavailable",
                                         format!(
                                             "{warning}\n\nNo latest.log. Use history or enable persist_logs."
@@ -312,13 +316,14 @@ async fn run_loop(
                                     ));
                                 }
                             } else {
-                                ui.message = Some(Reader::new("Attach failed", error.to_string()));
+                                ui.message =
+                                    Some(Reader::error("Attach failed", error.to_string()));
                             }
                         }
                     }
                     ServiceAction::History => {
                         if let Err(error) = history_in_tui(terminal, &paths, &name).await {
-                            ui.message = Some(Reader::new("History failed", error.to_string()));
+                            ui.message = Some(Reader::error("History failed", error.to_string()));
                         }
                     }
                     _ => unreachable!("lifecycle actions handled above"),
@@ -456,7 +461,7 @@ async fn history_in_tui(
                 KeyCode::Down | KeyCode::Char('j') => {
                     history_view.scroll = history_view.scroll.saturating_add(1);
                     if let Err(error) = load_history_if_needed(paths, name, history_view).await {
-                        message = Some(Reader::new("History failed", error.to_string()));
+                        message = Some(Reader::error("History failed", error.to_string()));
                     }
                     clamp_history_scroll(history_view);
                 }
@@ -466,7 +471,7 @@ async fn history_in_tui(
                 KeyCode::PageDown => {
                     history_view.scroll = history_view.scroll.saturating_add(rows as u64);
                     if let Err(error) = load_history_if_needed(paths, name, history_view).await {
-                        message = Some(Reader::new("History failed", error.to_string()));
+                        message = Some(Reader::error("History failed", error.to_string()));
                     }
                     clamp_history_scroll(history_view);
                 }
@@ -474,7 +479,7 @@ async fn history_in_tui(
                 KeyCode::End | KeyCode::Char('G') => {
                     while !history_view.eof {
                         if let Err(error) = load_history_chunk(paths, name, history_view).await {
-                            message = Some(Reader::new("History failed", error.to_string()));
+                            message = Some(Reader::error("History failed", error.to_string()));
                             break;
                         }
                     }
@@ -499,7 +504,7 @@ async fn history_in_tui(
                     match load_history_chunk(paths, name, &mut history_view).await {
                         Ok(()) => view = Some(history_view),
                         Err(error) => {
-                            message = Some(Reader::new("History failed", error.to_string()))
+                            message = Some(Reader::error("History failed", error.to_string()))
                         }
                     }
                 }
@@ -937,7 +942,12 @@ mod tests {
                 .buffer()
                 .content
                 .iter()
-                .any(|cell| cell.fg == ratatui::style::Color::Red)
+                .any(|cell| cell.fg
+                    == if view::colors_enabled() {
+                        ratatui::style::Color::Red
+                    } else {
+                        ratatui::style::Color::Reset
+                    })
         );
         ui.key(KeyCode::Enter, false, 2);
         ui.key(KeyCode::End, false, 2);
@@ -989,7 +999,7 @@ mod tests {
         );
         ui.key(KeyCode::Enter, false, 2);
         ui.key(KeyCode::Down, false, 2);
-        ui.message = Some(Reader::new("Failed", "error detail\n".repeat(30)));
+        ui.message = Some(Reader::error("Failed", "error detail\n".repeat(30)));
         ui.key(KeyCode::End, false, 2);
         terminal
             .draw(|frame| draw_main(frame, &mut ui, ""))
@@ -1059,9 +1069,12 @@ mod tests {
             .unwrap();
         assert!(buffer_text(&terminal).contains("stopping api..."));
         let now = Instant::now();
-        ui.notice = Some(("stopped api".into(), now + Duration::from_secs(3)));
-        assert_eq!(ui.notice(now), "stopped api");
-        assert_eq!(ui.notice(now + Duration::from_secs(3)), "");
+        ui.notice = Some((
+            Notice::new("stopped api", Tone::Success),
+            now + Duration::from_secs(3),
+        ));
+        assert_eq!(ui.notice(now).unwrap().text, "stopped api");
+        assert!(ui.notice(now + Duration::from_secs(3)).is_none());
     }
 
     // Optional artifacts contain the actual TestBackend cells, not a separate mockup.
@@ -1075,11 +1088,13 @@ mod tests {
             .iter()
             .map(|cell| {
                 serde_json::json!({
-                    "text": cell.symbol(),
-                    "dim": cell.modifier.contains(ratatui::style::Modifier::DIM),
-                    "reverse": cell.modifier.contains(ratatui::style::Modifier::REVERSED),
-                    "bold": cell.modifier.contains(ratatui::style::Modifier::BOLD),
-                })
+                        "text": cell.symbol(),
+                "fg": format!("{:?}", cell.fg),
+                "bg": format!("{:?}", cell.bg),
+                        "dim": cell.modifier.contains(ratatui::style::Modifier::DIM),
+                        "reverse": cell.modifier.contains(ratatui::style::Modifier::REVERSED),
+                        "bold": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                    })
             })
             .collect();
         std::fs::create_dir_all(&directory).unwrap();
@@ -1152,7 +1167,7 @@ mod tests {
                     ui.unavailable = (state == "offline").then(|| "offline".into());
                     ui.notice = (state == "success").then(|| {
                         (
-                            "started api".into(),
+                            Notice::new("started api", Tone::Success),
                             Instant::now() + Duration::from_secs(3),
                         )
                     });
@@ -1220,7 +1235,7 @@ mod tests {
             export_page(&terminal, "help");
             ui.key(KeyCode::Char('?'), false, 3);
             assert!(matches!(ui.page, Page::Actions { selected: 5, .. }));
-            ui.message = Some(Reader::new("Error", "An operation failed.\n".repeat(40)));
+            ui.message = Some(Reader::error("Error", "An operation failed.\n".repeat(40)));
             terminal
                 .draw(|frame| draw_main(frame, &mut ui, ""))
                 .unwrap();
@@ -1357,6 +1372,112 @@ mod tests {
                     .nth(height as usize - 2)
                     .unwrap()
                     .contains("?/esc/q back")
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_colors_and_no_color_preserve_text_and_selection() {
+        use ratatui::style::{Color, Modifier};
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut ui = MainUi::default();
+        ui.refresh(
+            [
+                ServiceState::Running,
+                ServiceState::Starting,
+                ServiceState::Restarting,
+                ServiceState::Failed,
+                ServiceState::Stopped,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, state)| {
+                let mut service = service_info(false);
+                service.name = format!("service-{i}");
+                service.state = state;
+                service
+            })
+            .collect(),
+        );
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let color = |expected| {
+            if view::colors_enabled() {
+                expected
+            } else {
+                Color::Reset
+            }
+        };
+        assert_eq!(buffer[(2, 1)].fg, color(Color::Cyan));
+        assert_eq!(buffer[(2, 3)].fg, color(Color::Cyan));
+        assert!(buffer[(2, 3)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(2, 3)].modifier.contains(Modifier::REVERSED));
+        assert!(buffer[(4, 3)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(15, 3)].modifier.contains(Modifier::REVERSED));
+        for (row, expected) in [
+            Color::Green,
+            Color::Yellow,
+            Color::Yellow,
+            Color::Red,
+            Color::Reset,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(buffer[(15, 3 + row as u16)].fg, color(expected));
+        }
+        assert!(buffer.content.iter().all(|cell| cell.bg == Color::Reset));
+        if !view::colors_enabled() {
+            assert!(buffer.content.iter().all(|cell| cell.fg == Color::Reset));
+        }
+        export_page(&terminal, "states");
+        for (name, notice, progress, expected) in [
+            (
+                "success",
+                Some(Notice::new("started api", Tone::Success)),
+                "",
+                Color::Green,
+            ),
+            ("progress", None, "starting api...", Color::Yellow),
+        ] {
+            ui.notice = notice.map(|notice| (notice, Instant::now() + Duration::from_secs(3)));
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, progress))
+                .unwrap();
+            assert_eq!(terminal.backend().buffer()[(2, 10)].fg, color(expected));
+            export_page(&terminal, name);
+        }
+        ui.notice = None;
+        ui.unavailable = Some("offline".into());
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(2, 10)].fg,
+            color(Color::Yellow)
+        );
+        ui.unavailable = None;
+        ui.key(KeyCode::Char('d'), false, 6);
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(2, 3)].fg, color(Color::Red));
+        ui.message = Some(Reader::error("Failed", "Diagnostic details"));
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(2, 1)].fg, color(Color::Red));
+        assert_eq!(terminal.backend().buffer()[(2, 3)].fg, Color::Reset);
+        if !view::colors_enabled() {
+            assert!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
             );
         }
     }

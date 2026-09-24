@@ -172,3 +172,4 @@ relay。协议版本 3 增加精确的清理后历史行数。版本 5 增加结
 - 默认 Cargo feature `tui` 提供管理菜单；`--no-default-features` 裁掉菜单及专用依赖，保留全部 CLI、PTY 和终端／管道 attach。
 - attach 与管理界面独立，stdin EOF 后继续接收输出，取消仅解除连接。
 - `--output json` 使用版本化成功／错误封套；旧 `history --json` 保持兼容。字段、退出码和非交互行为见 [CLI 接口](docs/CLI-INTERFACE.md)。
+- 四个平台同时提供 full/headless 二进制和安装包；在线安装 `--variant` 可显式切换，省略时保留已安装类型。包内程序名称和服务单元不随类型变化。

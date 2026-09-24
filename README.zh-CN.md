@@ -51,6 +51,16 @@ systemd Linux 主机和 macOS 主机可以用一条命令安装最新稳定版�
 curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh
 ```
 
+默认安装完整版。服务器或二层封装可选择无头版：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh -s -- --variant headless
+```
+
+无头版裁掉管理菜单，保留全部 CLI、PTY 和终端／管道 attach。首次安装默认 full；升级时未指定
+`--variant` 会保留已安装类型，旧版本按 full 处理。显式 `--variant full` 可切回完整版。
+缺少所选类型的发布包时安装失败，不回退到另一类型。用 `served version --output json` 查询构建类型。
+
 以后重新运行同一命令即可升级。脚本检测系统和架构，下载 full 包及 SHA-256 sidecar，校验
 后才执行包内安装器。安装需要可用的 `sudo`。使用其他 supervisor 时，可以手动下载 binary
 资产，并以目标用户身份和该用户正常的 `HOME` 运行以下前台命令：
@@ -217,7 +227,7 @@ manager 异常退出后，systemd 会启动新 manager 并接管仍在运行的 
 服务，也不是 PTY 屏幕状态回放。退出时恢复原来的 shell 或 TUI 画面。
 
 `tty: true` 服务的会话可写入 PTY；`tty: false` 服务只转发快照和实时 stdout/stderr，
-并忽略输入。pipe 服务可以有多个只读观察者。attach 会话中按 `Ctrl-C` 退出 attach，
+并忽略输入。pipe 服务可以有多个只读观察者。终端 attach 会话中按 `Ctrl-C` 退出 attach，
 服务本身不会被停止；该按键不会转发给服务。
 
 对于 `tty: true`，attach 首次连接和终端尺寸变化会更新服务 PTY 的 rows/cols；
@@ -412,6 +422,10 @@ served-macos-arm64-vX.Y.Z-binary
 served-macos-arm64-vX.Y.Z-binary.sha256
 served-macos-arm64-vX.Y.Z-full.tar.gz
 served-macos-arm64-vX.Y.Z-full.tar.gz.sha256
+served-{os}-{arch}-vX.Y.Z-headless-binary
+served-{os}-{arch}-vX.Y.Z-headless-binary.sha256
+served-{os}-{arch}-vX.Y.Z-headless-full.tar.gz
+served-{os}-{arch}-vX.Y.Z-headless-full.tar.gz.sha256
 served-vX.Y.Z-source.tar.gz
 served-vX.Y.Z-source.tar.gz.sha256
 ```
@@ -452,6 +466,8 @@ musl 或 Windows 目标。
 make bootstrap       # 安装当前系统的 amd64 和 arm64 Rust target
 make check           # 格式、Clippy 和本机测试
 make msrv-check      # 使用 Rust 1.85 编译全部 target
+make build-headless  # 构建无头版，输出到 target/headless/release/served
+make check-headless  # 检查并测试无头版
 make build-cross     # 构建当前系统的另一种架构
 make build-all       # 构建当前系统的两种架构
 make dist            # 打包当前系统的两种架构

@@ -55,6 +55,8 @@ case "$command_name" in
         rustup toolchain install 1.85.0 --profile minimal
         "$project_dir/scripts/cargo-toolchain.sh" 1.85.0 \
             check --all-targets --locked
+        "$project_dir/scripts/cargo-toolchain.sh" 1.85.0 \
+            check --all-targets --locked --no-default-features
         ;;
     run)
         mkdir -p "$dev_home"

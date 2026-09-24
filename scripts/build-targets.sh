@@ -3,6 +3,13 @@ set -euo pipefail
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-}"
+variant="${2:-full}"
+build_args=(--target-dir "$project_dir/target")
+case "$variant" in
+    full) ;;
+    headless) build_args=(--no-default-features --target-dir "$project_dir/target/headless") ;;
+    *) printf 'error: build variant must be full or headless\n' >&2; exit 1 ;;
+esac
 rust_toolchain="${RUST_TOOLCHAIN:-stable}"
 cargo_for_target=("$project_dir/scripts/cargo-toolchain.sh" "$rust_toolchain")
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
@@ -50,10 +57,10 @@ build_target() {
     if [[ "$os" == "macos" ]]; then
         if [[ "$arch" == "amd64" ]]; then
             MACOSX_DEPLOYMENT_TARGET=10.12 \
-                "${cargo_for_target[@]}" build --release --locked --target "$target"
+                "${cargo_for_target[@]}" build --release --locked "${build_args[@]}" --target "$target"
         else
             MACOSX_DEPLOYMENT_TARGET=11.0 \
-                "${cargo_for_target[@]}" build --release --locked --target "$target"
+                "${cargo_for_target[@]}" build --release --locked "${build_args[@]}" --target "$target"
         fi
         return
     fi
@@ -73,12 +80,12 @@ build_target() {
         [[ "$("$cargo_zigbuild" --version 2>/dev/null)" != "cargo-zigbuild 0.23.0" ]]; then
         fail "cargo-zigbuild 0.23.0 is required; run make bootstrap"
     fi
-    "${cargo_for_target[@]}" zigbuild --release --locked --target "${target}.2.17"
+    "${cargo_for_target[@]}" zigbuild --release --locked "${build_args[@]}" --target "${target}.2.17"
 }
 
 case "$mode" in
     cross|all|amd64|arm64) ;;
-    *) fail "usage: scripts/build-targets.sh cross|all|amd64|arm64" ;;
+    *) fail "usage: scripts/build-targets.sh cross|all|amd64|arm64 [full|headless]" ;;
 esac
 
 cd "$project_dir"

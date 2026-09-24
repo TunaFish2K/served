@@ -115,6 +115,9 @@ jobs:
       - name: Run native checks
         run: make check
 
+      - name: Run headless checks
+        run: make check-headless
+
       - name: Validate system service template
         if: matrix.os == 'linux'
         run: make systemd-check
@@ -138,13 +141,24 @@ jobs:
       - name: Run packaged native binary
         shell: bash
         run: |
-          "dist/served-${{ matrix.os }}-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-binary" --version
+          "dist/served-${{ matrix.os }}-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-binary" version --output json
+          "dist/served-${{ matrix.os }}-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-headless-binary" version --output json
+
+      - name: Test Linux variant upgrades and rollback
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "served") | .version')"
+          python3 tests/linux_variant_install.py \
+            "dist/served-linux-${{ matrix.arch }}-v${version}-full.tar.gz" \
+            "dist/served-linux-${{ matrix.arch }}-v${version}-headless-full.tar.gz"
 
       - name: Smoke test macOS LaunchDaemon package
         if: matrix.os == 'macos'
         run: |
           tests/macos_install_smoke.sh \
-            "dist/served-macos-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-full.tar.gz"
+            "dist/served-macos-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-full.tar.gz" \
+            "dist/served-macos-${{ matrix.arch }}-${{ needs.metadata.outputs.tag }}-headless-full.tar.gz"
 
       - name: Upload release assets
         uses: actions/upload-artifact@v4

@@ -83,6 +83,9 @@ jobs:
       - name: Run native checks
         run: make check
 
+      - name: Run headless checks
+        run: make check-headless
+
       - name: Validate system service template
         if: matrix.os == 'linux'
         run: make systemd-check
@@ -105,11 +108,23 @@ jobs:
         run: target/release/served --version
 
       - name: Cross-build other architecture
-        run: make build-cross
+        run: |
+          make build-cross
+          scripts/build-targets.sh cross headless
 
       - name: Inspect cross-built binary
         shell: bash
         run: file "target/${{ matrix.cross_target }}/release/served"
+
+      - name: Test Linux variant upgrades and rollback
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          scripts/package-release.sh "${{ matrix.arch }}"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "served") | .version')"
+          python3 tests/linux_variant_install.py \
+            "dist/served-linux-${{ matrix.arch }}-v${version}-full.tar.gz" \
+            "dist/served-linux-${{ matrix.arch }}-v${version}-headless-full.tar.gz"
 
       - name: Smoke test macOS LaunchDaemon package
         if: matrix.os == 'macos'
@@ -118,8 +133,8 @@ jobs:
           scripts/package-release.sh "${{ matrix.arch }}"
           shopt -s nullglob
           archives=("dist/served-macos-${{ matrix.arch }}-v"*-full.tar.gz)
-          [[ "${#archives[@]}" -eq 1 ]]
-          tests/macos_install_smoke.sh "${archives[0]}"
+          [[ "${#archives[@]}" -eq 2 ]]
+          tests/macos_install_smoke.sh "${archives[@]}"
 
   msrv:
     name: Rust 1.85 on ${{ matrix.name }}
@@ -150,4 +165,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-msrv-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check all targets
-        run: ./scripts/cargo-toolchain.sh 1.85.0 check --all-targets --locked
+        run: |
+          ./scripts/cargo-toolchain.sh 1.85.0 check --all-targets --locked
+          ./scripts/cargo-toolchain.sh 1.85.0 check --all-targets --locked --no-default-features

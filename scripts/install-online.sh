@@ -10,6 +10,36 @@ fail() {
     exit 1
 }
 
+variant=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --variant)
+            [ "$#" -ge 2 ] || fail "--variant requires full or headless"
+            variant="$2"
+            shift 2
+            ;;
+        --variant=*) variant="${1#--variant=}"; shift ;;
+        -h|--help)
+            printf 'usage: install-online.sh [--variant full|headless]\n'
+            exit 0
+            ;;
+        *) fail "unknown option: $1" ;;
+    esac
+    case "$variant" in full|headless) ;; *) fail "variant must be full or headless" ;; esac
+done
+if [ -z "$variant" ]; then
+    variant=full
+    if command -v served >/dev/null 2>&1 && installed="$(served version --output json 2>/dev/null)"; then
+        detected="$(printf '%s\n' "$installed" | sed -n 's/.*"variant"[[:space:]]*:[[:space:]]*"\([^" ]*\)".*/\1/p')"
+        case "$detected" in
+            full|headless) variant="$detected" ;;
+            *) fail "could not determine installed build variant; specify --variant" ;;
+        esac
+    fi
+fi
+variant_suffix=""
+[ "$variant" != headless ] || variant_suffix="-headless"
+
 cleanup() {
     if [ -n "$temporary_dir" ]; then
         rm -rf "$temporary_dir"
@@ -48,7 +78,7 @@ tag="${release_url##*/}"
 printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' ||
     fail "latest release returned an invalid tag: $tag"
 
-asset="served-${os}-${arch}-${tag}-full.tar.gz"
+asset="served-${os}-${arch}-${tag}${variant_suffix}-full.tar.gz"
 download_base="$github/$repository/releases/download/$tag"
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/served-online.XXXXXX")" ||
     fail "could not create a temporary download directory"

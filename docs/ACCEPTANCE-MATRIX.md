@@ -99,3 +99,12 @@ Unicode、选择身份、断连保护、菜单/帮助/确认/错误返回、成�
 
 `manager_smoke::tui_menu_drives_lifecycle_and_returns_from_attach` 在真实 PTY 中验证菜单、帮助、
 start/stop、默认取消、attach 返回、历史阅读、禁用确认与退出。
+
+## 无头构建与封装
+
+- 默认构建与 `--no-default-features` 都运行 CLI 和后台集成测试；仅 TUI 菜单测试依赖 `tui`。
+- `tests/cli_output.rs` 覆盖版本查询、参数错误封套、无副作用拒绝、非交互编辑、`--` 边界和断管。
+- `tests/manager_smoke.rs` 覆盖 JSON 管理、历史枚举及旧 JSON 格式兼容；管道 attach 覆盖 EOF 后输出、原始控制字节、阻塞取消、断管和输出到 `/dev/null`。
+- `tests/install_online.sh` 覆盖四个平台、两类资产、升级类型保留、显式切换、校验失败及缺失资产不回退。
+- `tests/linux_variant_install.py` 在临时目录运行真实安装／回滚函数，仅替换 systemd 调用，验证两种构建接管时服务 PID 不变及失败回滚。
+- `tests/macos_install_smoke.sh` 在 macOS CI 中验证两种包及双向切换；本机 Linux 不代替 macOS 验收。

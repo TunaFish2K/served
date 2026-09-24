@@ -9,6 +9,8 @@ help:
 	@echo "served development targets"
 	@echo "  make bootstrap       Install Rust targets and validate cross tools"
 	@echo "  make build           Build a native debug binary"
+	@echo "  make build-headless  Build a native headless release binary"
+	@echo "  make check-headless  Check and test the headless build"
 	@echo "  make build-release   Build a native release binary"
 	@echo "  make build-cross     Build a release binary for the other host architecture"
 	@echo "  make build-all       Build release binaries for both host architectures"
@@ -59,6 +61,17 @@ test:
 	@$(CARGO) test --locked
 
 check: fmt clippy test
+
+.PHONY: check-headless build-headless
+check-headless:
+	@$(CARGO) clippy --all-targets --locked --no-default-features -- -D warnings
+	@$(CARGO) test --locked --no-default-features
+	@if $(CARGO) tree --locked --no-default-features --edges normal --prefix none | grep -q '^ratatui '; then \
+		echo 'headless build unexpectedly depends on Ratatui' >&2; exit 1; \
+	fi
+
+build-headless:
+	@$(CARGO) build --release --locked --no-default-features --target-dir target/headless
 
 shellcheck:
 	@shellcheck scripts/*.sh tests/*.sh

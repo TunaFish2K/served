@@ -4,6 +4,7 @@ set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 dist="$project_dir/dist"
 requested_arch="${1:-all}"
+requested_variant="${2:-all}"
 rust_toolchain="${RUST_TOOLCHAIN:-stable}"
 
 fail() {
@@ -27,15 +28,15 @@ package_linux() {
     local version="$1"
     local arch="$2"
     local target="$3"
-    local binary_asset="served-linux-${arch}-v${version}-binary"
-    local full_asset="served-linux-${arch}-v${version}-full.tar.gz"
-    local full_root="$dist/served-linux-${arch}-v${version}-full"
+    local binary_asset="served-linux-${arch}-v${version}${variant_suffix}-binary"
+    local full_asset="served-linux-${arch}-v${version}${variant_suffix}-full.tar.gz"
+    local full_root="$dist/served-linux-${arch}-v${version}${variant_suffix}-full"
 
     "$project_dir/scripts/verify-release-binary.sh" \
-        linux "$arch" "$project_dir/target/$target/release/served"
-    install -m 755 "$project_dir/target/$target/release/served" "$dist/$binary_asset"
+        linux "$arch" "$build_root/$target/release/served"
+    install -m 755 "$build_root/$target/release/served" "$dist/$binary_asset"
     mkdir -p "$full_root"
-    install -m 755 "$project_dir/target/$target/release/served" "$full_root/served"
+    install -m 755 "$build_root/$target/release/served" "$full_root/served"
     sed 's|@SERVED_BIN@|/usr/local/bin/served|g' \
         "$project_dir/systemd/served@.service" > "$full_root/served@.service"
     chmod 644 "$full_root/served@.service"
@@ -53,11 +54,11 @@ package_macos() {
     local version="$1"
     local arch="$2"
     local target="$3"
-    local binary_asset="served-macos-${arch}-v${version}-binary"
-    local full_asset="served-macos-${arch}-v${version}-full.tar.gz"
-    local full_root="$dist/served-macos-${arch}-v${version}-full"
+    local binary_asset="served-macos-${arch}-v${version}${variant_suffix}-binary"
+    local full_asset="served-macos-${arch}-v${version}${variant_suffix}-full.tar.gz"
+    local full_root="$dist/served-macos-${arch}-v${version}${variant_suffix}-full"
 
-    install -m 755 "$project_dir/target/$target/release/served" "$dist/$binary_asset"
+    install -m 755 "$build_root/$target/release/served" "$dist/$binary_asset"
     codesign --force --sign - --timestamp=none "$dist/$binary_asset"
     "$project_dir/scripts/verify-release-binary.sh" macos "$arch" "$dist/$binary_asset"
     mkdir -p "$full_root"
@@ -84,31 +85,44 @@ version="${RELEASE_VERSION:-$detected_version}"
     fail "could not determine a semantic package version"
 case "$requested_arch" in
     all|amd64|arm64) ;;
-    *) fail "usage: scripts/package-release.sh [all|amd64|arm64]" ;;
+    *) fail "usage: scripts/package-release.sh [all|amd64|arm64] [all|full|headless]" ;;
 esac
 
-./scripts/build-targets.sh "$requested_arch"
+case "$requested_variant" in
+    all) variants=(full headless) ;;
+    full|headless) variants=("$requested_variant") ;;
+    *) fail "package variant must be all, full, or headless" ;;
+esac
 rm -rf "$dist"
 mkdir -p "$dist"
+for variant in "${variants[@]}"; do
+    variant_suffix=""
+    build_root="$project_dir/target"
+    if [[ "$variant" == headless ]]; then
+        variant_suffix="-headless"
+        build_root="$project_dir/target/headless"
+    fi
+    ./scripts/build-targets.sh "$requested_arch" "$variant"
 
-case "$(uname -s)" in
-    Linux)
-        if [[ "$requested_arch" == "all" || "$requested_arch" == "amd64" ]]; then
-            package_linux "$version" amd64 x86_64-unknown-linux-gnu
-        fi
-        if [[ "$requested_arch" == "all" || "$requested_arch" == "arm64" ]]; then
-            package_linux "$version" arm64 aarch64-unknown-linux-gnu
-        fi
-        ;;
-    Darwin)
-        if [[ "$requested_arch" == "all" || "$requested_arch" == "amd64" ]]; then
-            package_macos "$version" amd64 x86_64-apple-darwin
-        fi
-        if [[ "$requested_arch" == "all" || "$requested_arch" == "arm64" ]]; then
-            package_macos "$version" arm64 aarch64-apple-darwin
-        fi
-        ;;
-    *) fail "release packaging supports macOS and Linux" ;;
-esac
+    case "$(uname -s)" in
+        Linux)
+            if [[ "$requested_arch" == "all" || "$requested_arch" == "amd64" ]]; then
+                package_linux "$version" amd64 x86_64-unknown-linux-gnu
+            fi
+            if [[ "$requested_arch" == "all" || "$requested_arch" == "arm64" ]]; then
+                package_linux "$version" arm64 aarch64-unknown-linux-gnu
+            fi
+            ;;
+        Darwin)
+            if [[ "$requested_arch" == "all" || "$requested_arch" == "amd64" ]]; then
+                package_macos "$version" amd64 x86_64-apple-darwin
+            fi
+            if [[ "$requested_arch" == "all" || "$requested_arch" == "arm64" ]]; then
+                package_macos "$version" arm64 aarch64-apple-darwin
+            fi
+            ;;
+        *) fail "release packaging supports macOS and Linux" ;;
+    esac
+done
 
 printf 'release assets written to %s\n' "$dist"

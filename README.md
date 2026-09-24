@@ -65,6 +65,17 @@ integration with one command:
 curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh
 ```
 
+The default is the full build. For servers and wrappers, select the headless build:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh -s -- --variant headless
+```
+
+Headless removes the management menu, while keeping all CLI commands, PTY support, and terminal/pipe attach.
+First installation defaults to full. Upgrades preserve the installed variant unless `--variant` is specified;
+older builds are treated as full. Use `--variant full` to switch back. A missing selected asset is an error,
+with no fallback to another variant. Query the build with `served version --output json`.
+
 Run the same command again to update. It detects the operating system and architecture, downloads
 the matching full package and SHA-256 sidecar, verifies the checksum, and then runs the packaged
 installer. Installation requires working `sudo` access. Other supervisors can use the standalone
@@ -331,7 +342,7 @@ The snapshot does not reproduce PTY screen state. served restores the previous s
 when the session ends.
 
 A `tty: true` session sends input to the service PTY. A `tty: false` session forwards
-snapshot data and live stdout/stderr and ignores input. Press `Ctrl-C` to leave attach. served
+snapshot data and live stdout/stderr and ignores input. In terminal mode, press `Ctrl-C` to leave attach. served
 does not stop the service, and it does not send this key to the service.
 
 For a `tty: true` service, attach applies the terminal `rows` and `cols` values when the
@@ -484,6 +495,10 @@ served-macos-arm64-vX.Y.Z-binary
 served-macos-arm64-vX.Y.Z-binary.sha256
 served-macos-arm64-vX.Y.Z-full.tar.gz
 served-macos-arm64-vX.Y.Z-full.tar.gz.sha256
+served-{os}-{arch}-vX.Y.Z-headless-binary
+served-{os}-{arch}-vX.Y.Z-headless-binary.sha256
+served-{os}-{arch}-vX.Y.Z-headless-full.tar.gz
+served-{os}-{arch}-vX.Y.Z-headless-full.tar.gz.sha256
 served-vX.Y.Z-source.tar.gz
 served-vX.Y.Z-source.tar.gz.sha256
 ```
@@ -531,6 +546,8 @@ project. Use a full release package for personal deployment.
 make bootstrap       # Install same-OS amd64 and arm64 targets
 make check           # Format, clippy, and native tests
 make msrv-check      # Compile every target with Rust 1.85
+make build-headless  # Build headless into target/headless/release/served
+make check-headless  # Check and test the headless build
 make build-cross     # Build the other host architecture
 make build-all       # Build both host architectures
 make dist            # Package both host architectures

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 archive="${1:-}"
+alternate_archive="${2:-}"
 binary_target="/usr/local/bin/served"
 label_prefix="io.github.tunafish2k.served"
 label="${label_prefix}.$(id -u)"
@@ -103,6 +104,18 @@ after_pid="$(service_pid)" || fail "service was not adopted after the launchd re
 [[ "$before_pid" == "$after_pid" ]] ||
     fail "launchd reload changed service pid from $before_pid to $after_pid"
 
+if [[ -n "$alternate_archive" ]]; then
+    tar -C "$test_root" -xzf "$alternate_archive"
+    alternate_dir="$test_root/$(basename "$alternate_archive" .tar.gz)"
+    original_variant="$("$binary_target" version --output json)"
+    for package in "$alternate_dir" "$package_dir"; do
+        "$package/install.sh" --yes
+        cmp -s "$package/served" "$binary_target" || fail "wrong variant installed"
+        [[ "$(service_pid)" == "$before_pid" ]] || fail "variant switch changed service PID"
+    done
+    [[ "$("$binary_target" version --output json)" == "$original_variant" ]] || fail "variant switch did not restore original build"
+fi
+
 "$binary_target" disable "$service_name"
 sudo launchctl bootout "system/$label"
 sudo plutil -insert ServedSmokeMarker -bool true "$plist_target"
@@ -154,4 +167,7 @@ owns_install=0
     fail "uninstaller left shared documentation behind"
 [[ -d "$HOME/.local/state/served" ]] || fail "macOS uninstaller removed user state"
 
+if [[ -n "$alternate_archive" ]]; then
+    bash "$0" "$alternate_archive"
+fi
 printf 'macOS install smoke checks passed\n'

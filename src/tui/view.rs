@@ -31,7 +31,10 @@ fn muted() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 fn selected_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+    Style::default()
+        .fg(Color::Reset)
+        .bg(Color::Reset)
+        .add_modifier(Modifier::REVERSED)
 }
 
 pub(super) fn usable(area: Rect) -> bool {
@@ -376,7 +379,11 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                         Span::raw(format!("{:<10} ", action.label())),
                         Span::styled(
                             action.key().to_string(),
-                            tone_style(Tone::Accent).remove_modifier(Modifier::REVERSED),
+                            if i == *selected {
+                                Style::default()
+                            } else {
+                                tone_style(Tone::Accent)
+                            },
                         ),
                     ])
                     .style(if i == *selected {
@@ -505,7 +512,7 @@ fn draw_services(
             })
             .collect();
         // Keep names and states together, like the compact action menu.
-        let state = list(
+        list(
             frame,
             Rect {
                 width: (name_width + 13) as u16,
@@ -514,16 +521,6 @@ fn draw_services(
             items,
             selected,
         );
-        // List highlighting is applied after spans. Restore semantic foreground
-        // on the selected status instead of turning it into a colored background.
-        if let Some(service) = services.get(selected) {
-            let y = areas.body.y + selected.saturating_sub(state.offset()) as u16;
-            frame.render_widget(
-                Paragraph::new(state_name(&service.state))
-                    .style(state_style(&service.state).remove_modifier(Modifier::REVERSED)),
-                Rect::new(areas.body.x + name_width as u16 + 3, y, 10, 1),
-            );
-        }
     }
     draw_service_detail(frame, areas.detail, services.get(selected), stale, notice);
 }

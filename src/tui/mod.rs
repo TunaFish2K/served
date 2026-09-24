@@ -1211,9 +1211,9 @@ mod tests {
         assert!(!buffer[(2, 3)].modifier.contains(Modifier::BOLD));
         assert!(!buffer[(2, 3)].modifier.contains(Modifier::REVERSED));
         assert!(buffer[(4, 3)].modifier.contains(Modifier::REVERSED));
-        assert!(!buffer[(15, 3)].modifier.contains(Modifier::REVERSED));
+        assert!(buffer[(15, 3)].modifier.contains(Modifier::REVERSED));
         for (row, expected) in [
-            Color::Green,
+            Color::Reset,
             Color::Yellow,
             Color::Yellow,
             Color::Red,
@@ -1338,6 +1338,115 @@ mod tests {
                 buffer_text(&terminal).lines().take(5).collect::<Vec<_>>()
             );
             assert_selected(&terminal, "record-1");
+        }
+    }
+
+    #[test]
+    fn selection_covers_status_and_shortcuts_and_restores_semantic_colors() {
+        use ratatui::style::{Color, Modifier};
+        for width in [40, 80, 120] {
+            let margin = if width < 80 { 1 } else { 2 };
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+            let mut ui = MainUi::default();
+            ui.refresh(
+                [
+                    ServiceState::Running,
+                    ServiceState::Starting,
+                    ServiceState::Restarting,
+                    ServiceState::Failed,
+                    ServiceState::Stopped,
+                ]
+                .into_iter()
+                .map(|state| {
+                    let mut service = service_info(false);
+                    service.state = state;
+                    service
+                })
+                .collect(),
+            );
+            for selected in 0..ui.services.len() {
+                ui.selected = selected;
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let mut highlighted = 0;
+                let rows = view::main_rows(buffer.area, &ui) as u16;
+                for y in 3..3 + rows {
+                    if buffer[(margin + 2, y)]
+                        .modifier
+                        .contains(Modifier::REVERSED)
+                    {
+                        highlighted += 1;
+                        for x in margin + 2..margin + 23 {
+                            assert!(buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+                            assert_eq!(buffer[(x, y)].fg, Color::Reset);
+                            assert_eq!(buffer[(x, y)].bg, Color::Reset);
+                        }
+                        for x in [margin, margin + 1, margin + 23] {
+                            assert!(!buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+                        }
+                    } else {
+                        let status: String = (margin + 13..margin + 23)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect();
+                        let color = match status.trim() {
+                            "running" => Color::Green,
+                            "starting" | "restarting" => Color::Yellow,
+                            "failed" => Color::Red,
+                            _ => Color::Reset,
+                        };
+                        assert_eq!(
+                            buffer[(margin + 13, y)].fg,
+                            if view::colors_enabled() {
+                                color
+                            } else {
+                                Color::Reset
+                            }
+                        );
+                    }
+                }
+                assert_eq!(highlighted, 1);
+            }
+            for selected in 0..ServiceAction::ALL.len() {
+                ui.page = model::Page::Actions {
+                    selected,
+                    scroll: 0,
+                };
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows = view::main_rows(buffer.area, &ui) as u16;
+                for y in 3..3 + rows {
+                    let highlighted = buffer[(margin + 2, y)]
+                        .modifier
+                        .contains(Modifier::REVERSED);
+                    for x in margin + 2..margin + 14 {
+                        assert_eq!(
+                            buffer[(x, y)].modifier.contains(Modifier::REVERSED),
+                            highlighted
+                        );
+                        if highlighted {
+                            assert_eq!(buffer[(x, y)].fg, Color::Reset);
+                        }
+                    }
+                    if !highlighted {
+                        assert_eq!(
+                            buffer[(margin + 13, y)].fg,
+                            if view::colors_enabled() {
+                                Color::Cyan
+                            } else {
+                                Color::Reset
+                            }
+                        );
+                    }
+                    for x in [margin, margin + 1, margin + 14] {
+                        assert!(!buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+                    }
+                }
+                assert_selected(&terminal, ServiceAction::ALL[selected].label());
+            }
         }
     }
 

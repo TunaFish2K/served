@@ -54,7 +54,7 @@ async fn run_loop(
     paths: ServedPaths,
 ) -> Result<()> {
     let mut ui = MainUi {
-        unavailable: Some("Connecting to manager".to_owned()),
+        initial_loading: true,
         ..MainUi::default()
     };
     let mut refresh: Option<tokio::task::JoinHandle<Result<Response>>> = None;
@@ -90,14 +90,13 @@ async fn run_loop(
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished)
         {
-            match refresh.take().expect("finished refresh").await {
-                Ok(Ok(Response::Services { services })) => ui.refresh(services),
-                Ok(Ok(response)) => {
-                    ui.unavailable = Some(format!("unexpected manager response: {response:?}"))
-                }
-                Ok(Err(error)) => ui.unavailable = Some(error.to_string()),
-                Err(error) => ui.unavailable = Some(format!("refresh failed: {error}")),
-            }
+            let result = refresh
+                .take()
+                .expect("finished refresh")
+                .await
+                .map_err(|error| anyhow::anyhow!("refresh failed: {error}"))
+                .and_then(|result| result);
+            ui.complete_refresh(result);
         }
         if pending_action.is_none() && refresh.is_none() {
             let paths = paths.clone();
@@ -685,9 +684,19 @@ mod tests {
             assert!(
                 !text
                     .chars()
-                    .any(|c| matches!(c, '│' | '─' | '┌' | '┐' | '└' | '┘'))
+                    .any(|c| matches!(c, '│' | '┌' | '┐' | '└' | '┘'))
             );
             let buffer = terminal.backend().buffer();
+            let margin = if width < 80 { 1 } else { 2 };
+            let line_y = 3 + view::main_rows(buffer.area, &ui) as u16;
+            for x in margin..margin + (width - margin * 2).min(76) {
+                assert_eq!(buffer[(x, line_y)].symbol(), "─");
+                assert!(
+                    buffer[(x, line_y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::DIM)
+                );
+            }
             assert!(
                 buffer
                     .content
@@ -810,6 +819,104 @@ mod tests {
         assert!(ui.message.as_ref().unwrap().scroll > 0);
         ui.key(KeyCode::Esc, false, 2);
         assert!(matches!(ui.page, Page::Actions { selected: 1, .. }));
+    }
+
+    #[test]
+    fn initial_loading_stays_blank_until_refresh_completes() {
+        for width in [40, 80, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+            let mut ui = MainUi {
+                initial_loading: true,
+                ..MainUi::default()
+            };
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("served"));
+            assert!(text.contains("? help   esc/q quit"));
+            for absent in [
+                "unavailable",
+                "Retrying",
+                "stale",
+                "0 services",
+                "No services",
+                "served enable",
+                "Loading",
+            ] {
+                assert!(!text.contains(absent), "{text}");
+            }
+            assert!(
+                text.lines()
+                    .skip(3)
+                    .take(3)
+                    .all(|line| line.trim().is_empty())
+            );
+            for key in [
+                KeyCode::Enter,
+                KeyCode::Char('a'),
+                KeyCode::Char('s'),
+                KeyCode::Char('d'),
+            ] {
+                assert_eq!(ui.key(key, false, 3), Intent::None);
+            }
+            assert_eq!(ui.key(KeyCode::Char('?'), false, 3), Intent::None);
+            assert!(!ui.help.as_ref().unwrap().content.contains("unavailable"));
+            ui.key(KeyCode::Esc, false, 3);
+            assert!(ui.initial_loading);
+            for key in [KeyCode::Esc, KeyCode::Char('q')] {
+                assert_eq!(ui.key(key, false, 3), Intent::Quit);
+            }
+            ui.complete_refresh(Ok(Response::Services { services: vec![] }));
+            assert!(!ui.initial_loading);
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("No services"));
+            assert!(buffer_text(&terminal).contains("0 services"));
+        }
+        for result in [
+            Ok(Response::Ok),
+            Err(anyhow::anyhow!("connection refused")),
+            Err(anyhow::anyhow!(
+                "manager did not respond within two seconds"
+            )),
+            Err(anyhow::anyhow!("refresh failed: task cancelled")),
+        ] {
+            let mut ui = MainUi {
+                initial_loading: true,
+                ..MainUi::default()
+            };
+            ui.complete_refresh(result);
+            assert!(!ui.initial_loading);
+            assert!(ui.unavailable.is_some());
+            let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("Manager unavailable. Retrying"));
+            ui.complete_refresh(Ok(Response::Services {
+                services: vec![service_info(false)],
+            }));
+            assert!(!ui.initial_loading);
+            assert!(ui.unavailable.is_none());
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("running"));
+            ui.complete_refresh(Err(anyhow::anyhow!("offline")));
+            assert!(!ui.initial_loading);
+            assert_eq!(ui.services.len(), 1);
+        }
+        let mut ui = MainUi {
+            initial_loading: true,
+            ..MainUi::default()
+        };
+        ui.complete_refresh(Ok(Response::Services {
+            services: vec![service_info(false)],
+        }));
+        assert!(!ui.initial_loading);
+        assert_eq!(ui.services.len(), 1);
     }
 
     #[test]
@@ -1033,7 +1140,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .content
-                    .contains("Directory: /projects/api")
+                    .contains("Run selected action")
             );
             terminal
                 .draw(|frame| draw_main(frame, &mut ui, ""))
@@ -1444,6 +1551,16 @@ mod tests {
                         }
                     }
                     if !highlighted {
+                        if buffer[(margin + 2, y)].symbol() == "D" {
+                            assert_eq!(
+                                buffer[(margin + 2, y)].fg,
+                                if view::colors_enabled() {
+                                    Color::Red
+                                } else {
+                                    Color::Reset
+                                }
+                            );
+                        }
                         assert_eq!(
                             buffer[(margin + 13, y)].fg,
                             if view::colors_enabled() {

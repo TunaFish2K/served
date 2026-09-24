@@ -158,10 +158,18 @@ fn page(
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(title, tone_style(tone).add_modifier(Modifier::BOLD)),
-            Span::styled(count, muted()),
+            Span::styled(&count, muted()),
         ])),
         Rect::new(body.x, area.y + 1, width, 1),
     );
+    if items.is_some()
+        && (footer == SERVICES || footer == ACTIONS || (footer == EMPTY && !count.is_empty()))
+    {
+        frame.render_widget(
+            Paragraph::new("─".repeat(usize::from(width))).style(muted()),
+            Rect::new(body.x, body.bottom(), width, 1),
+        );
+    }
     let width = footer_width(footer) as u16;
     let keys = Rect::new(body.right() - width, footer_area.bottom() - 1, width, 1);
     let mut spans = Vec::new();
@@ -302,11 +310,51 @@ fn content_width(frame: &Frame<'_>) -> usize {
     usize::from(inner_width(frame.area()))
 }
 
+fn help_lines(content: &str, width: usize) -> Vec<Line<'static>> {
+    let key_width = content
+        .lines()
+        .filter_map(|line| line.split_once("  "))
+        .map(|(key, _)| key.width())
+        .max()
+        .unwrap_or(0);
+    let indent = (key_width + 4).min(width.saturating_sub(1));
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        if let Some((key, description)) = line.split_once("  ") {
+            for (index, part) in wrapped(description, width.saturating_sub(indent).max(1))
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if index == 0 {
+                    format!(
+                        "  {key}{}",
+                        " ".repeat(indent.saturating_sub(key.width() + 2))
+                    )
+                } else {
+                    " ".repeat(indent)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, tone_style(Tone::Accent)),
+                    Span::raw(part),
+                ]));
+            }
+        } else {
+            lines.extend(wrapped(line, width).into_iter().map(Line::from));
+        }
+    }
+    lines
+}
+
 pub(super) fn draw_reader(frame: &mut Frame<'_>, reader: &mut Reader, footer: Footer) {
-    let lines = wrapped(&reader.content, content_width(frame))
-        .into_iter()
-        .map(Line::from)
-        .collect();
+    let width = content_width(frame);
+    let lines = if footer == HELP {
+        help_lines(&reader.content, width)
+    } else {
+        wrapped(&reader.content, width)
+            .into_iter()
+            .map(Line::from)
+            .collect()
+    };
     text_page(
         frame,
         &reader.title,
@@ -346,6 +394,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             frame,
             &ui.services,
             ui.selected,
+            ui.initial_loading,
             ui.unavailable.is_some(),
             notice.as_ref(),
         ),
@@ -376,7 +425,14 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 .map(|(i, action)| {
                     Line::from(vec![
                         Span::styled("  ", Style::default().remove_modifier(Modifier::REVERSED)),
-                        Span::raw(format!("{:<10} ", action.label())),
+                        Span::styled(
+                            format!("{:<10} ", action.label()),
+                            if i != *selected && *action == ServiceAction::Disable {
+                                tone_style(Tone::Error)
+                            } else {
+                                Style::default()
+                            },
+                        ),
                         Span::styled(
                             action.key().to_string(),
                             if i == *selected {
@@ -451,10 +507,13 @@ fn draw_services(
     frame: &mut Frame<'_>,
     services: &[ServiceInfo],
     selected: usize,
+    initial_loading: bool,
     stale: bool,
     notice: Option<&Notice>,
 ) {
-    let count = if stale {
+    let count = if initial_loading {
+        String::new()
+    } else if stale {
         "stale".to_owned()
     } else {
         format!(
@@ -478,6 +537,9 @@ fn draw_services(
     ) else {
         return;
     };
+    if initial_loading {
+        return;
+    }
     if services.is_empty() {
         let message = if stale {
             "Manager unavailable. Retrying…"
@@ -847,6 +909,33 @@ mod tests {
             .unwrap();
         assert!(reader.scroll < old);
         assert!(rendered(&terminal).contains("END"));
+    }
+
+    #[test]
+    fn help_keys_are_colored_and_wrapped_without_losing_text() {
+        for width in [38, 76, 116] {
+            let lines = help_lines(
+                "ctrl+c  Quit; wait for pending action\n\nconnection refused",
+                width,
+            );
+            let text: String = lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(text.contains("ctrl+c"));
+            assert!(text.contains("connection refused"));
+            assert!(lines.iter().all(|line| line.width() <= width));
+            assert_eq!(
+                lines[0].spans[0].style.fg,
+                if colors_enabled() {
+                    Some(Color::Cyan)
+                } else {
+                    None
+                }
+            );
+            assert_eq!(lines[0].spans[1].style.fg, None);
+        }
     }
 
     #[test]

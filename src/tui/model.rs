@@ -3,6 +3,7 @@ use std::{future::Future, path::PathBuf};
 use anyhow::Result;
 use crossterm::event::KeyCode;
 use tokio::task::JoinHandle;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LifecycleAction {
@@ -293,12 +294,24 @@ pub(super) struct MainUi {
     pub(super) page: Page,
     pub(super) help: Option<Reader>,
     pub(super) message: Option<Reader>,
+    pub(super) initial_loading: bool,
     pub(super) unavailable: Option<String>,
     pub(super) notice: Option<(Notice, std::time::Instant)>,
     pub(super) viewport: (u16, u16),
 }
 
 impl MainUi {
+    pub(super) fn complete_refresh(&mut self, result: Result<crate::protocol::Response>) {
+        self.initial_loading = false;
+        match result {
+            Ok(crate::protocol::Response::Services { services }) => self.refresh(services),
+            Ok(response) => {
+                self.unavailable = Some(format!("unexpected manager response: {response:?}"));
+            }
+            Err(error) => self.unavailable = Some(error.to_string()),
+        }
+    }
+
     pub(super) fn refresh(&mut self, services: Vec<crate::protocol::ServiceInfo>) {
         let name = self.services.get(self.selected).map(|s| s.name.as_str());
         let matched = name.and_then(|name| services.iter().position(|s| s.name == name));
@@ -306,6 +319,7 @@ impl MainUi {
             self.page = Page::Services;
         }
         self.selected = matched.unwrap_or(self.selected.min(services.len().saturating_sub(1)));
+        self.initial_loading = false;
         self.services = services;
         self.unavailable = None;
     }
@@ -335,27 +349,33 @@ impl MainUi {
             return Intent::None;
         }
         if key == KeyCode::Char('?') {
-            let mut text = match self.page {
-                Page::Services => "Up/Down, j/k  Select service\nEnter  Open actions\nEsc/q  Quit\n\n".to_owned(),
-                Page::Actions { .. } => "Up/Down, j/k  Select action\nEnter  Execute action\nPgUp/PgDn  Move by a page\nHome/End  First/last action\nEsc/q  Back\n\n".to_owned(),
-                Page::ConfirmDisable { .. } => "Up/Down, j/k  Select Cancel or Disable\nEnter  Confirm selection\nEsc/q  Cancel\n".to_owned(),
+            let (title, keys) = match self.page {
+                Page::Services => (
+                    "Help / services",
+                    "↑↓ / j k  Select service\nenter  Open actions\nesc / q  Quit from main",
+                ),
+                Page::Actions { .. } => (
+                    "Help / actions",
+                    "↑↓ / j k  Select action\nenter  Run selected action\npgup / pgdn  Move by a page\nhome / end  First / last action\nesc / q  Back from actions",
+                ),
+                Page::ConfirmDisable { .. } => (
+                    "Help / disable",
+                    "↑↓ / j k  Select Cancel or Disable\nenter  Confirm selection\nesc / q  Cancel",
+                ),
             };
-            if !matches!(self.page, Page::ConfirmDisable { .. }) {
-                for action in ServiceAction::ALL {
-                    text.push_str(&format!("{}  {}\n", action.key(), action.label()));
-                }
-                text.push_str("\nDisable requires confirmation.\nCtrl+C  Quit (wait for a pending operation)\nTTY attach accepts input; pipe attach is read-only.\nCtrl+C detaches from either session.");
-            }
+            let mut text = format!("{keys}\nctrl+c  Quit; wait for pending action");
             if matches!(self.page, Page::Actions { .. }) {
                 if let Some(service) = self.services.get(self.selected) {
                     let kind = match service.kind {
                         crate::protocol::ServiceKind::Enabled => "enabled",
                         crate::protocol::ServiceKind::Temporary => "temporary",
                     };
-                    text = format!(
-                        "Service: {}\nDirectory: {}\nType: {}\n\n{}",
-                        service.name, service.directory, kind, text
-                    );
+                    if service.name.width() > 24 || service.directory.width() > 40 {
+                        text.push_str(&format!(
+                            "\n\nService: {}\nDirectory: {}\nType: {}",
+                            service.name, service.directory, kind
+                        ));
+                    }
                 }
             }
             if pending {
@@ -364,8 +384,15 @@ impl MainUi {
             if let Some(error) = &self.unavailable {
                 text.push_str(&format!("\n\nManager unavailable; data is stale:\n{error}"));
             }
-            self.help = Some(Reader::new("Help", text));
+            self.help = Some(Reader::new(title, text));
             return Intent::None;
+        }
+        if self.initial_loading {
+            return if matches!(key, KeyCode::Esc | KeyCode::Char('q')) {
+                Intent::Quit
+            } else {
+                Intent::None
+            };
         }
         let mut action = None;
         match &mut self.page {

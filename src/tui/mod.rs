@@ -943,7 +943,8 @@ mod tests {
             .draw(|frame| draw_main(frame, &mut ui, ""))
             .unwrap();
         assert!(buffer_text(&terminal).contains("enabled"));
-        assert!(matches!(ui.page, model::Page::Actions { scroll, .. } if scroll > 6));
+        assert!(matches!(ui.page, model::Page::Actions { selected: 5, .. }));
+        assert!(buffer_text(&terminal).contains("> Disable"));
     }
 
     #[test]
@@ -1059,6 +1060,236 @@ mod tests {
         ui.notice = Some(("stopped api".into(), now + Duration::from_secs(3)));
         assert_eq!(ui.notice(now), "stopped api");
         assert_eq!(ui.notice(now + Duration::from_secs(3)), "");
+    }
+
+    // Optional artifacts contain the actual TestBackend cells, not a separate mockup.
+    fn export_page(terminal: &Terminal<TestBackend>, name: &str) {
+        let Ok(directory) = std::env::var("SERVED_TUI_PREVIEWS") else {
+            return;
+        };
+        let buffer = terminal.backend().buffer();
+        let cells: Vec<_> = buffer
+            .content
+            .iter()
+            .map(|cell| {
+                serde_json::json!({
+                    "text": cell.symbol(),
+                    "dim": cell.modifier.contains(ratatui::style::Modifier::DIM),
+                    "reverse": cell.modifier.contains(ratatui::style::Modifier::REVERSED),
+                    "bold": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                })
+            })
+            .collect();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(std::path::Path::new(&directory).join(format!("{name}-{}.json", buffer.area.width)),
+            serde_json::to_vec(&serde_json::json!({"width":buffer.area.width,"height":buffer.area.height,"cells":cells})).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn actual_pages_follow_the_footer_contract() {
+        use model::Page;
+        for width in (40..=62).chain([80, 120]) {
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, if width < 80 { 10 } else { 24 })).unwrap();
+            let mut ui = MainUi::default();
+            let mut service = service_info(false);
+            service.directory = "/projects/api".into();
+            ui.refresh(vec![service]);
+            for (name, footer, keys) in [
+                ("main", view::SERVICES, "enter actions   ? help   q quit"),
+                (
+                    "actions",
+                    view::ACTIONS,
+                    "enter select   ? help   esc/q back",
+                ),
+                (
+                    "confirm",
+                    view::CONFIRM,
+                    "enter select   ? help   esc/q cancel",
+                ),
+            ] {
+                ui.page = match name {
+                    "actions" => Page::Actions {
+                        selected: 0,
+                        scroll: 0,
+                    },
+                    "confirm" => Page::ConfirmDisable {
+                        confirm: false,
+                        menu: None,
+                    },
+                    _ => Page::Services,
+                };
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let baseline = buffer_text(&terminal);
+                assert!(baseline.contains(keys));
+                let lines: Vec<_> = baseline.lines().collect();
+                let height = terminal.backend().buffer().area.height;
+                let rows = view::body_rows(ratatui::layout::Rect::new(0, 0, width, height), footer);
+                let body = lines[3..3 + rows].join("\n");
+                assert!(!body.contains("/projects"));
+                assert!(!body.contains("enabled"));
+                assert!(lines[3 + rows..].join("\n").contains("enabled"));
+                if name == "confirm" {
+                    assert!(body.contains("Stops and unregisters service."));
+                    assert!(body.contains("> Cancel"));
+                    assert!(body.contains("Disable"));
+                }
+                export_page(&terminal, name);
+                let footer_line = lines.iter().position(|line| line.contains(keys)).unwrap();
+                for state in ["progress", "success", "offline", "recovered"] {
+                    ui.unavailable = (state == "offline").then(|| "offline".into());
+                    ui.notice = (state == "success").then(|| {
+                        (
+                            "started api".into(),
+                            Instant::now() + Duration::from_secs(3),
+                        )
+                    });
+                    terminal
+                        .draw(|frame| {
+                            draw_main(
+                                frame,
+                                &mut ui,
+                                if state == "progress" {
+                                    "starting api..."
+                                } else {
+                                    ""
+                                },
+                            )
+                        })
+                        .unwrap();
+                    let text = buffer_text(&terminal);
+                    let updated: Vec<_> = text.lines().collect();
+                    assert_eq!(
+                        unicode_width::UnicodeWidthStr::width(
+                            &updated[footer_line][..updated[footer_line].find(keys).unwrap()]
+                        ),
+                        unicode_width::UnicodeWidthStr::width(
+                            &lines[footer_line][..lines[footer_line].find(keys).unwrap()]
+                        )
+                    );
+                    assert_eq!(updated[3..3 + rows], lines[3..3 + rows]);
+                    assert_eq!(view::main_footer(&ui), footer);
+                    let expected = match state {
+                        "progress" => "starting api...",
+                        "success" => "started api",
+                        "offline" => "Manager",
+                        _ => "enabled",
+                    };
+                    assert_eq!(
+                        text.matches(expected).count(),
+                        1,
+                        "{name}/{state}/{width}: {text}"
+                    );
+                    if state == "offline" {
+                        assert_eq!(ui.key(KeyCode::Char('s'), false, rows), Intent::None);
+                        export_page(&terminal, &format!("{name}-offline"));
+                    }
+                    if state == "progress" {
+                        export_page(&terminal, &format!("{name}-progress"));
+                    }
+                }
+            }
+            ui.page = Page::Actions {
+                selected: 5,
+                scroll: 0,
+            };
+            ui.key(KeyCode::Char('?'), false, 3);
+            assert!(
+                ui.help
+                    .as_ref()
+                    .unwrap()
+                    .content
+                    .contains("Directory: /projects/api")
+            );
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("?/esc/q back"));
+            export_page(&terminal, "help");
+            ui.key(KeyCode::Char('?'), false, 3);
+            assert!(matches!(ui.page, Page::Actions { selected: 5, .. }));
+            ui.message = Some(Reader::new("Error", "An operation failed.\n".repeat(40)));
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("esc/q back"));
+            export_page(&terminal, "error");
+            terminal
+                .draw(|frame| draw_reader(frame, ui.message.as_mut().unwrap(), view::CRASH))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("enter/y open log   n/esc cancel"));
+            export_page(&terminal, "crash");
+            let records = vec![crate::protocol::HistoryRecord {
+                id: "latest".into(),
+                bytes: 123,
+                current: true,
+                persisted: true,
+            }];
+            terminal
+                .draw(|frame| draw_history_list(frame, "api", &records, 0))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("enter open   ? help   esc/q back"));
+            export_page(&terminal, "history");
+            let mut history = HistoryView::new("latest".into());
+            history.content = "log output\n".repeat(40);
+            history.total_lines = 40;
+            terminal
+                .draw(|frame| draw_history_content(frame, "api", &history))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("1/40"));
+            export_page(&terminal, "logs");
+            terminal
+                .draw(|frame| draw_main(frame, &mut MainUi::default(), ""))
+                .unwrap();
+            assert!(buffer_text(&terminal).contains("served enable"));
+            export_page(&terminal, "empty");
+        }
+    }
+
+    #[test]
+    fn action_paging_keeps_selection_visible_and_full_details_readable() {
+        use model::Page;
+        let mut ui = MainUi::default();
+        let mut service = service_info(false);
+        service.directory = format!("/{}END", "项目/".repeat(80));
+        service.name = format!("{}END", "长名称".repeat(20));
+        let full_path = service.directory.clone();
+        let full_name = service.name.clone();
+        ui.refresh(vec![service]);
+        ui.key(KeyCode::Enter, false, 3);
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        for width in [40, 60, 120, 40] {
+            terminal.backend_mut().resize(width, 10);
+            let rows = view::body_rows(ratatui::layout::Rect::new(0, 0, width, 10), view::ACTIONS);
+            for (key, expected) in [
+                (KeyCode::Home, 0),
+                (KeyCode::PageDown, rows.min(5)),
+                (KeyCode::End, 5),
+                (KeyCode::PageUp, 5usize.saturating_sub(rows)),
+            ] {
+                ui.key(key, false, rows);
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                assert!(matches!(ui.page, Page::Actions { selected, .. } if selected == expected));
+                assert!(
+                    buffer_text(&terminal)
+                        .contains(&format!("> {}", ServiceAction::ALL[expected].label()))
+                );
+            }
+        }
+        ui.key(KeyCode::Char('?'), false, 3);
+        let help = ui.help.as_ref().unwrap();
+        assert!(help.content.contains(&full_path));
+        assert!(help.content.contains(&full_name));
+        assert!(help.content.contains("Type: enabled"));
+        ui.key(KeyCode::End, false, 3);
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        assert!(ui.help.as_ref().unwrap().scroll > 0);
     }
 
     #[test]

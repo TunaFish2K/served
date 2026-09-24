@@ -306,7 +306,7 @@ impl MainUi {
         if key == KeyCode::Char('?') {
             let mut text = match self.page {
                 Page::Services => "Up/Down, j/k  Select service\nEnter  Open actions\nEsc/q  Quit\n\n".to_owned(),
-                Page::Actions { .. } => "Up/Down, j/k  Select action\nEnter  Execute action\nPgUp/PgDn  Scroll actions and full details\nEsc/q  Back\n\n".to_owned(),
+                Page::Actions { .. } => "Up/Down, j/k  Select action\nEnter  Execute action\nPgUp/PgDn  Move by a page\nHome/End  First/last action\nEsc/q  Back\n\n".to_owned(),
                 Page::ConfirmDisable { .. } => "Up/Down, j/k  Select Cancel or Disable\nEnter  Confirm selection\nEsc/q  Cancel\n".to_owned(),
             };
             if !matches!(self.page, Page::ConfirmDisable { .. }) {
@@ -314,6 +314,18 @@ impl MainUi {
                     text.push_str(&format!("{}  {}\n", action.key(), action.label()));
                 }
                 text.push_str("\nDisable requires confirmation.\nCtrl+C  Quit (wait for a pending operation)\nTTY attach accepts input; pipe attach is read-only.\nCtrl+C detaches from either session.");
+            }
+            if matches!(self.page, Page::Actions { .. }) {
+                if let Some(service) = self.services.get(self.selected) {
+                    let kind = match service.kind {
+                        crate::protocol::ServiceKind::Enabled => "enabled",
+                        crate::protocol::ServiceKind::Temporary => "temporary",
+                    };
+                    text = format!(
+                        "Service: {}\nDirectory: {}\nType: {}\n\n{}",
+                        service.name, service.directory, kind, text
+                    );
+                }
             }
             if pending {
                 text.push_str("\n\nOperation in progress: further actions are blocked.");
@@ -355,7 +367,18 @@ impl MainUi {
                 }
                 KeyCode::Enter => action = Some(ServiceAction::ALL[*selected]),
                 KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
-                    scroll_key(scroll, key, rows)
+                    *selected = match key {
+                        KeyCode::PageUp => selected.saturating_sub(rows.max(1)),
+                        KeyCode::PageDown => selected
+                            .saturating_add(rows.max(1))
+                            .min(ServiceAction::ALL.len() - 1),
+                        KeyCode::Home => 0,
+                        KeyCode::End => ServiceAction::ALL.len() - 1,
+                        _ => unreachable!(),
+                    };
+                    *scroll = (*scroll)
+                        .min(*selected)
+                        .max(selected.saturating_sub(rows.saturating_sub(1)));
                 }
                 _ => action = ServiceAction::from_key(key),
             },

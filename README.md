@@ -311,7 +311,7 @@ Disable requires confirmation and defaults to Cancel. Operations report progress
 after three seconds, while errors remain readable until dismissed. During a manager disconnection,
 the last list is marked stale and service actions are blocked until reconnection.
 
-The minimum usable size is 40×10. Long names and paths are shortened in the list; the actions page
+The minimum usable size is 40×10. Long names and paths are shortened in the list; the actions page’s `?` help
 shows full details, scrollable with PgUp/PgDn. There are no random tips or decorative panels.
 See [TUI design rules](docs/TUI-DESIGN.md) for the shared page templates and interaction contract.
 

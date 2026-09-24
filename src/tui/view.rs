@@ -65,7 +65,7 @@ pub(super) fn main_footer(ui: &MainUi) -> Footer {
         ERROR
     } else {
         match ui.page {
-            Page::Services if ui.services.is_empty() || ui.unavailable.is_some() => EMPTY,
+            Page::Services if ui.services.is_empty() => EMPTY,
             Page::Services => SERVICES,
             Page::Actions { .. } => ACTIONS,
             Page::ConfirmDisable { .. } => CONFIRM,
@@ -300,9 +300,20 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             let Some(service) = service else {
                 return;
             };
-            let mut lines: Vec<Line> = ServiceAction::ALL
+            let Some(areas) = page(frame, &format!("{} / actions", service.name), "", ACTIONS)
+            else {
+                return;
+            };
+            let rows = usize::from(areas.body.height);
+            *scroll = (*scroll)
+                .min(*selected)
+                .max(selected.saturating_sub(rows.saturating_sub(1)))
+                .min(ServiceAction::ALL.len().saturating_sub(rows));
+            let lines: Vec<Line> = ServiceAction::ALL
                 .iter()
                 .enumerate()
+                .skip(*scroll)
+                .take(rows)
                 .map(|(i, action)| {
                     Line::from(format!(
                         "{} {:<10} {}",
@@ -317,37 +328,16 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                     })
                 })
                 .collect();
-            lines.push(Line::default());
-            let mut details = format!(
-                "{}\n{}\n{}",
-                service.name,
-                service.directory,
-                kind_name(&service.kind)
-            );
-            if ui.unavailable.is_some() {
-                details.push_str("\nManager unavailable; stale data. Actions disabled.");
-            }
-            if !progress.is_empty() {
-                details.push_str(&format!("\n{progress}"));
-            }
-            lines.extend(
-                wrapped(&details, content_width(frame))
-                    .into_iter()
-                    .map(|s| Line::from(s).style(muted())),
-            );
-            text_page(
+            frame.render_widget(Paragraph::new(lines), areas.body);
+            draw_service_detail(
                 frame,
-                &format!("{} / actions", service.name),
-                lines,
-                scroll,
-                ACTIONS,
-                if ui.unavailable.is_some() {
-                    "Manager unavailable; actions disabled"
-                } else {
-                    &notice
-                },
+                areas.detail,
+                Some(service),
+                ui.unavailable.is_some(),
+                &notice,
             );
         }
+
         Page::ConfirmDisable { confirm, .. } => {
             let Some(service) = service else {
                 return;
@@ -356,20 +346,30 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             else {
                 return;
             };
-            let items = vec![ListItem::new("Cancel"), ListItem::new("Disable")];
-            list(frame, areas.body, items, usize::from(*confirm));
             frame.render_widget(
-                Paragraph::new(clip(
-                    if ui.unavailable.is_some() {
-                        "Manager unavailable; actions disabled"
-                    } else {
-                        "Stops service and removes registration."
-                    },
-                    usize::from(areas.detail.width),
-                    false,
-                ))
-                .style(muted()),
+                Paragraph::new("Stops and unregisters service.").style(muted()),
+                Rect {
+                    height: 1,
+                    ..areas.body
+                },
+            );
+            let items = vec![ListItem::new("Cancel"), ListItem::new("Disable")];
+            list(
+                frame,
+                Rect {
+                    y: areas.body.y + 1,
+                    height: areas.body.height - 1,
+                    ..areas.body
+                },
+                items,
+                usize::from(*confirm),
+            );
+            draw_service_detail(
+                frame,
                 areas.detail,
+                Some(service),
+                ui.unavailable.is_some(),
+                &notice,
             );
         }
     }
@@ -395,11 +395,7 @@ fn draw_services(
             }
         )
     };
-    let footer = if services.is_empty() || stale {
-        EMPTY
-    } else {
-        SERVICES
-    };
+    let footer = if services.is_empty() { EMPTY } else { SERVICES };
     let Some(areas) = page(frame, "served", &count, footer) else {
         return;
     };
@@ -432,15 +428,25 @@ fn draw_services(
             .collect();
         list(frame, areas.body, items, selected);
     }
+    draw_service_detail(frame, areas.detail, services.get(selected), stale, notice);
+}
+
+fn draw_service_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    service: Option<&ServiceInfo>,
+    stale: bool,
+    notice: &str,
+) {
     let detail = if stale {
         clip(
             "Manager unavailable; stale data. ? help",
-            usize::from(areas.detail.width),
+            usize::from(area.width),
             false,
         )
     } else if !notice.is_empty() {
-        clip(notice, usize::from(areas.detail.width), false)
-    } else if let Some(service) = services.get(selected) {
+        clip(notice, usize::from(area.width), false)
+    } else if let Some(service) = service {
         let kind = kind_name(&service.kind);
         let path = std::env::var("HOME")
             .ok()
@@ -459,14 +465,14 @@ fn draw_services(
             "{} · {kind}",
             clip(
                 &path,
-                usize::from(areas.detail.width).saturating_sub(kind.len() + 3),
+                usize::from(area.width).saturating_sub(kind.len() + 3),
                 true
             )
         )
     } else {
         String::new()
     };
-    frame.render_widget(Paragraph::new(detail).style(muted()), areas.detail);
+    frame.render_widget(Paragraph::new(detail).style(muted()), area);
 }
 
 fn state_name(state: &ServiceState) -> &'static str {

@@ -11,6 +11,7 @@ use crossterm::{
 use std::{
     io::{self, IsTerminal, Read, Write, stdout},
     os::fd::{AsFd, AsRawFd},
+    os::unix::fs::FileTypeExt,
     path::Path,
     sync::{
         Arc,
@@ -45,7 +46,7 @@ pub async fn attach(
         Err(error) => return handle_direct_attach_error(error, interactive).await,
     };
     let _screen = interactive.then(AttachScreen::enter).transpose()?;
-    attach_session(&paths, service_name, session, interactive, !no_stdin).await
+    attach_session(&paths, service_name, session, interactive, !no_stdin, true).await
 }
 
 async fn handle_direct_attach_error(error: anyhow::Error, interactive: bool) -> Result<()> {
@@ -266,6 +267,7 @@ pub(crate) async fn attach_session(
     session: client::AttachSession,
     interactive: bool,
     read_stdin: bool,
+    handle_signals: bool,
 ) -> Result<()> {
     let client::AttachSession { stream, token } = session;
     let (mut socket_read, mut socket_write) = tokio::io::split(stream);
@@ -277,8 +279,14 @@ pub(crate) async fn attach_session(
         resize.sync().await;
     }
     let mut resize_tick = interval(Duration::from_millis(250));
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Embedded attach inherits the TUI's signal policy. Tokio signal handlers
+    // remain installed after dropping a receiver, so do not register them there.
+    let mut interrupt = handle_signals
+        .then(|| tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()))
+        .transpose()?;
+    let mut terminate = handle_signals
+        .then(|| tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()))
+        .transpose()?;
     let transfer = async {
         loop {
             tokio::select! {
@@ -309,8 +317,8 @@ pub(crate) async fn attach_session(
     };
     tokio::select! {
         result = transfer => result,
-        _ = interrupt.recv() => Err(Interrupted(2).into()),
-        _ = terminate.recv() => Err(Interrupted(15).into()),
+        _ = async { interrupt.as_mut().unwrap().recv().await }, if handle_signals => Err(Interrupted(2).into()),
+        _ = async { terminate.as_mut().unwrap().recv().await }, if handle_signals => Err(Interrupted(15).into()),
     }
 }
 
@@ -333,7 +341,8 @@ impl Output {
             ready: None,
             flags,
         };
-        if !output.file.metadata()?.is_file() {
+        let kind = output.file.metadata()?.file_type();
+        if kind.is_fifo() || kind.is_socket() || output.file.is_terminal() {
             fcntl(
                 output.file.as_raw_fd(),
                 FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK),

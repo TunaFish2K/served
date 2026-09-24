@@ -44,7 +44,10 @@ SERVED(1) - General Commands Manual
 runs commands from prepared projects as per-user services.
 It does not upload code, install project dependencies, or build projects.
 Linux and macOS are supported.
-Run without a subcommand to open the service management TUI.
+Run without a subcommand in a terminal to open the full build's management TUI.
+The headless build and non-terminal invocations show CLI help instead.
+Build headless with cargo build --release --no-default-features.
+Both builds retain all CLI commands, PTY support, and terminal attach.
 A manager must already be running for service management commands;
 **edit**
 works without a manager.
@@ -67,6 +70,7 @@ Named commands work from any directory.
 > Existing text, including invalid configuration, is preserved. **-&#45;path**
 > creates a missing template and prints its absolute path without opening an editor.
 > Warnings go to standard error.
+> Non-terminal invocations require an explicit editor or --path.
 > **-e**, **-&#45;editor** *command*
 > selects the editor and conflicts with **-&#45;path**.
 
@@ -143,8 +147,16 @@ Named commands work from any directory.
 > Connect directly without opening the management TUI.
 > PTY services allow one interactive writer; pipe services allow multiple read-only observers.
 > Show a short sanitized snapshot, then relay live output.
-> Ctrl-C detaches and is not forwarded to the service.
-> A terminal is needed for interactive attach; use history output in automation.
+> When both stdin and stdout are terminals, Ctrl-C detaches without forwarding it.
+> Otherwise use stream mode: no raw mode, screen commands, resize, or prompts. **-&#45;stream**
+> forces stream mode even in a terminal; **-&#45;no-stdin**
+> receives output without reading stdin and also selects stream mode.
+> Stream input bytes, including Ctrl-C, are forwarded unchanged.
+> Input EOF stops reading stdin but keeps receiving output; it does not close service input.
+> Service exit or downstream closure ends the session successfully.
+> SIGINT and SIGTERM detach without stopping the service.
+> The service exit code is not the attach exit code.
+> Live output may contain service-generated terminal escapes; use history --stdout for sanitized text.
 
 **history**
 
@@ -153,11 +165,20 @@ Named commands work from any directory.
 > prints sanitized text and metadata as JSON.
 > These modes also support memory-only history. **-&#45;path**
 > prints the raw log path for a persisted run.
-> Without an output mode, open the persisted raw log in an editor.
+> Without an output mode, terminal invocations open the persisted raw log in an editor;
+> non-terminal invocations print sanitized text.
 > **-e**, **-&#45;editor** *command*
 > chooses that editor.
 > Editor, path, stdout, and JSON modes are mutually exclusive.
-> Raw paths and editor mode are unavailable for memory-only runs.
+> Raw paths and editor mode are unavailable for memory-only runs. **-&#45;list**
+> enumerates available records and conflicts with --run and content, path, or editor modes. **-&#45;output** **json**
+> returns a versioned document; legacy --json keeps its original format.
+
+**version**
+
+> Print the version and build variant, full or headless.
+> JSON data includes version, variant, and a features array.
+> No HOME or manager is required.
 
 **list**
 
@@ -183,6 +204,27 @@ Named commands work from any directory.
 prints help for the selected command.
 **-V**, **-&#45;version**
 prints the executable version when used without a subcommand.
+
+# MACHINE OUTPUT
+
+The global **-&#45;output** *text|json*
+option works before or after a subcommand; text is the default.
+JSON emits one newline-terminated document to stdout on success or failure.
+Diagnostics and tracing go to stderr.
+Success has schema\_version=1, ok=true, and data.
+Failure has schema\_version=1, ok=false, and error with code and message.
+Codes are invalid\_arguments and operation\_failed; do not parse message text.
+List data contains services; run data contains name; path queries contain path.
+Other management actions return an empty data object.
+History data has service, id, current, persisted, raw\_bytes, total\_lines, and content.
+History --list data has service and records with id, bytes, current, and persisted.
+Service states and kinds use lowercase strings.
+Legacy history --json conflicts with an explicit --output and remains unwrapped.
+JSON mode rejects attach, foreground daemon, internal runner, missing subcommands,
+and editor launches before any side effects.
+Use edit --path or history content/path queries instead.
+One-shot daemon --handoff and --relinquish accept JSON output.
+Explicit --help and --version retain their normal text format.
 
 # RUN OPTIONS
 
@@ -235,7 +277,7 @@ Enter opens the action menu; ? opens contextual help.
 Disable requires confirmation and defaults to Cancel.
 Use q or Escape to leave a view.
 The borderless layout requires at least 40 columns and 10 rows.
-Long service details can be read on the actions page with PageUp/PageDown.
+Full service details are in the actions page help; PageUp/PageDown scroll the help.
 While the manager is unavailable, the list is marked stale and service actions are blocked.
 Success messages clear after three seconds; errors remain until dismissed.
 In history, Enter opens a run; PageUp/PageDown and Home/End navigate its content.
@@ -261,7 +303,9 @@ The TUI does not edit service configuration.
 # EXIT STATUS
 
 Zero indicates command success, not that the service will remain running.
-Errors return a nonzero status.
+Execution errors return 1; invalid arguments return 2.
+Downstream pipe closure is successful.
+Attach signal exits use 130 for SIGINT and 143 for SIGTERM.
 Editor failures propagate their status.
 A manager intentionally relinquishing control exits with status 75.
 
@@ -279,4 +323,4 @@ A manager intentionally relinquishing control exits with status 75.
 
 [served(5)](config.md)
 
-served - September 23, 2026
+served - September 24, 2026

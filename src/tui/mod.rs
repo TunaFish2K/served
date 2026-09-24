@@ -480,7 +480,7 @@ async fn attach_in_tui(
     session: client::AttachSession,
 ) -> Result<()> {
     clear_attach_screen(terminal)?;
-    let attach_result = attach_session(paths, name, session, true, true).await;
+    let attach_result = attach_session(paths, name, session, true, true, false).await;
     let restore_result = clear_attach_screen(terminal);
     if let Err(error) = attach_result {
         restore_result?;

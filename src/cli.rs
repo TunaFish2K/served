@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io::ErrorKind,
+    io::{ErrorKind, IsTerminal},
     path::{Path, PathBuf},
     process,
 };
@@ -19,12 +19,19 @@ use crate::{
     runner,
 };
 use anyhow::{Context, Result, bail};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use serde_json::{Value, json};
+mod output;
 use serde::Serialize;
-#[cfg(feature = "tui")]
-use std::io::IsTerminal;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing_subscriber::EnvFilter;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Text,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,12 +40,17 @@ use tracing_subscriber::EnvFilter;
     about = "lightweight per-user service manager"
 )]
 struct Cli {
+    /// Output format for one-shot commands (JSON schema version 1).
+    #[arg(long, global = true, value_enum)]
+    output: Option<OutputFormat>,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Print build version and capabilities.
+    Version,
     /// Run the manager in the foreground under a process supervisor.
     Daemon {
         /// Ask the running manager to replace itself while keeping runners alive.
@@ -131,6 +143,9 @@ enum Command {
     /// Read service output history, open its raw file, or print its path.
     History {
         name: Option<String>,
+        /// Enumerate history records instead of reading one record.
+        #[arg(long, conflicts_with_all = ["run", "editor", "path", "stdout", "json"])]
+        list: bool,
         #[arg(long)]
         run: Option<String>,
         #[arg(
@@ -153,145 +168,315 @@ enum Command {
     List,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("command exited with status {0}")]
+pub struct ReportedExit(pub i32);
+
 pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
         .try_init()
         .ok();
-
-    let cli = Cli::parse();
-    match cli.command {
-        Some(Command::Edit { file, editor, path }) => {
-            let directory = std::env::current_dir().context("read current directory")?;
-            edit_config(&directory, file.as_deref(), editor, path).await
-        }
-        command => {
-            let paths = ServedPaths::from_environment().context("served requires HOME")?;
-            match command {
-                None => {
-                    #[cfg(feature = "tui")]
-                    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                        return crate::tui::run(paths).await;
-                    }
-                    Cli::command().print_help()?;
-                    Ok(())
-                }
-                Some(Command::Daemon {
-                    handoff,
-                    relinquish,
-                }) => {
-                    if handoff {
-                        manager::request_handoff(paths).await
-                    } else if relinquish {
-                        manager::request_relinquish(paths).await
-                    } else {
-                        match manager::run_daemon(paths).await? {
-                            manager::DaemonExit::Stopped => Ok(()),
-                            manager::DaemonExit::Relinquished => {
-                                process::exit(manager::SUPERVISOR_RELINQUISH_EXIT_CODE)
-                            }
-                        }
-                    }
-                }
-                Some(Command::Shutdown) => manager::request_shutdown(paths).await,
-                Some(Command::Runner { name, socket }) => runner::run(name, socket).await,
-                Some(Command::Enable { file, workdir }) => {
-                    let current = std::env::current_dir().context("read current directory")?;
-                    let workdir = workdir.map(|path| current.join(path));
-                    let directory = workdir.as_deref().unwrap_or(&current);
-                    client::expect_ok(
-                        &paths,
-                        Request::Enable {
-                            directory: directory.display().to_string(),
-                            file: file.map(|path| current.join(path).display().to_string()),
-                            workdir: workdir.as_ref().map(|path| path.display().to_string()),
-                        },
-                    )
-                    .await
-                }
-                Some(Command::Run {
-                    workdir,
-                    name,
-                    no_tty,
-                    no_sync_rows_cols,
-                    restart,
-                    persist_logs,
-                    log_max_bytes,
-                    log_max_files,
-                    env,
-                    argv,
-                }) => {
-                    let directory = std::env::current_dir().context("read current directory")?;
-                    let directory = crate::config::canonical_directory(
-                        &workdir
-                            .map(|path| directory.join(path))
-                            .unwrap_or(directory),
-                    )?;
-                    let name = name.unwrap_or_else(|| default_service_name(&directory));
-                    let spec = RunSpec {
-                        directory: directory.display().to_string(),
-                        name: name.clone(),
-                        argv,
-                        tty: !no_tty,
-                        sync_rows_cols: !no_sync_rows_cols,
-                        restart,
-                        persist_logs,
-                        log_max_bytes,
-                        log_max_files,
-                        env: parse_environment(env)?,
-                    };
-                    client::expect_ok(&paths, Request::Run { spec }).await?;
-                    println!("{name}");
-                    Ok(())
-                }
-                Some(Command::Disable { name }) => {
-                    let target = client::target(name, std::env::current_dir()?);
-                    client::expect_ok(&paths, Request::Disable { target }).await
-                }
-                Some(Command::Restart { name }) => {
-                    let target = client::target(name, std::env::current_dir()?);
-                    client::expect_ok(&paths, Request::Restart { target }).await
-                }
-                Some(Command::Start { name }) => {
-                    let target = client::target(name, std::env::current_dir()?);
-                    client::expect_ok(&paths, Request::Start { target }).await
-                }
-                Some(Command::Stop { name }) => {
-                    let target = client::target(name, std::env::current_dir()?);
-                    client::expect_ok(&paths, Request::Stop { target }).await
-                }
-                Some(Command::Attach {
-                    name,
-                    stream,
-                    no_stdin,
-                }) => attach::attach(paths, name, stream, no_stdin).await,
-                Some(Command::History {
-                    name,
-                    run,
-                    editor,
-                    path,
-                    stdout,
-                    json,
-                }) => {
-                    let target = client::target(name, std::env::current_dir()?);
-                    print_history(&paths, target, run, editor, path, stdout, json).await
-                }
-                Some(Command::List) => print_list(&paths).await,
-                Some(Command::Edit { .. }) => unreachable!("edit is handled above"),
+    let args: Vec<_> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                print_text(&error.to_string()).await?;
+                return Ok(());
             }
+            let json = args
+                .iter()
+                .take_while(|arg| *arg != "--")
+                .collect::<Vec<_>>();
+            let json = json.iter().any(|arg| **arg == "--output=json")
+                || json
+                    .windows(2)
+                    .any(|pair| pair[0] == "--output" && pair[1] == "json");
+            return report_failure(json, "invalid_arguments", error.to_string(), 2).await;
         }
+    };
+    let json = cli.output == Some(OutputFormat::Json);
+    if let Err(message) = validate(&cli) {
+        return report_failure(json, "invalid_arguments", message.to_owned(), 2).await;
+    }
+    match execute(cli.command, json).await {
+        Ok(data) => {
+            if json {
+                print_json(&output::Document::success(data)).await?;
+            }
+            Ok(())
+        }
+        Err(error) if error.is::<attach::Interrupted>() => Err(error),
+        Err(error) => report_failure(json, "operation_failed", format!("{error:#}"), 1).await,
     }
 }
 
-async fn print_list(paths: &ServedPaths) -> Result<()> {
+fn validate(cli: &Cli) -> std::result::Result<(), &'static str> {
+    let json = cli.output == Some(OutputFormat::Json);
+    if let Some(Command::History { json: true, .. }) = &cli.command {
+        if cli.output.is_some() {
+            return Err("history --json conflicts with --output; use one output interface");
+        }
+    }
+    if json {
+        match &cli.command {
+            None | Some(Command::Attach { .. } | Command::Runner { .. }) => {
+                return Err("--output json requires a one-shot command; attach uses raw bytes");
+            }
+            Some(Command::Daemon {
+                handoff: false,
+                relinquish: false,
+            }) => return Err("foreground daemon does not support --output json"),
+            Some(Command::Edit { path: false, .. }) => {
+                return Err("JSON edit requires --path; editors cannot run in JSON mode");
+            }
+            Some(
+                Command::History {
+                    editor: Some(_), ..
+                }
+                | Command::History { stdout: true, .. },
+            ) => return Err("JSON history conflicts with --editor and --stdout"),
+            _ => {}
+        }
+    }
+    if (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal())
+        && matches!(
+            &cli.command,
+            Some(Command::Edit {
+                path: false,
+                editor: None,
+                ..
+            })
+        )
+    {
+        return Err("non-interactive edit requires --path or an explicit --editor");
+    }
+    Ok(())
+}
+
+async fn report_failure(
+    json: bool,
+    code: &'static str,
+    message: String,
+    status: i32,
+) -> Result<()> {
+    if json {
+        print_json(&output::Document::failure(code, message)).await?;
+    } else {
+        eprintln!("error: {message}");
+    }
+    Err(ReportedExit(status).into())
+}
+
+async fn print_json(value: &impl Serialize) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value).context("encode CLI JSON")?;
+    bytes.push(b'\n');
+    print_bytes(&bytes).await
+}
+async fn print_text(value: &str) -> Result<()> {
+    print_bytes(value.as_bytes()).await
+}
+async fn print_bytes(value: &[u8]) -> Result<()> {
+    let mut out = tokio::io::stdout();
+    if write_output(&mut out, value).await? {
+        flush_output(&mut out).await?;
+    }
+    Ok(())
+}
+
+async fn execute(command: Option<Command>, json_output: bool) -> Result<Value> {
+    match command {
+        None => {
+            #[cfg(feature = "tui")]
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                crate::tui::run(ServedPaths::from_environment()?).await?;
+                return Ok(json!({}));
+            }
+            print_text(&Cli::command().render_help().to_string()).await?;
+            return Ok(json!({}));
+        }
+        Some(Command::Version) => {
+            let variant = if cfg!(feature = "tui") {
+                "full"
+            } else {
+                "headless"
+            };
+            let features: &[&str] = if cfg!(feature = "tui") { &["tui"] } else { &[] };
+            if !json_output {
+                print_text(&format!(
+                    "served {} ({variant})\n",
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .await?;
+            }
+            return Ok(
+                json!({"version": env!("CARGO_PKG_VERSION"), "variant": variant, "features": features}),
+            );
+        }
+        Some(Command::Edit { file, editor, path }) => {
+            let directory = std::env::current_dir().context("read current directory")?;
+            return edit_config(&directory, file.as_deref(), editor, path, json_output).await;
+        }
+        _ => {}
+    }
+    let paths = ServedPaths::from_environment().context("served requires HOME")?;
+    match command {
+        Some(Command::Daemon {
+            handoff,
+            relinquish,
+        }) => {
+            if handoff {
+                manager::request_handoff(paths).await?;
+            } else if relinquish {
+                manager::request_relinquish(paths).await?;
+            } else if matches!(
+                manager::run_daemon(paths).await?,
+                manager::DaemonExit::Relinquished
+            ) {
+                process::exit(manager::SUPERVISOR_RELINQUISH_EXIT_CODE);
+            }
+        }
+        Some(Command::Shutdown) => manager::request_shutdown(paths).await?,
+        Some(Command::Runner { name, socket }) => runner::run(name, socket).await?,
+        Some(Command::Enable { file, workdir }) => {
+            let current = std::env::current_dir().context("read current directory")?;
+            let workdir = workdir.map(|path| current.join(path));
+            let directory = workdir.as_deref().unwrap_or(&current);
+            client::expect_ok(
+                &paths,
+                Request::Enable {
+                    directory: directory.display().to_string(),
+                    file: file.map(|path| current.join(path).display().to_string()),
+                    workdir: workdir.as_ref().map(|path| path.display().to_string()),
+                },
+            )
+            .await?;
+        }
+        Some(Command::Run {
+            workdir,
+            name,
+            no_tty,
+            no_sync_rows_cols,
+            restart,
+            persist_logs,
+            log_max_bytes,
+            log_max_files,
+            env,
+            argv,
+        }) => {
+            let directory = std::env::current_dir().context("read current directory")?;
+            let directory = crate::config::canonical_directory(
+                &workdir
+                    .map(|path| directory.join(path))
+                    .unwrap_or(directory),
+            )?;
+            let name = name.unwrap_or_else(|| default_service_name(&directory));
+            let spec = RunSpec {
+                directory: directory.display().to_string(),
+                name: name.clone(),
+                argv,
+                tty: !no_tty,
+                sync_rows_cols: !no_sync_rows_cols,
+                restart,
+                persist_logs,
+                log_max_bytes,
+                log_max_files,
+                env: parse_environment(env)?,
+            };
+            client::expect_ok(&paths, Request::Run { spec }).await?;
+            if !json_output {
+                print_text(&format!("{name}\n")).await?;
+            }
+            return Ok(json!({"name": name}));
+        }
+        Some(Command::Disable { name }) => {
+            client::expect_ok(
+                &paths,
+                Request::Disable {
+                    target: client::target(name, std::env::current_dir()?),
+                },
+            )
+            .await?
+        }
+        Some(Command::Restart { name }) => {
+            client::expect_ok(
+                &paths,
+                Request::Restart {
+                    target: client::target(name, std::env::current_dir()?),
+                },
+            )
+            .await?
+        }
+        Some(Command::Start { name }) => {
+            client::expect_ok(
+                &paths,
+                Request::Start {
+                    target: client::target(name, std::env::current_dir()?),
+                },
+            )
+            .await?
+        }
+        Some(Command::Stop { name }) => {
+            client::expect_ok(
+                &paths,
+                Request::Stop {
+                    target: client::target(name, std::env::current_dir()?),
+                },
+            )
+            .await?
+        }
+        Some(Command::Attach {
+            name,
+            stream,
+            no_stdin,
+        }) => attach::attach(paths, name, stream, no_stdin).await?,
+        Some(Command::List) => return print_list(&paths, json_output).await,
+        Some(Command::History {
+            name,
+            run,
+            editor,
+            path,
+            stdout,
+            json,
+            list,
+        }) => {
+            let target = client::target(name, std::env::current_dir()?);
+            return print_history(
+                &paths,
+                target,
+                HistoryOptions {
+                    run,
+                    editor,
+                    path_only: path,
+                    stdout,
+                    json,
+                    list,
+                },
+                json_output,
+            )
+            .await;
+        }
+        None | Some(Command::Edit { .. } | Command::Version) => unreachable!("handled above"),
+    }
+    Ok(json!({}))
+}
+
+async fn print_list(paths: &ServedPaths, json_output: bool) -> Result<Value> {
     let response = client::request(paths, Request::List).await?;
     let Response::Services { services } = response else {
         bail!("unexpected manager response")
     };
+    let data = json!({"services": services.iter().map(output::Service::from).collect::<Vec<_>>()});
+    let mut text = String::new();
     for service in services {
-        println!(
-            "{:<18} {:<11} kind={:<9} pid={:<7} tty={} restart={} {}",
+        text.push_str(&format!(
+            "{:<18} {:<11} kind={:<9} pid={:<7} tty={} restart={} {}\n",
             service.name,
             format_state(&service.state),
             format_kind(&service.kind),
@@ -302,9 +487,12 @@ async fn print_list(paths: &ServedPaths) -> Result<()> {
             service.tty,
             service.restart,
             service.directory
-        );
+        ));
     }
-    Ok(())
+    if !json_output {
+        print_text(&text).await?;
+    }
+    Ok(data)
 }
 
 fn parse_environment(values: Vec<String>) -> Result<BTreeMap<String, String>> {
@@ -321,15 +509,29 @@ fn parse_environment(values: Vec<String>) -> Result<BTreeMap<String, String>> {
     Ok(environment)
 }
 
-async fn print_history(
-    paths: &ServedPaths,
-    target: Target,
+struct HistoryOptions {
     run: Option<String>,
     editor: Option<String>,
     path_only: bool,
     stdout: bool,
     json: bool,
-) -> Result<()> {
+    list: bool,
+}
+
+async fn print_history(
+    paths: &ServedPaths,
+    target: Target,
+    options: HistoryOptions,
+    json_output: bool,
+) -> Result<Value> {
+    let HistoryOptions {
+        run,
+        editor,
+        path_only,
+        stdout,
+        json,
+        list,
+    } = options;
     let response = client::request(
         paths,
         Request::HistoryList {
@@ -340,16 +542,43 @@ async fn print_history(
     let Response::HistoryList { service, records } = response else {
         bail!("unexpected manager response")
     };
+    if list {
+        if !json_output {
+            let text = records
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} {} B {}{}\n",
+                        r.id,
+                        r.bytes,
+                        if r.persisted { "disk" } else { "memory" },
+                        if r.current { " current" } else { "" }
+                    )
+                })
+                .collect::<String>();
+            print_text(&text).await?;
+        }
+        return Ok(
+            json!({"service": service, "records": records.iter().map(output::Record::from).collect::<Vec<_>>()}),
+        );
+    }
     let id = run.unwrap_or_else(|| "latest".to_owned());
     let record = records
         .into_iter()
         .find(|record| record.id == id)
         .ok_or_else(|| anyhow::anyhow!("history record {id:?} was not found"))?;
-    if stdout {
+    if stdout
+        || (!json_output
+            && !json
+            && !path_only
+            && editor.is_none()
+            && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()))
+    {
         let mut output = tokio::io::stdout();
-        return write_history_text(paths, target, &service, &record, &mut output).await;
+        write_history_text(paths, target, &service, &record, &mut output).await?;
+        return Ok(json!({}));
     }
-    if json {
+    if json || (json_output && !path_only) {
         let content = read_history_content(paths, target, &service, &record).await?;
         let document = HistoryJson {
             service: &service,
@@ -360,13 +589,11 @@ async fn print_history(
             total_lines: content.lines().count() as u64,
             content: &content,
         };
-        let mut bytes = serde_json::to_vec(&document).context("encode history JSON")?;
-        bytes.push(b'\n');
-        let mut output = tokio::io::stdout();
-        if write_output(&mut output, &bytes).await? {
-            flush_output(&mut output).await?;
+        if json_output {
+            return Ok(serde_json::to_value(document)?);
         }
-        return Ok(());
+        print_json(&document).await?;
+        return Ok(json!({}));
     }
     if !record.persisted {
         bail!(
@@ -381,12 +608,15 @@ async fn print_history(
     };
     let path = paths.logs_dir().join(service).join(file_name);
     if path_only {
-        println!("{}", path.display());
-        return Ok(());
+        if !json_output {
+            print_text(&format!("{}\n", path.display())).await?;
+        }
+        return Ok(json!({"path": path}));
     }
 
     let editor = editor::resolve(editor)?;
-    open_editor_or_exit(&editor, &path).await
+    open_editor_or_exit(&editor, &path).await?;
+    Ok(json!({}))
 }
 
 #[derive(Serialize)]
@@ -527,7 +757,8 @@ async fn edit_config(
     file: Option<&Path>,
     editor: Option<String>,
     path_only: bool,
-) -> Result<()> {
+    json_output: bool,
+) -> Result<Value> {
     let config_file = match file {
         Some(file) => prepare_explicit_config(&directory.join(file)),
         None => prepare_config_file(directory),
@@ -538,12 +769,15 @@ async fn edit_config(
     }
     let path = config_file.path();
     if path_only {
-        println!("{}", path.display());
-        return Ok(());
+        if !json_output {
+            print_text(&format!("{}\n", path.display())).await?;
+        }
+        return Ok(json!({"path": path}));
     }
 
     let editor = editor::resolve(editor)?;
-    open_editor_or_exit(&editor, path).await
+    open_editor_or_exit(&editor, path).await?;
+    Ok(json!({}))
 }
 
 async fn open_editor_or_exit(editor_command: &str, path: &Path) -> Result<()> {
@@ -725,7 +959,7 @@ mod tests {
     async fn edit_path_creates_template_without_editor() {
         let directory = tempdir().expect("tempdir");
 
-        edit_config(directory.path(), None, None, true)
+        edit_config(directory.path(), None, None, true, false)
             .await
             .expect("create config path");
 
@@ -759,6 +993,7 @@ mod tests {
                 path: false,
                 stdout: false,
                 json: false,
+                list: false,
             }) if name == "api" && run == "20260724-233045.log" && editor == "nvim -f"
         ));
 

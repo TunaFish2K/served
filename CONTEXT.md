@@ -166,3 +166,9 @@ relay。协议版本 3 增加精确的清理后历史行数。版本 5 增加结
 握手阶段会拒绝版本不匹配。raw PTY 字节不会与 control frame 混合。
 
 历史请求使用同一 manager IPC，并且需要当前的 manager 二进制。
+
+## 无头构建与 CLI 封装
+
+- 默认 Cargo feature `tui` 提供管理菜单；`--no-default-features` 裁掉菜单及专用依赖，保留全部 CLI、PTY 和终端／管道 attach。
+- attach 与管理界面独立，stdin EOF 后继续接收输出，取消仅解除连接。
+- `--output json` 使用版本化成功／错误封套；旧 `history --json` 保持兼容。字段、退出码和非交互行为见 [CLI 接口](docs/CLI-INTERFACE.md)。

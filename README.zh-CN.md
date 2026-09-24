@@ -476,3 +476,6 @@ Linux 架构。Docker 检查固定使用 Rust 1.85；本机构建和 CI 默认�
 
 served 使用 [Unlicense](LICENSE) 发布。你可以自由使用、复制、修改、发布和分发本项目。
 本软件不提供任何形式的保证。
+
+
+脚本和二层封装可使用 `--output json`。字段、管道行为与退出码见 [CLI 接口约定](docs/CLI-INTERFACE.md)。

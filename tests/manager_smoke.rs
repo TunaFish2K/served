@@ -2625,12 +2625,22 @@ async fn stream_attach_cancels_blocked_input_and_output_without_stopping_service
             130,
         ),
         (vec!["attach", "api", "--stream"], None, 0),
+        (
+            vec!["attach", "api", "--no-stdin"],
+            Some(Signal::SIGTERM),
+            143,
+        ),
     ] {
+        let discard = args.contains(&"--no-stdin") && signal == Some(Signal::SIGTERM);
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_served"))
             .args(args)
             .env("HOME", &h.home)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(if discard {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
@@ -2650,5 +2660,73 @@ async fn stream_attach_cancels_blocked_input_and_output_without_stopping_service
         wait_for_attach_state(&h.paths, "api", false).await;
         wait_for_state(&h.paths, "api", ServiceState::Running).await;
     }
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn json_cli_manages_services_and_enumerates_history_without_prompts() {
+    fn value(output: std::process::Output) -> serde_json::Value {
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["ok"], true);
+        value["data"].clone()
+    }
+    let mut h = LifecycleHarness::new().await;
+    assert_eq!(
+        value(h.cli(&["list", "--output=json"]))["services"],
+        serde_json::json!([])
+    );
+    let data = value(h.cli(&[
+        "--output",
+        "json",
+        "run",
+        "--name",
+        "wrapper-api",
+        "--no-tty",
+        "--",
+        "sh",
+        "-c",
+        "printf '你好 hello\\n'; exec sleep 60",
+    ]));
+    assert_eq!(data["name"], "wrapper-api");
+    wait_for_output_tail(&h.paths, "wrapper-api", "hello").await;
+    let list = value(h.cli(&["list", "--output=json"]));
+    assert_eq!(list["services"][0]["name"], "wrapper-api");
+    assert_eq!(list["services"][0]["state"], "running");
+    let records = value(h.cli(&["history", "wrapper-api", "--list", "--output=json"]));
+    assert_eq!(records["service"], "wrapper-api");
+    assert!(
+        records["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "latest" && r["persisted"] == false)
+    );
+    let history = value(h.cli(&["history", "wrapper-api", "--output=json"]));
+    assert_eq!(history["content"], "你好 hello\n");
+    let legacy: serde_json::Value =
+        serde_json::from_slice(&h.cli(&["history", "wrapper-api", "--json"]).stdout).unwrap();
+    assert_eq!(legacy, history);
+    let text = h.cli(&["history", "wrapper-api"]);
+    assert!(text.status.success());
+    assert_eq!(text.stdout, "你好 hello\n".as_bytes());
+    assert_eq!(
+        value(h.cli(&["stop", "wrapper-api", "--output=json"])),
+        serde_json::json!({})
+    );
+    wait_for_state(&h.paths, "wrapper-api", ServiceState::Stopped).await;
+    let rejection = h.cli(&["attach", "wrapper-api", "--output=json"]);
+    assert_eq!(rejection.status.code(), Some(2));
+    assert_eq!(
+        value(h.cli(&["start", "wrapper-api", "--output=json"])),
+        serde_json::json!({})
+    );
+    wait_for_state(&h.paths, "wrapper-api", ServiceState::Running).await;
+    value(h.cli(&["disable", "wrapper-api", "--output=json"]));
+    let error = h.cli(&["start", "missing", "--output=json"]);
+    assert_eq!(error.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&error.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "operation_failed");
     h.shutdown().await;
 }

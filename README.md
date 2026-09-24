@@ -555,3 +555,6 @@ Core requirements are in [REQUIREMENTS.md](REQUIREMENTS.md). Technical decisions
 
 served is released under the [Unlicense](LICENSE). You can use, copy, modify, publish, and
 distribute it without licensing restrictions. The software is provided without warranty.
+
+
+For scripting and wrappers, use `--output json`. See [the CLI contract](docs/CLI-INTERFACE.md) for schemas, pipe behavior, and exit codes.

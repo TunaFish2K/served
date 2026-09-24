@@ -673,7 +673,7 @@ mod tests {
                 "enabled",
                 "enter actions",
                 "? help",
-                "q quit",
+                "esc/q quit",
             ] {
                 assert!(
                     text.contains(expected),
@@ -762,6 +762,12 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         let mut ui = MainUi::default();
         ui.refresh(vec![service_info(true)]);
+        for key in [KeyCode::Esc, KeyCode::Char('q')] {
+            assert_eq!(ui.key(key, false, 2), Intent::Quit);
+            assert_eq!(ui.key(KeyCode::Enter, false, 2), Intent::None);
+            assert_eq!(ui.key(key, false, 2), Intent::None);
+            assert!(matches!(ui.page, Page::Services));
+        }
         assert_eq!(ui.key(KeyCode::Enter, false, 2), Intent::None);
         assert_eq!(
             ui.key(KeyCode::Enter, false, 2),
@@ -918,7 +924,11 @@ mod tests {
             service.directory = "/projects/api".into();
             ui.refresh(vec![service]);
             for (name, footer, keys) in [
-                ("main", view::SERVICES, "enter actions   ? help   q quit"),
+                (
+                    "main",
+                    view::SERVICES,
+                    "enter actions   ? help   esc/q quit",
+                ),
                 (
                     "actions",
                     view::ACTIONS,
@@ -1139,7 +1149,7 @@ mod tests {
                 let lines: Vec<_> = text.lines().collect();
                 let footer_y = lines
                     .iter()
-                    .position(|line| line.contains("q quit"))
+                    .position(|line| line.contains("esc/q quit"))
                     .unwrap();
                 if height >= 24 {
                     assert_eq!(footer_y, 4 + count.clamp(6, (height - 6) as usize));
@@ -1507,7 +1517,7 @@ mod tests {
                     "temporary"
                 };
                 assert!(text.contains(&format!("终e\u{301} · {label}")), "{text}");
-                assert!(text.contains("enter actions   ? help   q quit"));
+                assert!(text.contains("enter actions   ? help   esc/q quit"));
             }
         }
     }

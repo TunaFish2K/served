@@ -57,7 +57,7 @@
 
 
 
- ~/projects/api · enabled                 enter actions   ? help   q quit
+ ~/projects/api · enabled                 enter actions   ? help   esc/q quit
 ```
 
 - 主屏沿用 Actions 的紧凑布局：名称列至少 10 格，按列表最长名称扩展、最多 24 格，过长时截断；状态紧随名称列，列间一格，不随窗口拉到最右侧。

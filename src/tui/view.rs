@@ -42,8 +42,8 @@ pub(super) fn usable(area: Rect) -> bool {
 }
 /// Key/description pairs keep styling and cell-width measurement in one place.
 pub(super) type Footer = &'static [(&'static str, &'static str)];
-pub(super) const SERVICES: Footer = &[("enter", "actions"), ("?", "help"), ("q", "quit")];
-pub(super) const EMPTY: Footer = &[("?", "help"), ("q", "quit")];
+pub(super) const SERVICES: Footer = &[("enter", "actions"), ("?", "help"), ("esc/q", "quit")];
+pub(super) const EMPTY: Footer = &[("?", "help"), ("esc/q", "quit")];
 pub(super) const ACTIONS: Footer = &[("enter", "select"), ("?", "help"), ("esc/q", "back")];
 pub(super) const CONFIRM: Footer = &[("enter", "select"), ("?", "help"), ("esc/q", "cancel")];
 pub(super) const HISTORY: Footer = &[("enter", "open"), ("?", "help"), ("esc/q", "back")];
@@ -133,7 +133,7 @@ fn page(
 ) -> Option<PageAreas> {
     let area = frame.area();
     if !usable(area) {
-        frame.render_widget(Paragraph::new("Resize to 40x10\nq quit / Esc back"), area);
+        frame.render_widget(Paragraph::new("Resize to 40x10\nesc/q back/quit"), area);
         return None;
     }
     let margin = if area.width < 80 { 1 } else { 2 };
@@ -853,20 +853,26 @@ mod tests {
     fn empty_and_tiny_screens_have_recovery_instructions() {
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         let mut ui = MainUi::default();
-        terminal
-            .draw(|frame| draw_main(frame, &mut ui, ""))
-            .unwrap();
-        assert!(rendered(&terminal).contains("served enable"));
-        assert!(rendered(&terminal).contains("served run"));
+        for width in [40, 80, 120] {
+            terminal.backend_mut().resize(width, 10);
+            terminal
+                .draw(|frame| draw_main(frame, &mut ui, ""))
+                .unwrap();
+            assert!(rendered(&terminal).contains("served enable"));
+            assert!(rendered(&terminal).contains("served run"));
+            assert!(rendered(&terminal).contains("? help   esc/q quit"));
+        }
         terminal.backend_mut().resize(30, 8);
         terminal
             .draw(|frame| draw_main(frame, &mut ui, ""))
             .unwrap();
         assert!(rendered(&terminal).contains("Resize to 40x10"));
-        assert!(rendered(&terminal).contains("q quit"));
-        assert_eq!(
-            ui.key(crossterm::event::KeyCode::Char('q'), false, 1),
-            super::super::model::Intent::Quit
-        );
+        assert!(rendered(&terminal).contains("esc/q back/quit"));
+        for key in [
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyCode::Char('q'),
+        ] {
+            assert_eq!(ui.key(key, false, 1), super::super::model::Intent::Quit);
+        }
     }
 }

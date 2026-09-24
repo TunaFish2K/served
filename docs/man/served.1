@@ -163,6 +163,7 @@ enumerates available records and conflicts with --run and content, path, or edit
 returns a versioned document; legacy --json keeps its original format.
 .It Cm version
 Print the version and build variant, full or headless.
+This is equivalent to the top-level -V and --version options.
 JSON data includes version, variant, and a features array.
 No HOME or manager is required.
 .It Cm list
@@ -184,7 +185,9 @@ Enabled registrations remain for the next manager start; temporary definitions a
 .Fl h , Fl Fl help
 prints help for the selected command.
 .Fl V , Fl Fl version
-prints the executable version when used without a subcommand.
+prints the executable version and build variant, equivalent to the version command.
+It accepts --output json before or after the option.
+Combining this option with a command other than version is an argument error.
 .Sh MACHINE OUTPUT
 The global
 .Fl Fl output Ar text|json
@@ -204,7 +207,8 @@ JSON mode rejects attach, foreground daemon, internal runner, missing subcommand
 and editor launches before any side effects.
 Use edit --path or history content/path queries instead.
 One-shot daemon --handoff and --relinquish accept JSON output.
-Explicit --help and --version retain their normal text format.
+The -V, --version, and version entries share the same text and JSON output.
+Explicit --help retains its normal text format.
 .Sh RUN OPTIONS
 .Bl -tag -width "--no-sync-rows-cols"
 .It Fl Fl name Ar name

@@ -22,6 +22,11 @@ fn version_and_help_do_not_require_home_or_a_manager() {
     for args in [
         vec!["version", "--output", "json"],
         vec!["--output=json", "version"],
+        vec!["-V", "--output", "json"],
+        vec!["--output", "json", "-V"],
+        vec!["--version", "--output=json"],
+        vec!["--output=json", "--version"],
+        vec!["-V", "version", "--output=json"],
     ] {
         let value = document(&cli(&args), 0);
         assert_eq!(value["data"]["version"], env!("CARGO_PKG_VERSION"));
@@ -42,6 +47,24 @@ fn version_and_help_do_not_require_home_or_a_manager() {
             }
         );
     }
+    let variant = if cfg!(feature = "tui") {
+        "full"
+    } else {
+        "headless"
+    };
+    let expected = format!("served {} ({variant})\n", env!("CARGO_PKG_VERSION"));
+    for args in [
+        vec!["-V"],
+        vec!["--version"],
+        vec!["version"],
+        vec!["--version", "version"],
+        vec!["--output=text", "-V"],
+    ] {
+        let output = cli(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, expected.as_bytes());
+        assert!(output.stderr.is_empty());
+    }
     for args in [vec![], vec!["--help"], vec!["--output", "json", "--help"]] {
         let output = cli(&args);
         assert!(output.status.success());
@@ -52,6 +75,9 @@ fn version_and_help_do_not_require_home_or_a_manager() {
 fn json_parameter_errors_are_structured_and_reject_interactive_commands_early() {
     for args in [
         vec!["--output", "json"],
+        vec!["--version", "stop", "api", "--output=json"],
+        vec!["--version", "--unknown", "--output=json"],
+        vec!["version", "-V", "--output=json"],
         vec!["list", "--unknown", "--output=json"],
         vec!["--output", "json", "daemon"],
         vec!["attach", "missing", "--output", "json"],
@@ -103,14 +129,16 @@ fn output_flags_after_program_separator_are_not_cli_flags() {
 
 #[test]
 fn closed_output_pipe_exits_successfully_without_panicking() {
-    let (reader, writer) = nix::unistd::pipe().unwrap();
-    drop(reader);
-    let result = Command::new(env!("CARGO_BIN_EXE_served"))
-        .args(["version", "--output=json"])
-        .stdout(std::process::Stdio::from(writer))
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    assert!(result.status.success(), "{result:?}");
-    assert!(result.stderr.is_empty(), "{result:?}");
+    for entry in ["version", "-V", "--version"] {
+        let (reader, writer) = nix::unistd::pipe().unwrap();
+        drop(reader);
+        let result = Command::new(env!("CARGO_BIN_EXE_served"))
+            .args([entry, "--output=json"])
+            .stdout(std::process::Stdio::from(writer))
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert!(result.stderr.is_empty(), "{result:?}");
+    }
 }

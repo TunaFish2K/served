@@ -36,10 +36,13 @@ enum OutputFormat {
 #[derive(Debug, Parser)]
 #[command(
     name = "served",
-    version,
+    disable_version_flag = true,
     about = "lightweight per-user service manager"
 )]
 struct Cli {
+    /// Print build version and capabilities (same as the version command).
+    #[arg(short = 'V', long)]
+    version: bool,
     /// Output format for one-shot commands (JSON schema version 1).
     #[arg(long, global = true, value_enum)]
     output: Option<OutputFormat>,
@@ -49,7 +52,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print build version and capabilities.
+    /// Print build version and capabilities (same as --version).
     Version,
     /// Run the manager in the foreground under a process supervisor.
     Daemon {
@@ -180,13 +183,10 @@ pub async fn run() -> Result<()> {
         .try_init()
         .ok();
     let args: Vec<_> = std::env::args_os().collect();
-    let cli = match Cli::try_parse_from(&args) {
+    let mut cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => {
-            if matches!(
-                error.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
+            if error.kind() == clap::error::ErrorKind::DisplayHelp {
                 print_text(&error.to_string()).await?;
                 return Ok(());
             }
@@ -202,6 +202,18 @@ pub async fn run() -> Result<()> {
         }
     };
     let json = cli.output == Some(OutputFormat::Json);
+    if cli.version {
+        if !matches!(cli.command, None | Some(Command::Version)) {
+            return report_failure(
+                json,
+                "invalid_arguments",
+                "--version cannot be combined with another command".to_owned(),
+                2,
+            )
+            .await;
+        }
+        cli.command = Some(Command::Version);
+    }
     if let Err(message) = validate(&cli) {
         return report_failure(json, "invalid_arguments", message.to_owned(), 2).await;
     }
@@ -820,6 +832,27 @@ mod tests {
             assert!(Cli::try_parse_from(["served", verb, "api"]).is_ok());
             assert!(Cli::try_parse_from(["served", verb, "-f", "api.json5"]).is_err());
         }
+    }
+
+    #[test]
+    fn program_version_flags_are_preserved_after_separator() {
+        let cli = Cli::try_parse_from([
+            "served",
+            "run",
+            "--",
+            "program",
+            "-V",
+            "--version",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        assert!(!cli.version);
+        assert!(cli.output.is_none());
+        let Some(Command::Run { argv, .. }) = cli.command else {
+            panic!("run expected")
+        };
+        assert_eq!(argv, ["program", "-V", "--version", "--output", "json"]);
     }
 
     #[test]

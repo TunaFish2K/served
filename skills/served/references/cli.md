@@ -177,6 +177,7 @@ Named commands work from any directory.
 **version**
 
 > Print the version and build variant, full or headless.
+> This is equivalent to the top-level -V and --version options.
 > JSON data includes version, variant, and a features array.
 > No HOME or manager is required.
 
@@ -203,7 +204,9 @@ Named commands work from any directory.
 **-h**, **-&#45;help**
 prints help for the selected command.
 **-V**, **-&#45;version**
-prints the executable version when used without a subcommand.
+prints the executable version and build variant, equivalent to the version command.
+It accepts --output json before or after the option.
+Combining this option with a command other than version is an argument error.
 
 # MACHINE OUTPUT
 
@@ -224,7 +227,8 @@ JSON mode rejects attach, foreground daemon, internal runner, missing subcommand
 and editor launches before any side effects.
 Use edit --path or history content/path queries instead.
 One-shot daemon --handoff and --relinquish accept JSON output.
-Explicit --help and --version retain their normal text format.
+The -V, --version, and version entries share the same text and JSON output.
+Explicit --help retains its normal text format.
 
 # RUN OPTIONS
 

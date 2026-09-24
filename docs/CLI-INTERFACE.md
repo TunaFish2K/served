@@ -46,7 +46,9 @@ records 每项包含 id、bytes、current、persisted。
 
 旧 `history --json` 保持原先无封套的格式，与显式 `--output` 互斥。
 JSON 模式不启动编辑器，不运行 attach、前台 daemon 或内部 runner；这些组合和缺少子命令均在执行前报错。
-`--help` 和 `--version` 始终保留文字输出；机器查询请使用 `version --output json`。
+`-V`、`--version` 和 `version` 共用版本查询，文字输出为 `served <版本> (full/headless)`，均支持 `--output json`，参数前后顺序不限。
+版本选项仅用于顶层查询，与其他子命令混用会报参数错误；`--version version` 合并为一次查询。
+`--help` 保持文字输出。
 
 ## 管道与非交互调用
 

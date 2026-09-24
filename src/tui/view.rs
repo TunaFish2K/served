@@ -21,8 +21,56 @@ fn selected_style() -> Style {
 pub(super) fn usable(area: Rect) -> bool {
     area.width >= 40 && area.height >= 10
 }
-pub(super) fn body_rows(area: Rect) -> usize {
-    usize::from(area.height.saturating_sub(8)).max(1)
+/// Key/description pairs keep styling and cell-width measurement in one place.
+pub(super) type Footer = &'static [(&'static str, &'static str)];
+pub(super) const SERVICES: Footer = &[("enter", "actions"), ("?", "help"), ("q", "quit")];
+pub(super) const EMPTY: Footer = &[("?", "help"), ("q", "quit")];
+pub(super) const ACTIONS: Footer = &[("enter", "select"), ("?", "help"), ("esc/q", "back")];
+pub(super) const CONFIRM: Footer = &[("enter", "select"), ("?", "help"), ("esc/q", "cancel")];
+pub(super) const HISTORY: Footer = &[("enter", "open"), ("?", "help"), ("esc/q", "back")];
+pub(super) const CONTENT: Footer = &[("↑↓", "scroll"), ("?", "help"), ("esc/q", "back")];
+pub(super) const HELP: Footer = &[("↑↓", "scroll"), ("?/esc/q", "back")];
+pub(super) const ERROR: Footer = &[("↑↓", "scroll"), ("esc/q", "back")];
+pub(super) const CRASH: Footer = &[("enter/y", "open log"), ("n/esc", "cancel")];
+
+fn inner_width(area: Rect) -> u16 {
+    area.width
+        .saturating_sub(if area.width < 80 { 2 } else { 4 })
+}
+
+fn footer_width(footer: Footer) -> usize {
+    footer
+        .iter()
+        .map(|(key, description)| key.width() + 1 + description.width())
+        .sum::<usize>()
+        + footer.len().saturating_sub(1) * 3
+}
+
+fn footer_rows(area: Rect, footer: Footer) -> u16 {
+    if usize::from(inner_width(area)) >= footer_width(footer) + 2 + 20 {
+        1
+    } else {
+        2
+    }
+}
+
+pub(super) fn body_rows(area: Rect, footer: Footer) -> usize {
+    usize::from(area.height.saturating_sub(5 + footer_rows(area, footer))).max(1)
+}
+
+pub(super) fn main_footer(ui: &MainUi) -> Footer {
+    if ui.help.is_some() {
+        HELP
+    } else if ui.message.is_some() {
+        ERROR
+    } else {
+        match ui.page {
+            Page::Services if ui.services.is_empty() || ui.unavailable.is_some() => EMPTY,
+            Page::Services => SERVICES,
+            Page::Actions { .. } => ACTIONS,
+            Page::ConfirmDisable { .. } => CONFIRM,
+        }
+    }
 }
 
 struct PageAreas {
@@ -31,7 +79,7 @@ struct PageAreas {
 }
 
 /// All managed screens share this borderless frame. Attach owns the raw terminal.
-fn page(frame: &mut Frame<'_>, title: &str, count: &str, footer: &str) -> Option<PageAreas> {
+fn page(frame: &mut Frame<'_>, title: &str, count: &str, footer: Footer) -> Option<PageAreas> {
     let area = frame.area();
     if !usable(area) {
         frame.render_widget(Paragraph::new("Resize to 40x10\nq quit / Esc back"), area);
@@ -51,9 +99,7 @@ fn page(frame: &mut Frame<'_>, title: &str, count: &str, footer: &str) -> Option
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(footer_rows(area, footer)),
         ])
         .split(inner);
     let count_width = count.width().min(usize::from(inner.width)) as u16;
@@ -76,10 +122,30 @@ fn page(frame: &mut Frame<'_>, title: &str, count: &str, footer: &str) -> Option
             ..regions[0]
         },
     );
-    frame.render_widget(Paragraph::new(footer).style(muted()), regions[6]);
+    let width = footer_width(footer) as u16;
+    let footer_area = regions[4];
+    let keys = Rect::new(inner.right() - width, footer_area.bottom() - 1, width, 1);
+    let mut spans = Vec::new();
+    for (index, (key, description)) in footer.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::raw(*key));
+        spans.push(Span::styled(format!(" {description}"), muted()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), keys);
     Some(PageAreas {
         body: regions[2],
-        detail: regions[4],
+        detail: Rect::new(
+            inner.x,
+            footer_area.y,
+            if footer_area.height == 1 {
+                inner.width - width - 2
+            } else {
+                inner.width
+            },
+            1,
+        ),
     })
 }
 
@@ -158,7 +224,7 @@ fn text_page(
     title: &str,
     lines: Vec<Line<'static>>,
     scroll: &mut usize,
-    footer: &str,
+    footer: Footer,
     detail: &str,
 ) {
     let Some(areas) = page(frame, title, "", footer) else {
@@ -188,15 +254,10 @@ fn text_page(
 }
 
 fn content_width(frame: &Frame<'_>) -> usize {
-    usize::from(
-        frame
-            .area()
-            .width
-            .saturating_sub(if frame.area().width < 80 { 2 } else { 4 }),
-    )
+    usize::from(inner_width(frame.area()))
 }
 
-pub(super) fn draw_reader(frame: &mut Frame<'_>, reader: &mut Reader, footer: &str) {
+pub(super) fn draw_reader(frame: &mut Frame<'_>, reader: &mut Reader, footer: Footer) {
     let lines = wrapped(&reader.content, content_width(frame))
         .into_iter()
         .map(Line::from)
@@ -206,17 +267,17 @@ pub(super) fn draw_reader(frame: &mut Frame<'_>, reader: &mut Reader, footer: &s
 
 pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) {
     if let Some(help) = &mut ui.help {
-        draw_reader(frame, help, "↑↓ scroll   ?/esc/q back");
+        draw_reader(frame, help, HELP);
         return;
     }
     if let Some(message) = &mut ui.message {
-        draw_reader(frame, message, "↑↓ scroll   esc/q back");
+        draw_reader(frame, message, ERROR);
         return;
     }
     let viewport = (frame.area().width, frame.area().height);
     if ui.viewport != viewport {
         if let Page::Actions { selected, scroll } = &mut ui.page {
-            *scroll = selected.saturating_sub(body_rows(frame.area()).saturating_sub(1));
+            *scroll = selected.saturating_sub(body_rows(frame.area(), ACTIONS).saturating_sub(1));
         }
         ui.viewport = viewport;
     }
@@ -279,7 +340,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 &format!("{} / actions", service.name),
                 lines,
                 scroll,
-                "enter select   ? help   esc/q back",
+                ACTIONS,
                 if ui.unavailable.is_some() {
                     "Manager unavailable; actions disabled"
                 } else {
@@ -291,22 +352,22 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
             let Some(service) = service else {
                 return;
             };
-            let Some(areas) = page(
-                frame,
-                &format!("{} / disable", service.name),
-                "",
-                "enter select   ? help   esc/q cancel",
-            ) else {
+            let Some(areas) = page(frame, &format!("{} / disable", service.name), "", CONFIRM)
+            else {
                 return;
             };
             let items = vec![ListItem::new("Cancel"), ListItem::new("Disable")];
             list(frame, areas.body, items, usize::from(*confirm));
             frame.render_widget(
-                Paragraph::new(if ui.unavailable.is_some() {
-                    "Manager unavailable; actions disabled"
-                } else {
-                    "Stops service and removes registration."
-                })
+                Paragraph::new(clip(
+                    if ui.unavailable.is_some() {
+                        "Manager unavailable; actions disabled"
+                    } else {
+                        "Stops service and removes registration."
+                    },
+                    usize::from(areas.detail.width),
+                    false,
+                ))
                 .style(muted()),
                 areas.detail,
             );
@@ -335,9 +396,9 @@ fn draw_services(
         )
     };
     let footer = if services.is_empty() || stale {
-        "? help   q quit"
+        EMPTY
     } else {
-        "enter actions   ? help   q quit"
+        SERVICES
     };
     let Some(areas) = page(frame, "served", &count, footer) else {
         return;
@@ -372,7 +433,11 @@ fn draw_services(
         list(frame, areas.body, items, selected);
     }
     let detail = if stale {
-        "Manager unavailable; stale data. ? help".to_owned()
+        clip(
+            "Manager unavailable; stale data. ? help",
+            usize::from(areas.detail.width),
+            false,
+        )
     } else if !notice.is_empty() {
         clip(notice, usize::from(areas.detail.width), false)
     } else if let Some(service) = services.get(selected) {
@@ -438,7 +503,7 @@ pub(super) fn draw_history_list(
         frame,
         &format!("{name} / history"),
         &format!("{} runs", records.len()),
-        "enter open   ? help   esc/q back",
+        HISTORY,
     ) else {
         return;
     };
@@ -474,12 +539,7 @@ pub(super) fn draw_history_list(
 }
 
 pub(super) fn draw_history_content(frame: &mut Frame<'_>, name: &str, history: &HistoryView) {
-    let Some(areas) = page(
-        frame,
-        &format!("{name} / {}", history.id),
-        "",
-        "↑↓ scroll   ? help   esc/q back",
-    ) else {
+    let Some(areas) = page(frame, &format!("{name} / {}", history.id), "", CONTENT) else {
         return;
     };
     // Preserve logical-line scrolling and avoid Paragraph's u16 scroll truncation.
@@ -493,8 +553,22 @@ pub(super) fn draw_history_content(frame: &mut Frame<'_>, name: &str, history: &
         .collect();
     frame.render_widget(Paragraph::new(lines), areas.body);
     let (position, total) = history_position(history.scroll, history.total_lines);
+    let fits = history.scroll == 0
+        && total <= u64::from(areas.body.height)
+        && history
+            .content
+            .lines()
+            .flat_map(|line| wrapped(line, usize::from(areas.body.width)))
+            .take(usize::from(areas.body.height) + 1)
+            .count()
+            <= usize::from(areas.body.height);
     frame.render_widget(
-        Paragraph::new(format!("{position}/{total}")).style(muted()),
+        Paragraph::new(if fits {
+            String::new()
+        } else {
+            format!("{position}/{total}")
+        })
+        .style(muted()),
         areas.detail,
     );
 }
@@ -515,6 +589,71 @@ mod tests {
     }
 
     #[test]
+    fn footers_align_and_match_paging_height_at_every_transition() {
+        for footer in [
+            SERVICES, EMPTY, ACTIONS, CONFIRM, HISTORY, CONTENT, HELP, ERROR, CRASH,
+        ] {
+            let threshold = footer_width(footer) as u16 + 24;
+            for width in [40, (threshold - 1).max(40), threshold.max(40), 80, 120] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        let areas = page(frame, "Title", "", footer).unwrap();
+                        assert_eq!(usize::from(areas.body.height), body_rows(area, footer));
+                        assert_eq!(areas.detail.y, if width < threshold { 7 } else { 8 });
+                        assert!(areas.detail.width >= 20);
+                        frame.render_widget(Paragraph::new("detail").style(muted()), areas.detail);
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let margin = if width < 80 { 1 } else { 2 };
+                let start = width - margin - footer_width(footer) as u16;
+                let expected = footer
+                    .iter()
+                    .map(|(k, d)| format!("{k} {d}"))
+                    .collect::<Vec<_>>()
+                    .join("   ");
+                let actual: String = (start..width - margin)
+                    .map(|x| buffer[(x, 8)].symbol())
+                    .collect();
+                assert_eq!(actual, expected);
+                assert!(!buffer[(start, 8)].modifier.contains(Modifier::DIM));
+                let description = start + footer[0].0.width() as u16 + 1;
+                assert!(buffer[(description, 8)].modifier.contains(Modifier::DIM));
+            }
+        }
+    }
+
+    #[test]
+    fn feedback_keeps_footer_and_body_in_place() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        let mut reader = Reader::new("Reader", "row\n".repeat(40));
+        for detail in [
+            "",
+            "starting api...",
+            "Manager unavailable; actions disabled",
+        ] {
+            terminal
+                .draw(|frame| {
+                    text_page(
+                        frame,
+                        "Reader",
+                        vec![Line::from("row"); 40],
+                        &mut reader.scroll,
+                        ACTIONS,
+                        detail,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(2, 6)].symbol(), "r");
+            assert_eq!(buffer[(2, 7)].symbol(), " ");
+            assert_eq!(buffer[(78 - footer_width(ACTIONS) as u16, 8)].symbol(), "e");
+        }
+    }
+
+    #[test]
     fn truncation_preserves_graphemes_and_path_suffixes() {
         assert_eq!(clip("服务名称", 5, false), "服务…");
         assert_eq!(clip("/very/long/项目", 7, true), "…g/项目");
@@ -529,13 +668,13 @@ mod tests {
         let mut reader = Reader::new("Error", format!("{}\nEND", "诊断消息".repeat(200)));
         reader.key(crossterm::event::KeyCode::End, 2);
         terminal
-            .draw(|frame| draw_reader(frame, &mut reader, "esc/q back"))
+            .draw(|frame| draw_reader(frame, &mut reader, &[("esc/q", "back")]))
             .unwrap();
         assert!(rendered(&terminal).contains("END"));
         let old = reader.scroll;
         terminal.backend_mut().resize(120, 40);
         terminal
-            .draw(|frame| draw_reader(frame, &mut reader, "esc/q back"))
+            .draw(|frame| draw_reader(frame, &mut reader, &[("esc/q", "back")]))
             .unwrap();
         assert!(reader.scroll < old);
         assert!(rendered(&terminal).contains("END"));

@@ -209,7 +209,7 @@ async fn run_loop(
         terminal.draw(|frame| {
             if crash_prompt.is_some() {
                 if let Some(message) = &mut ui.message {
-                    draw_reader(frame, message, "enter/y open log   n/esc cancel");
+                    draw_reader(frame, message, view::CRASH);
                 }
             } else {
                 draw_main(frame, &mut ui, &progress);
@@ -226,7 +226,14 @@ async fn run_loop(
         }
         let area = terminal.size()?;
         let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
-        let rows = view::body_rows(area);
+        let rows = view::body_rows(
+            area,
+            if crash_prompt.is_some() {
+                view::CRASH
+            } else {
+                view::main_footer(&ui)
+            },
+        );
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if pending_action.is_some() {
                 exit_when_idle = true;
@@ -372,9 +379,9 @@ async fn history_in_tui(
     loop {
         terminal.draw(|frame| {
             if let Some(help) = &mut help {
-                draw_reader(frame, help, "↑↓ scroll   ?/esc/q back");
+                draw_reader(frame, help, view::HELP);
             } else if let Some(message) = &mut message {
-                draw_reader(frame, message, "↑↓ scroll   esc/q back");
+                draw_reader(frame, message, view::ERROR);
             } else if let Some(history_view) = view.as_ref() {
                 draw_history_content(frame, name, history_view);
             } else {
@@ -396,7 +403,18 @@ async fn history_in_tui(
         }
         let size = terminal.size()?;
         let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-        let rows = view::body_rows(area);
+        let rows = view::body_rows(
+            area,
+            if help.is_some() {
+                view::HELP
+            } else if message.is_some() {
+                view::ERROR
+            } else if view.is_some() {
+                view::CONTENT
+            } else {
+                view::HISTORY
+            },
+        );
         if !view::usable(area) && !matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             continue;
         }
@@ -1044,6 +1062,34 @@ mod tests {
     }
 
     #[test]
+    fn footer_preserves_path_suffix_and_service_kind() {
+        for kind in [
+            crate::protocol::ServiceKind::Enabled,
+            crate::protocol::ServiceKind::Temporary,
+        ] {
+            for width in [40, 54, 80, 120] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+                let mut ui = MainUi::default();
+                let mut service = service_info(false);
+                service.kind = kind;
+                service.directory = format!("/{}终e\u{301}", "项目/".repeat(40));
+                ui.refresh(vec![service]);
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let text = buffer_text(&terminal);
+                let label = if kind == crate::protocol::ServiceKind::Enabled {
+                    "enabled"
+                } else {
+                    "temporary"
+                };
+                assert!(text.contains(&format!("终e\u{301} · {label}")), "{text}");
+                assert!(text.contains("enter actions   ? help   q quit"));
+            }
+        }
+    }
+
+    #[test]
     fn history_render_shows_logical_position_and_contextual_help() {
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         let mut history = HistoryView::new("latest".into());
@@ -1058,5 +1104,16 @@ mod tests {
         assert!(text.contains("2/3"));
         assert!(text.contains("? help"));
         assert!(text.contains("esc/q back"));
+        history.scroll = 0;
+        terminal
+            .draw(|frame| draw_history_content(frame, "api", &history))
+            .unwrap();
+        assert!(!buffer_text(&terminal).contains("1/3"));
+        history.content = "长文本".repeat(40);
+        history.total_lines = 1;
+        terminal
+            .draw(|frame| draw_history_content(frame, "api", &history))
+            .unwrap();
+        assert!(buffer_text(&terminal).contains("1/1"));
     }
 }

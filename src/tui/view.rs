@@ -27,12 +27,6 @@ fn tone_style(tone: Tone) -> Style {
     })
 }
 
-fn marker_style() -> Style {
-    tone_style(Tone::Accent)
-        .add_modifier(Modifier::BOLD)
-        .remove_modifier(Modifier::REVERSED)
-}
-
 fn muted() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
@@ -252,22 +246,17 @@ fn list(frame: &mut Frame<'_>, area: Rect, items: Vec<ListItem<'_>>, selected: u
     if !items.is_empty() {
         state.select(Some(selected.min(items.len() - 1)));
     }
+    // Reserve the same two-cell inset for every row, outside the highlight.
+    let inset = area.width.min(2);
     frame.render_stateful_widget(
-        List::new(items)
-            .highlight_style(selected_style())
-            .highlight_symbol("> "),
-        area,
+        List::new(items).highlight_style(selected_style()),
+        Rect {
+            x: area.x + inset,
+            width: area.width - inset,
+            ..area
+        },
         &mut state,
     );
-    if let Some(selected) = state.selected() {
-        let row = selected.saturating_sub(state.offset());
-        if row < usize::from(area.height) {
-            frame.render_widget(
-                Paragraph::new(Span::styled("> ", marker_style())),
-                Rect::new(area.x, area.y + row as u16, 2, 1),
-            );
-        }
-    }
     state
 }
 
@@ -383,7 +372,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 .take(rows)
                 .map(|(i, action)| {
                     Line::from(vec![
-                        Span::styled(if i == *selected { "> " } else { "  " }, marker_style()),
+                        Span::styled("  ", Style::default().remove_modifier(Modifier::REVERSED)),
                         Span::raw(format!("{:<10} ", action.label())),
                         Span::styled(
                             action.key().to_string(),

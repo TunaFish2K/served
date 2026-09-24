@@ -779,6 +779,35 @@ mod tests {
         result
     }
 
+    fn assert_selected(terminal: &Terminal<TestBackend>, expected: &str) {
+        use ratatui::style::{Color, Modifier};
+        let buffer = terminal.backend().buffer();
+        let margin = if buffer.area.width < 80 { 1 } else { 2 };
+        let mut selected = Vec::new();
+        for y in 3..buffer.area.height {
+            if buffer[(margin + 2, y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+            {
+                for x in margin..margin + 2 {
+                    let cell = &buffer[(x, y)];
+                    assert_eq!(cell.symbol(), " ");
+                    assert_eq!(cell.fg, Color::Reset);
+                    assert!(!cell.modifier.contains(Modifier::REVERSED));
+                }
+            }
+            let text: String = (margin + 2..buffer.area.width)
+                .filter(|&x| buffer[(x, y)].modifier.contains(Modifier::REVERSED))
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if !text.trim().is_empty() {
+                selected.push(text.trim().to_owned());
+            }
+        }
+        assert_eq!(selected.len(), 1, "{selected:?}");
+        assert!(selected[0].starts_with(expected), "{selected:?}");
+    }
+
     #[test]
     fn history_position_is_one_based_and_clamped() {
         assert_eq!(history_position(0, 0), (0, 0));
@@ -956,7 +985,7 @@ mod tests {
             .unwrap();
         assert!(buffer_text(&terminal).contains("enabled"));
         assert!(matches!(ui.page, model::Page::Actions { selected: 5, .. }));
-        assert!(buffer_text(&terminal).contains("> Disable"));
+        assert_selected(&terminal, "Disable");
     }
 
     #[test]
@@ -1158,7 +1187,7 @@ mod tests {
                 assert!(lines[3 + rows..].join("\n").contains("enabled"));
                 if name == "confirm" {
                     assert!(body.contains("Stops and unregisters service."));
-                    assert!(body.contains("> Cancel"));
+                    assert_selected(&terminal, "Cancel");
                     assert!(body.contains("Disable"));
                 }
                 export_page(&terminal, name);
@@ -1256,6 +1285,7 @@ mod tests {
                 .draw(|frame| draw_history_list(frame, "api", &records, 0))
                 .unwrap();
             assert!(buffer_text(&terminal).contains("enter open   ? help   esc/q back"));
+            assert_selected(&terminal, "latest");
             export_page(&terminal, "history");
             let mut history = HistoryView::new("latest".into());
             history.content = "log output\n".repeat(40);
@@ -1303,10 +1333,7 @@ mod tests {
                     .draw(|frame| draw_main(frame, &mut ui, ""))
                     .unwrap();
                 assert!(matches!(ui.page, Page::Actions { selected, .. } if selected == expected));
-                assert!(
-                    buffer_text(&terminal)
-                        .contains(&format!("> {}", ServiceAction::ALL[expected].label()))
-                );
+                assert_selected(&terminal, ServiceAction::ALL[expected].label());
             }
         }
         ui.key(KeyCode::Char('?'), false, 3);
@@ -1350,7 +1377,7 @@ mod tests {
                     assert_eq!(footer_y, 4 + count.clamp(6, (height - 6) as usize));
                 }
                 if count > 0 {
-                    assert!(text.contains(&format!("> service-{:02}", count - 1)));
+                    assert_selected(&terminal, &format!("service-{:02}", count - 1));
                 }
                 assert!(lines[1].contains(&format!("served · {count} service")));
                 if width == 120 {
@@ -1411,8 +1438,9 @@ mod tests {
             }
         };
         assert_eq!(buffer[(2, 1)].fg, color(Color::Cyan));
-        assert_eq!(buffer[(2, 3)].fg, color(Color::Cyan));
-        assert!(buffer[(2, 3)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(2, 3)].symbol(), " ");
+        assert_eq!(buffer[(2, 3)].fg, Color::Reset);
+        assert!(!buffer[(2, 3)].modifier.contains(Modifier::BOLD));
         assert!(!buffer[(2, 3)].modifier.contains(Modifier::REVERSED));
         assert!(buffer[(4, 3)].modifier.contains(Modifier::REVERSED));
         assert!(!buffer[(15, 3)].modifier.contains(Modifier::REVERSED));
@@ -1479,6 +1507,69 @@ mod tests {
                     .iter()
                     .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
             );
+        }
+    }
+
+    #[test]
+    fn selection_changes_style_without_moving_list_text() {
+        use model::Page;
+        for width in [40, 80, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+            let mut ui = MainUi::default();
+            let mut first = service_info(false);
+            first.name = "项目名称很长而且包含组合字符e\u{301}".repeat(3);
+            let mut second = first.clone();
+            second.name.push('2');
+            ui.refresh(vec![first, second]);
+            for page in [
+                Page::Services,
+                Page::Actions {
+                    selected: 0,
+                    scroll: 0,
+                },
+                Page::ConfirmDisable {
+                    confirm: false,
+                    menu: None,
+                },
+            ] {
+                ui.page = page;
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let before = buffer_text(&terminal);
+                ui.key(KeyCode::Down, false, 3);
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                assert_eq!(before, buffer_text(&terminal));
+                let expected = match ui.page {
+                    Page::Services => "项",
+                    Page::Actions { .. } => "Start",
+                    Page::ConfirmDisable { .. } => "Disable",
+                };
+                assert_selected(&terminal, expected);
+            }
+            let records = (0..2)
+                .map(|i| crate::protocol::HistoryRecord {
+                    id: format!("record-{i}"),
+                    bytes: 123,
+                    current: false,
+                    persisted: true,
+                })
+                .collect::<Vec<_>>();
+            terminal
+                .draw(|frame| draw_history_list(frame, "api", &records, 0))
+                .unwrap();
+            let before = buffer_text(&terminal);
+            terminal
+                .draw(|frame| draw_history_list(frame, "api", &records, 1))
+                .unwrap();
+            // Only the selected ID in the footer changes; list text stays in place.
+            assert_eq!(
+                before.lines().take(5).collect::<Vec<_>>(),
+                buffer_text(&terminal).lines().take(5).collect::<Vec<_>>()
+            );
+            assert_selected(&terminal, "record-1");
         }
     }
 

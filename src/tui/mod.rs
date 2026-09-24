@@ -1378,12 +1378,14 @@ mod tests {
                         .contains(Modifier::REVERSED)
                     {
                         highlighted += 1;
-                        for x in margin + 2..margin + 23 {
+                        let status_width = [7, 8, 10, 6, 7][selected];
+                        let end = margin + 13 + status_width;
+                        for x in margin + 2..end {
                             assert!(buffer[(x, y)].modifier.contains(Modifier::REVERSED));
                             assert_eq!(buffer[(x, y)].fg, Color::Reset);
                             assert_eq!(buffer[(x, y)].bg, Color::Reset);
                         }
-                        for x in [margin, margin + 1, margin + 23] {
+                        for x in [margin, margin + 1].into_iter().chain(end..width) {
                             assert!(!buffer[(x, y)].modifier.contains(Modifier::REVERSED));
                         }
                     } else {

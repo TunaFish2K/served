@@ -512,7 +512,7 @@ fn draw_services(
             })
             .collect();
         // Keep names and states together, like the compact action menu.
-        list(
+        let state = list(
             frame,
             Rect {
                 width: (name_width + 13) as u16,
@@ -521,6 +521,19 @@ fn draw_services(
             items,
             selected,
         );
+        // List highlights its full width; leave padding after the status plain.
+        if let Some(service) = services.get(selected) {
+            let row = selected.saturating_sub(state.offset());
+            if row < usize::from(areas.body.height) {
+                let y = areas.body.y + row as u16;
+                let end = areas.body.x + (name_width + 3) as u16;
+                for x in end + state_name(&service.state).width() as u16..end + 10 {
+                    frame.buffer_mut()[(x, y)]
+                        .modifier
+                        .remove(Modifier::REVERSED);
+                }
+            }
+        }
     }
     draw_service_detail(frame, areas.detail, services.get(selected), stale, notice);
 }

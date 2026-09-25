@@ -76,12 +76,14 @@ impl Session {
             output,
             enhanced,
         };
-        session.wait("keyboard-query");
-        session.send(if enhanced {
-            b"\x1b[?0u\x1b[?1;2c"
-        } else {
-            b"\x1b[?1;2c"
-        });
+        if !args.is_empty() {
+            session.wait("keyboard-query");
+            session.send(if enhanced {
+                b"\x1b[?0u\x1b[?1;2c"
+            } else {
+                b"\x1b[?1;2c"
+            });
+        }
         session
     }
     fn send(&mut self, input: &[u8]) {
@@ -106,18 +108,27 @@ impl Session {
             }
         }
     }
-    fn overview(&self, modified: bool) {
+    fn overview(&mut self, modified: bool) {
         let title = if modified {
             "served / edit · modified"
         } else {
             "served / edit"
         };
         let deadline = Instant::now() + Duration::from_secs(15);
+        let mut dismissed = false;
         loop {
             let screen = self
                 .screens
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .expect("overview not displayed");
+            if !dismissed
+                && screen.contains("Error / edit")
+                && screen.contains("Configuration saved.")
+            {
+                assert!(screen.contains("Cannot check service state"));
+                self.send(b"\x1b");
+                dismissed = true;
+            }
             if screen.lines().any(|line| line.trim() == title) && screen.contains("Basic") {
                 return;
             }
@@ -302,6 +313,210 @@ fn delete_button_confirms_and_keeps_file_unchanged_until_save() {
     session.overview(false);
     let saved: serde_json::Value = json5::from_str(&fs::read_to_string(path).unwrap()).unwrap();
     assert!(saved["env"].as_object().unwrap().is_empty());
+    session.send(b"\x11");
+    session.finish();
+}
+
+struct Manager {
+    home: std::path::PathBuf,
+    child: std::process::Child,
+}
+impl Manager {
+    fn start(home: &Path) -> Self {
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_served"))
+            .arg("daemon")
+            .env("HOME", home)
+            .current_dir(home)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let manager = Self {
+            home: home.into(),
+            child,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !manager.command(&["list"]).status.success() {
+            assert!(Instant::now() < deadline, "manager startup timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        manager
+    }
+    fn command(&self, args: &[&str]) -> std::process::Output {
+        std::process::Command::new(env!("CARGO_BIN_EXE_served"))
+            .args(args)
+            .env("HOME", &self.home)
+            .current_dir(&self.home)
+            .output()
+            .unwrap()
+    }
+    fn ok(&self, args: &[&str]) {
+        let out = self.command(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    fn services(&self) -> Vec<served::protocol::ServiceInfo> {
+        let paths = served::paths::ServedPaths::from_home(&self.home);
+        let response = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(served::client::request(
+                &paths,
+                served::protocol::Request::List,
+            ))
+            .unwrap();
+        match response {
+            served::protocol::Response::Services { services } => services,
+            _ => panic!("list response"),
+        }
+    }
+    fn pid(&self) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = self.services().first().and_then(|s| s.pid) {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "service did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+impl Drop for Manager {
+    fn drop(&mut self) {
+        let _ = self.command(&["shutdown"]);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn edit_command_and_save(session: &mut Session) {
+    session.send(b"\r\x1b[F");
+    session.paste(" ");
+    session.send(b"\r\x13");
+}
+
+#[test]
+fn saved_running_config_can_decline_restart_restart_or_handle_a_stopped_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("custom.json5");
+    fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
+    std::os::unix::fs::symlink(&file, dir.path().join("alias.json5")).unwrap();
+    let manager = Manager::start(dir.path());
+    manager.ok(&["enable", "-f", "custom.json5"]);
+    let pid = manager.pid();
+    let mut session = Session::start(dir.path(), &["edit", "-f", "alias.json5"]);
+    session.wait("Working directory");
+    session.send(b"\x1b[B");
+    edit_command_and_save(&mut session);
+    session.wait("Restart api to apply changes?");
+    session.send(b"\r");
+    session.overview(false);
+    assert_eq!(manager.pid(), pid);
+    edit_command_and_save(&mut session);
+    session.wait("Restart api to apply changes?");
+    session.send(b"\x1b[B\r");
+    session.overview(false);
+    assert_ne!(manager.pid(), pid);
+    edit_command_and_save(&mut session);
+    session.wait("Restart api to apply changes?");
+    manager.ok(&["stop", "api"]);
+    session.send(b"\x1b[B\r");
+    session.wait("no longer running");
+    session.send(b"\x1b");
+    session.overview(false);
+    assert!(manager.services()[0].pid.is_none());
+    edit_command_and_save(&mut session);
+    session.overview(false); // Stopped service: no restart prompt.
+    session.send(b"\x13");
+    session.overview(false); // Unchanged save: no state check or prompt.
+    session.send(b"\x11");
+    session.finish();
+}
+
+#[test]
+fn actions_edit_uses_registered_file_and_save_exit_returns_to_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("configs")).unwrap();
+    let file = dir.path().join("configs/service.json5");
+    fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
+    let manager = Manager::start(dir.path());
+    manager.ok(&["enable", "-f", "configs/service.json5", "--workdir", "."]);
+    let pid = manager.pid();
+    let mut session = Session::start(dir.path(), &[]);
+    session.wait("api");
+    session.send(b"\r");
+    session.wait("api / actions");
+    session.send(b"e");
+    session.wait("keyboard-query");
+    session.send(b"\x1b[?1;2c");
+    session.wait("Working directory");
+    session.send(b"\x1b[B\r\x1b[F");
+    session.paste(" ");
+    session.send(b"\r\x1b");
+    session.wait("Save changes before closing?");
+    session.send(b"\x1b[B\r");
+    session.wait("Restart api to apply changes?");
+    session.send(b"\r");
+    session.wait("api / actions");
+    assert_eq!(manager.pid(), pid);
+    assert!(fs::read_to_string(file).unwrap().contains("sleep 300 "));
+    assert!(!dir.path().join(".served.json5").exists());
+    session.send(b"\x1b");
+    session.wait("served · 1 service");
+    session.send(b"q");
+    session.finish();
+}
+
+#[test]
+fn renamed_running_service_is_saved_without_automatic_reregistration() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(".served.json5");
+    fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
+    let manager = Manager::start(dir.path());
+    manager.ok(&["enable"]);
+    let pid = manager.pid();
+    let mut session = Session::start(dir.path(), &["edit"]);
+    session.wait("Working directory");
+    session.send(b"\r");
+    session.send(b"\x1b[H");
+    session.paste("new_");
+    session.send(b"\r\x13");
+    session.wait("service was renamed");
+    session.send(b"\x1b");
+    session.overview(false);
+    assert!(fs::read_to_string(file).unwrap().contains("new_api"));
+    assert_eq!(manager.pid(), pid);
+    assert_eq!(manager.services()[0].name, "api");
+    session.send(b"\x11");
+    session.finish();
+}
+
+#[test]
+fn restart_failure_keeps_saved_file_and_running_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(".served.json5");
+    fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
+    let manager = Manager::start(dir.path());
+    manager.ok(&["enable"]);
+    let pid = manager.pid();
+    let mut session = Session::start(dir.path(), &["edit"]);
+    session.wait("Working directory");
+    session.send(b"\x1b[B\x1b[B\r");
+    session.paste("missing-directory");
+    session.send(b"\r\x13");
+    session.wait("Restart api to apply changes?");
+    session.send(b"\x1b[B\r");
+    session.wait("Restart failed");
+    assert!(
+        fs::read_to_string(file)
+            .unwrap()
+            .contains("missing-directory")
+    );
+    assert_eq!(manager.pid(), pid);
+    session.send(b"\x1b");
+    session.overview(false);
     session.send(b"\x11");
     session.finish();
 }

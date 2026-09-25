@@ -2,6 +2,7 @@
 mod document;
 mod input;
 mod model;
+mod restart;
 mod source;
 mod view;
 use anyhow::{Context, Result, bail};
@@ -23,24 +24,57 @@ use std::{
 };
 struct TerminalGuard {
     enhanced: bool,
+    owns_terminal: bool,
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if self.enhanced {
             let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
         }
-        let _ = execute!(stdout(), DisableBracketedPaste, Show, LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), DisableBracketedPaste, Show);
+        if self.owns_terminal {
+            let _ = execute!(stdout(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+        }
     }
 }
-pub(crate) fn run(path: &Path) -> Result<()> {
+pub(crate) async fn run(path: &Path) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("configuration form requires a terminal; use --path or --editor");
     }
     let mut form = Form::open(path)?;
+    let paths = crate::paths::ServedPaths::from_environment()?;
     enable_raw_mode().context("enable form raw mode")?;
-    let mut guard = TerminalGuard { enhanced: false };
-    execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    let _guard = TerminalGuard {
+        enhanced: false,
+        owns_terminal: true,
+    };
+    execute!(stdout(), EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    run_form(&mut terminal, &paths, &mut form, None).await
+}
+
+pub(super) async fn edit_in_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    paths: &crate::paths::ServedPaths,
+    path: &Path,
+    name: &str,
+) -> Result<()> {
+    let mut form = Form::open(path)?;
+    run_form(terminal, paths, &mut form, Some(name)).await
+}
+
+async fn run_form(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    paths: &crate::paths::ServedPaths,
+    form: &mut Form,
+    service_name: Option<&str>,
+) -> Result<()> {
+    let mut guard = TerminalGuard {
+        enhanced: false,
+        owns_terminal: false,
+    };
+    execute!(stdout(), EnableBracketedPaste)?;
     if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
             stdout(),
@@ -49,9 +83,9 @@ pub(crate) fn run(path: &Path) -> Result<()> {
         guard.enhanced = true;
         form.enhanced_keyboard = true;
     }
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    terminal.clear()?;
     loop {
-        terminal.draw(|frame| view::draw(frame, &mut form))?;
+        terminal.draw(|frame| view::draw(frame, form))?;
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
@@ -65,7 +99,23 @@ pub(crate) fn run(path: &Path) -> Result<()> {
                 if !usable && !exit {
                     continue;
                 }
-                if form.key(key, usize::from(size.height.saturating_sub(8).max(1))) {
+                let exit = form.key(key, usize::from(size.height.saturating_sub(8).max(1)));
+                if std::mem::take(&mut form.saved_change) {
+                    if let Err(error) = restart::after_save(
+                        terminal,
+                        paths,
+                        &form.document.path,
+                        &form.config.name,
+                        service_name,
+                    )
+                    .await
+                    {
+                        form.error = Some(format!("Configuration saved. {error:#}"));
+                        form.reader_scroll = 0;
+                        continue;
+                    }
+                }
+                if exit {
                     break;
                 }
             }

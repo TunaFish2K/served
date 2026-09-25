@@ -66,6 +66,8 @@ Named commands work from any directory.
 > **-f**, **-&#45;file** *file*
 > selects any filename; otherwise discover the default configuration in the current directory.
 > Create a commented JSON5 template when no configuration exists.
+> New templates use restart on-failure and persist\_logs true.
+> Existing configurations and defaults for omitted fields are unchanged.
 > Explicit file selection also creates missing parent directories.
 > Opening an existing file does not modify it.
 > The form has Basic, Runtime, Logs and Environment pages.
@@ -91,7 +93,11 @@ Named commands work from any directory.
 > Ctrl+Q exits with an unsaved-changes prompt.
 > Ctrl+Z/Ctrl+Y undo or redo; Ctrl+R reloads; F1 shows keys for the current page or input.
 > Saving preserves comments and untouched properties and refuses concurrent file changes.
-> Saving does not enable or restart services.
+> Saving does not enable services.
+> After a changed configuration is saved in the form, running services offer Not now or Restart, defaulting to Not now.
+> Not now keeps the saved configuration without restarting.
+> Restart failure does not undo the saved file.
+> External editors, headless builds and non-interactive commands do not add this prompt.
 > Invalid JSON5 or unsupported fields require an explicit external editor. **-&#45;path**
 > creates a missing template and prints its absolute path without opening an editor.
 > Warnings go to standard error.
@@ -301,7 +307,7 @@ Explicit --help retains its normal text format.
 # TUI CONTROLS
 
 Use Up/Down or j/k to select a service, s to start, x to stop, r to restart, d to disable,
-a to attach, and h to browse history.
+a to attach, e to edit the registered configuration, and h to browse history.
 Enter opens the action menu; ? opens contextual help.
 Disable requires confirmation and defaults to Cancel.
 Use q or Escape to leave a view.
@@ -310,7 +316,9 @@ Full service details are in the actions page help; PageUp/PageDown scroll the he
 While the manager is unavailable, the list is marked stale and service actions are blocked.
 Success messages clear after three seconds; errors remain until dismissed.
 In history, Enter opens a run; PageUp/PageDown and Home/End navigate its content.
-Use served edit for the standalone configuration form in full builds.
+Actions Edit and standalone served edit share the configuration form in full builds.
+Edit remains visible but unavailable for temporary services.
+Closing the form from Actions returns to the service menu.
 
 # ENVIRONMENT
 

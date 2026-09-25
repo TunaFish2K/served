@@ -789,7 +789,7 @@ async fn edit_config(
 
     #[cfg(feature = "tui")]
     if editor.is_none() {
-        crate::tui::config_form::run(path)?;
+        crate::tui::config_form::run(path).await?;
         return Ok(json!({}));
     }
     let editor = editor::resolve(editor)?;

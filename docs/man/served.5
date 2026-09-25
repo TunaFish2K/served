@@ -19,6 +19,9 @@ An invalid .served.json5 does not cause fallback.
 Explicit
 .Fl f , Fl Fl file
 selection accepts any filename and bypasses this discovery and its warnings.
+.Pp
+New templates created by served edit explicitly set restart to on-failure and persist_logs to true.
+The field defaults below apply when a configuration omits those fields.
 .Sh FIELDS
 .Bl -tag -width "log_max_bytes"
 .It Ic name

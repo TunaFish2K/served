@@ -176,16 +176,18 @@ pub(super) enum ServiceAction {
     Start,
     Stop,
     Restart,
+    Edit,
     History,
     Disable,
 }
 
 impl ServiceAction {
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 7] = [
         Self::Attach,
         Self::Start,
         Self::Stop,
         Self::Restart,
+        Self::Edit,
         Self::History,
         Self::Disable,
     ];
@@ -196,6 +198,7 @@ impl ServiceAction {
             Self::Start => "Start",
             Self::Stop => "Stop",
             Self::Restart => "Restart",
+            Self::Edit => "Edit",
             Self::History => "History",
             Self::Disable => "Disable",
         }
@@ -207,6 +210,7 @@ impl ServiceAction {
             Self::Start => 's',
             Self::Stop => 'x',
             Self::Restart => 'r',
+            Self::Edit => 'e',
             Self::History => 'h',
             Self::Disable => 'd',
         }
@@ -481,7 +485,12 @@ impl MainUi {
         }
         if !pending && self.unavailable.is_none() {
             if let (Some(action), Some(service)) = (action, self.services.get(self.selected)) {
-                if action == ServiceAction::Disable {
+                if action == ServiceAction::Edit && service.config_file.is_none() {
+                    self.message = Some(Reader::new(
+                        "Edit unavailable",
+                        "Temporary services have no editable configuration.",
+                    ));
+                } else if action == ServiceAction::Disable {
                     self.page = Page::ConfirmDisable {
                         confirm: false,
                         menu: match self.page {

@@ -205,6 +205,48 @@ fn draw_confirmation(frame: &mut Frame<'_>, form: &mut Form) {
     }
 }
 
+pub(super) fn draw_restart(frame: &mut Frame<'_>, message: &str, selection: Option<usize>) {
+    let area = frame.area();
+    if area.width < 40 || area.height < 10 {
+        frame.render_widget(Paragraph::new("Resize to 40x10\nesc not now"), area);
+        return;
+    }
+    let margin = if area.width >= 80 { 2 } else { 1 };
+    let work = Rect::new(
+        area.x + margin,
+        area.y,
+        (area.width - margin * 2).min(76),
+        area.height,
+    );
+    put(
+        frame,
+        row(work, area.y + 1),
+        "Configuration saved",
+        color(Color::Green).add_modifier(Modifier::BOLD),
+    );
+    // Keep the decision visible even when the service name is very long.
+    put(frame, row(work, area.y + 3), message, color(Color::Yellow));
+    if let Some(selection) = selection {
+        for (index, option) in ["Not now", "Restart"].iter().enumerate() {
+            put(
+                frame,
+                row(work, area.y + 4 + index as u16),
+                option,
+                if selection == index {
+                    selected()
+                } else {
+                    Style::default()
+                },
+            );
+        }
+        hints(
+            frame,
+            row(work, area.y + 7),
+            &[("enter", "confirm"), ("esc", "not now")],
+        );
+    }
+}
+
 pub(super) fn draw(frame: &mut Frame<'_>, form: &mut Form) {
     let all = frame.area();
     if all.width < 40 || all.height < 10 {
@@ -740,6 +782,39 @@ mod tests {
                         export(buffer, &TABS[tab].to_lowercase());
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn save_restart_choices_and_progress_fit_small_windows() {
+        for (width, height) in [(40, 10), (80, 24)] {
+            for selected in [None, Some(0), Some(1)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        draw_restart(
+                            frame,
+                            if selected.is_some() {
+                                "Restart api to apply changes?"
+                            } else {
+                                "Restarting api…"
+                            },
+                            selected,
+                        )
+                    })
+                    .unwrap();
+                let buf = terminal.backend().buffer();
+                let text: String = buf.content.iter().map(|c| c.symbol()).collect();
+                assert!(text.contains("Configuration saved"));
+                assert_eq!(text.contains("Not now"), selected.is_some());
+                export(
+                    buf,
+                    &format!(
+                        "save-restart-{}-{width}",
+                        selected.map_or("progress".into(), |i| i.to_string())
+                    ),
+                );
             }
         }
     }

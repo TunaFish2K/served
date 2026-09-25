@@ -162,8 +162,8 @@ impl ServiceConfig {
             cwd: None,
             tty: true,
             sync_rows_cols: true,
-            restart: RestartPolicy::Never,
-            persist_logs: false,
+            restart: RestartPolicy::OnFailure,
+            persist_logs: true,
             log_max_bytes: DEFAULT_LOG_MAX_BYTES,
             log_max_files: DEFAULT_LOG_MAX_FILES,
             env: BTreeMap::new(),
@@ -808,6 +808,15 @@ mod tests {
 
         let service = load_service(directory.path(), &BTreeMap::new()).expect("load template");
         assert_eq!(service.config.env, BTreeMap::new());
+        assert_eq!(service.config.restart, RestartPolicy::OnFailure);
+        assert!(service.config.persist_logs);
+    }
+
+    #[test]
+    fn omitted_fields_keep_legacy_defaults() {
+        let config: ServiceConfig = json5::from_str("{name:'api',command:'true'}").unwrap();
+        assert_eq!(config.restart, RestartPolicy::Never);
+        assert!(!config.persist_logs);
     }
 
     #[test]

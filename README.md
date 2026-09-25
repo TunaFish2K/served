@@ -266,8 +266,8 @@ exist, `.served.json5` takes precedence and served warns that `.served.json` is 
   cwd: null, // Or an absolute path, or a path relative to this configuration.
   tty: true,
   syncRowsCols: true,
-  restart: "never",
-  persist_logs: false,
+  restart: "on-failure",
+  persist_logs: true,
   log_max_bytes: 10485760,
   log_max_files: 3,
   env: {
@@ -320,7 +320,9 @@ Details and key hints follow the list; long lists scroll. Logs, help, and errors
 Cyan highlights titles and keys; green, yellow, and red mark success, pending/warning, and failure.
 Set `NO_COLOR=1` to disable colors while keeping selection and text cues.
 Press Enter for actions or `?` for contextual help. Use arrows or `j/k` to move and Esc/q to go back.
-The direct shortcuts remain: `a` attach, `s` start, `x` stop, `r` restart, `h` history, and `d` disable.
+The direct shortcuts remain: `a` attach, `s` start, `x` stop, `r` restart, `e` edit, `h` history, and `d` disable.
+Actions → Edit opens the service's registered configuration file. Temporary services show a disabled Edit entry. After closing the form, the service action menu is restored.
+
 Disable requires confirmation and defaults to Cancel. Operations report progress; success messages clear
 after three seconds, while errors remain readable until dismissed. During a manager disconnection,
 the last list is marked stale and service actions are blocked until reconnection.
@@ -358,6 +360,8 @@ terminals) or Ctrl+J inserts a newline in commands and environment values. Long 
 available width without changing the stored text. Up/Down moves by visual rows; PageUp/PageDown
 moves by one viewport. A scrollbar on the right shows the visible portion of overflowing text.
 
+New configuration templates use `restart: "on-failure"` and `persist_logs: true`. Existing files, omitted-field defaults, and `served run` defaults do not change.
+
 Environment names and values share one form. Down from Name enters Value; Up from Value's first
 visual row returns to Name. Enter on Name also enters Value. `a` adds a variable. Existing entries have a Delete button:
 Down from the last visual row of Value selects it, and Enter opens a confirmation with Cancel selected.
@@ -371,7 +375,7 @@ files while editing a field. Ctrl+Q exits with an unsaved-changes prompt that de
 
 Choose an option with arrows and confirm with Enter; deletion and reload default to Cancel. Ctrl+Z/Ctrl+Y undo or redo;
 Ctrl+R reloads; F1 opens a short key table for the current page or input. Saving patches changed properties, preserving comments and untouched
-source text. Concurrent file changes block saving. Saving does not enable or restart a service.
+source text. Concurrent file changes block saving. Saving does not enable a service. After a changed configuration is saved in the form, a running service offers Not now / Restart, defaulting to Not now. Both Actions → Edit and standalone `served edit` use this flow; external editors and headless builds do not prompt.
 Validation errors wrap in place; longer errors open a scrollable page. Esc returns to the draft.
 Invalid JSON5 or unsupported fields require source editing with `--editor`.
 

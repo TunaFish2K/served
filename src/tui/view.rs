@@ -109,7 +109,8 @@ pub(super) fn main_rows(area: Rect, ui: &MainUi) -> usize {
     } else {
         Some(match ui.page {
             Page::Services => ui.services.len(),
-            _ => 6,
+            Page::Actions { .. } => ServiceAction::ALL.len(),
+            Page::ConfirmDisable { .. } => 6,
         })
     };
     body_rows(area, main_footer(ui), items)
@@ -466,8 +467,9 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
     let viewport = (frame.area().width, frame.area().height);
     if ui.viewport != viewport {
         if let Page::Actions { selected, scroll } = &mut ui.page {
-            *scroll = selected
-                .saturating_sub(body_rows(frame.area(), ACTIONS, Some(6)).saturating_sub(1));
+            *scroll = selected.saturating_sub(
+                body_rows(frame.area(), ACTIONS, Some(ServiceAction::ALL.len())).saturating_sub(1),
+            );
         }
         ui.viewport = viewport;
     }
@@ -495,7 +497,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 &format!("{} / actions", service.name),
                 "",
                 ACTIONS,
-                Some(6),
+                Some(ServiceAction::ALL.len()),
                 Tone::Accent,
             ) else {
                 return;
@@ -530,7 +532,9 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                         ),
                         Span::styled(
                             format!("{:<10} ", action.label()),
-                            if i != *selected && *action == ServiceAction::Disable {
+                            if *action == ServiceAction::Edit && service.config_file.is_none() {
+                                muted()
+                            } else if i != *selected && *action == ServiceAction::Disable {
                                 tone_style(Tone::Error)
                             } else {
                                 Style::default()
@@ -538,7 +542,9 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                         ),
                         Span::styled(
                             action.key().to_string(),
-                            if i == *selected {
+                            if *action == ServiceAction::Edit && service.config_file.is_none() {
+                                muted()
+                            } else if i == *selected {
                                 Style::default()
                             } else {
                                 tone_style(Tone::Accent)

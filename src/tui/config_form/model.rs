@@ -56,6 +56,7 @@ pub(super) struct Form {
     pub reader_scroll: usize,
     pub inline_error: Option<String>,
     pub inline_error_acknowledged: bool,
+    pub saved_change: bool,
     undo: Vec<ServiceConfig>,
     redo: Vec<ServiceConfig>,
 }
@@ -140,6 +141,7 @@ impl Form {
             reader_scroll: 0,
             inline_error: None,
             inline_error_acknowledged: false,
+            saved_change: false,
             undo: Vec::new(),
             redo: Vec::new(),
         })
@@ -505,8 +507,12 @@ impl Form {
         if !self.validate() {
             return false;
         }
+        let changed = self.config != self.document.config;
         match self.document.save_config(&self.config) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.saved_change = changed;
+                true
+            }
             Err(error) => {
                 self.error = Some(format!("{error:#}"));
                 self.reader_scroll = 0;
@@ -842,6 +848,28 @@ mod tests {
         let form = Form::open(&path).unwrap();
         (dir, form)
     }
+    #[test]
+    fn saved_change_is_only_reported_for_successful_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(&path, "{name:'api',command:'true'}").unwrap();
+        let mut form = Form::open(&path).unwrap();
+        assert!(form.save());
+        assert!(!form.saved_change);
+        form.config.command = "echo changed".into();
+        assert!(form.save());
+        assert!(std::mem::take(&mut form.saved_change));
+        assert!(form.save());
+        assert!(!form.saved_change);
+        form.config.command.clear();
+        assert!(!form.save());
+        assert!(!form.saved_change);
+        form.config.command = "echo changed again".into();
+        std::fs::write(&path, "{name:'api',command:'external'}").unwrap();
+        assert!(!form.save());
+        assert!(!form.saved_change);
+    }
+
     #[test]
     fn enter_finishes_shift_enter_and_ctrl_j_insert_newlines() {
         let (_dir, mut f) = fixture();

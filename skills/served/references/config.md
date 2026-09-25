@@ -25,6 +25,9 @@ Explicit
 **-f**, **-&#45;file**
 selection accepts any filename and bypasses this discovery and its warnings.
 
+New templates created by served edit explicitly set restart to on-failure and persist\_logs to true.
+The field defaults below apply when a configuration omits those fields.
+
 # FIELDS
 
 **name**

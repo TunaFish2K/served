@@ -225,6 +225,36 @@ async fn run_loop(
                             }
                         }
                     }
+                    ServiceAction::Edit => {
+                        let file = ui
+                            .services
+                            .iter()
+                            .find(|service| service.name == name)
+                            .and_then(|service| service.config_file.clone());
+                        if let Some(file) = file {
+                            if matches!(ui.page, model::Page::Services) {
+                                ui.page = model::Page::Actions {
+                                    selected: 4,
+                                    scroll: 0,
+                                };
+                            }
+                            if let Some(task) = refresh.take() {
+                                task.abort();
+                            }
+                            let result = config_form::edit_in_terminal(
+                                terminal,
+                                &paths,
+                                Path::new(&file),
+                                &name,
+                            )
+                            .await;
+                            terminal.clear()?;
+                            if let Err(error) = result {
+                                ui.message =
+                                    Some(Reader::error("Edit failed", format!("{error:#}")));
+                            }
+                        }
+                    }
                     ServiceAction::History => {
                         if let Err(error) = history_in_tui(terminal, &paths, &name).await {
                             ui.message = Some(Reader::error("History failed", error.to_string()));
@@ -533,7 +563,7 @@ mod tests {
 
     fn service_info(tty: bool) -> ServiceInfo {
         ServiceInfo {
-            config_file: None,
+            config_file: Some("/tmp/api/.served.json5".into()),
             name: "api".to_owned(),
             directory: "/tmp/api".to_owned(),
             kind: ServiceKind::Enabled,
@@ -600,6 +630,55 @@ mod tests {
         }
         assert_eq!(selected.len(), 1, "{selected:?}");
         assert!(selected[0].starts_with(expected), "{selected:?}");
+    }
+
+    #[test]
+    fn edit_action_preserves_disabled_temporary_entry() {
+        let mut ui = MainUi::default();
+        ui.refresh(vec![service_info(false)]);
+        assert_eq!(
+            ui.key(KeyCode::Char('e'), false, 10),
+            Intent::Act(ServiceAction::Edit, "api".into())
+        );
+        ui.services[0].kind = ServiceKind::Temporary;
+        ui.services[0].config_file = None;
+        ui.page = model::Page::Actions {
+            selected: 4,
+            scroll: 0,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw_main(frame, &mut ui, ""))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = buffer
+            .content
+            .chunks(80)
+            .find(|row| {
+                row.iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+                    .contains("Edit")
+            })
+            .unwrap();
+        assert!(
+            row.iter()
+                .find(|c| c.symbol() == "E")
+                .unwrap()
+                .modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+        export_page(&terminal, "temporary-edit-disabled");
+        assert_eq!(ui.key(KeyCode::Enter, false, 10), Intent::None);
+        assert!(
+            ui.message
+                .as_ref()
+                .unwrap()
+                .content
+                .contains("no editable configuration")
+        );
+        ui.key(KeyCode::Esc, false, 10);
+        assert!(matches!(ui.page, model::Page::Actions { selected: 4, .. }));
     }
 
     #[test]
@@ -772,7 +851,7 @@ mod tests {
             .draw(|frame| draw_main(frame, &mut ui, ""))
             .unwrap();
         assert!(buffer_text(&terminal).contains("enabled"));
-        assert!(matches!(ui.page, model::Page::Actions { selected: 5, .. }));
+        assert!(matches!(ui.page, model::Page::Actions { selected: 6, .. }));
         assert_selected(&terminal, "Disable");
     }
 
@@ -793,7 +872,7 @@ mod tests {
             ui.key(KeyCode::Enter, false, 2),
             Intent::Act(ServiceAction::Attach, "api".into())
         );
-        for _ in 0..5 {
+        for _ in 0..6 {
             ui.key(KeyCode::Down, false, 2);
         }
         terminal
@@ -806,14 +885,14 @@ mod tests {
             .draw(|frame| draw_main(frame, &mut ui, ""))
             .unwrap();
         ui.key(KeyCode::Char('?'), false, 2);
-        assert!(matches!(ui.page, Page::Actions { selected: 5, .. }));
+        assert!(matches!(ui.page, Page::Actions { selected: 6, .. }));
         ui.key(KeyCode::Enter, false, 2);
         assert!(matches!(
             ui.page,
             Page::ConfirmDisable { confirm: false, .. }
         ));
         assert_eq!(ui.key(KeyCode::Enter, false, 2), Intent::None);
-        assert!(matches!(ui.page, Page::Actions { selected: 5, .. }));
+        assert!(matches!(ui.page, Page::Actions { selected: 6, .. }));
         ui.key(KeyCode::Enter, false, 2);
         ui.key(KeyCode::Down, false, 2);
         assert_eq!(
@@ -1232,7 +1311,7 @@ mod tests {
                 }
             }
             ui.page = Page::Actions {
-                selected: 5,
+                selected: 6,
                 scroll: 0,
             };
             ui.key(KeyCode::Char('?'), false, 3);
@@ -1249,7 +1328,7 @@ mod tests {
             assert!(buffer_text(&terminal).contains("?/esc/q back"));
             export_page(&terminal, "help");
             ui.key(KeyCode::Char('?'), false, 3);
-            assert!(matches!(ui.page, Page::Actions { selected: 5, .. }));
+            assert!(matches!(ui.page, Page::Actions { selected: 6, .. }));
             ui.message = Some(Reader::error("Error", "An operation failed.\n".repeat(40)));
             terminal
                 .draw(|frame| draw_main(frame, &mut ui, ""))
@@ -1310,9 +1389,9 @@ mod tests {
             );
             for (key, expected) in [
                 (KeyCode::Home, 0),
-                (KeyCode::PageDown, rows.min(5)),
-                (KeyCode::End, 5),
-                (KeyCode::PageUp, 5usize.saturating_sub(rows)),
+                (KeyCode::PageDown, rows.min(6)),
+                (KeyCode::End, 6),
+                (KeyCode::PageUp, 6usize.saturating_sub(rows)),
             ] {
                 ui.key(key, false, rows);
                 terminal

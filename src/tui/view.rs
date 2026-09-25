@@ -122,6 +122,17 @@ fn list_gap(rows: usize, footer: Footer, items: Option<usize>) -> usize {
     usize::from(items.is_some() && shared_list(footer) && rows > ServiceAction::ALL.len())
 }
 
+/// Shared separator, final footer row, and trailing body gap for browsing/editing.
+pub(super) fn management_geometry(area: Rect, count: usize) -> (u16, u16, u16) {
+    let rows = body_rows(area, SERVICES, Some(count));
+    let separator = area.y + 3 + rows as u16;
+    (
+        separator,
+        separator + footer_rows(work_width(area, Some(count)), SERVICES, Some(count)),
+        list_gap(rows, SERVICES, Some(count)) as u16,
+    )
+}
+
 pub(super) fn main_rows(area: Rect, ui: &MainUi) -> usize {
     let items = if ui.help.is_some() || ui.message.is_some() {
         None

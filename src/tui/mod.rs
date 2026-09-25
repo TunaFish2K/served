@@ -246,6 +246,7 @@ async fn run_loop(
                                 &paths,
                                 Path::new(&file),
                                 &name,
+                                ui.services.len(),
                             )
                             .await;
                             terminal.clear()?;

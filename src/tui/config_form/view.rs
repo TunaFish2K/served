@@ -247,6 +247,10 @@ pub(super) fn draw_restart(frame: &mut Frame<'_>, message: &str, selection: Opti
     }
 }
 
+fn geometry(area: Rect, form: &Form) -> (u16, u16, u16) {
+    super::super::view::management_geometry(area, form.height_basis)
+}
+
 pub(super) fn draw(frame: &mut Frame<'_>, form: &mut Form) {
     let all = frame.area();
     if all.width < 40 || all.height < 10 {
@@ -291,10 +295,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, form: &mut Form) {
         (all.width - 2 * margin).min(76),
         all.height,
     );
-    let compact = all.height < 18;
+    let (separator, footer, gap) = geometry(all, form);
+    let compact = separator - all.y < 8;
     let title_y = all.y + if compact { 0 } else { 1 };
     let tabs_y = all.y + if compact { 2 } else { 4 };
-    let available = all.bottom() - 2 - (tabs_y + 2);
+    let available = separator - gap - (tabs_y + 2);
     let errors = error_lines(form, work.width, available.saturating_sub(2));
     if form.error.is_some() {
         draw_error(frame, form);
@@ -349,7 +354,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, form: &mut Form) {
     frame.render_widget(Paragraph::new(Line::from(spans)), row(work, tabs_y));
     if form.tab < 3 {
         let stacked = body.width < 60;
-        let step = if stacked { 3 } else { 2 };
+        let step = if stacked {
+            if body.height >= 9 { 3 } else { 2 }
+        } else if body.height >= 6 {
+            2
+        } else {
+            1
+        };
         let visible = (body.height as usize / step).max(1);
         let start = (form.selected.min(form.count() - 1) + 1).saturating_sub(visible);
         for i in start..3 {
@@ -450,13 +461,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, form: &mut Form) {
     draw_errors(frame, work, body.bottom(), errors);
     put(
         frame,
-        row(work, all.bottom() - 2),
+        row(work, separator),
         &"─".repeat(work.width as usize),
         dim(),
     );
     hints(
         frame,
-        row(work, all.bottom() - 1),
+        row(work, footer),
         if form.tab == 3 {
             &[
                 ("ctrl+s", "save"),
@@ -474,8 +485,39 @@ fn draw_editor(frame: &mut Frame<'_>, form: &mut Form) {
     let all = frame.area();
     let margin = if all.width >= 80 { 2 } else { 1 };
     let work = Rect::new(all.x + margin, all.y, all.width - 2 * margin, all.height);
-    let title_y = all.y + u16::from(all.height >= 18);
-    let body_y = title_y + if all.height < 18 { 2 } else { 3 };
+    let (mut separator, mut footer, gap) = geometry(all, form);
+    let compact = separator - all.y < 8;
+    let title_y = all.y + u16::from(!compact);
+    let body_y = title_y + if compact { 2 } else { 3 };
+    let needed = match form.editing.as_mut().unwrap() {
+        Editing::Text {
+            field: 1, input, ..
+        } => {
+            input.viewport_width = usize::from(work.width.saturating_sub(1));
+            Some(input.layout().lines.len())
+        }
+        Editing::Env {
+            value,
+            delete_available,
+            ..
+        } => {
+            value.viewport_width = usize::from(work.width.saturating_sub(3));
+            Some(value.layout().lines.len() + 3 + usize::from(*delete_available))
+        }
+        _ => None,
+    };
+    if let Some(needed) = needed {
+        let errors = form.inline_error.as_ref().map_or(0, |message| {
+            if form.inline_error_acknowledged {
+                1
+            } else {
+                wrapped(message, usize::from(work.width)).len().min(3)
+            }
+        });
+        let target = usize::from(body_y + gap) + needed + errors;
+        separator = separator.max(target.min(usize::from(all.bottom() - 2)) as u16);
+        footer = footer.max(separator + 1);
+    }
     let minimum = match form.editing.as_ref().unwrap() {
         Editing::Env {
             delete_available, ..
@@ -485,13 +527,13 @@ fn draw_editor(frame: &mut Frame<'_>, form: &mut Form) {
     let errors = error_lines(
         form,
         work.width,
-        (all.bottom() - 2 - body_y).saturating_sub(minimum),
+        (separator - gap - body_y).saturating_sub(minimum),
     );
     if form.error.is_some() {
         draw_error(frame, form);
         return;
     }
-    let bottom = all.bottom() - 2 - errors.len() as u16;
+    let bottom = separator - gap - errors.len() as u16;
     let body = Rect::new(work.x, body_y, work.width, bottom - body_y);
     let label = match form.editing.as_ref().unwrap() {
         Editing::Text { field, .. } => LABELS[*field],
@@ -607,11 +649,11 @@ fn draw_editor(frame: &mut Frame<'_>, form: &mut Form) {
     draw_errors(frame, work, bottom, errors);
     put(
         frame,
-        row(work, all.bottom() - 2),
+        row(work, separator),
         &"─".repeat(work.width as usize),
         dim(),
     );
-    hints(frame, row(work, all.bottom() - 1), &[("esc", "back")]);
+    hints(frame, row(work, footer), &[("esc", "back")]);
 }
 
 fn draw_wrapped_input(frame: &mut Frame<'_>, area: Rect, input: &mut Buffer, focused: bool) {
@@ -748,6 +790,90 @@ fn draw_single_input(frame: &mut Frame<'_>, area: Rect, input: &Buffer, focused:
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+    fn separator_row(terminal: &Terminal<TestBackend>) -> u16 {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .find(|y| (0..buffer.area.width).any(|x| buffer[(x, *y)].symbol() == "─"))
+            .unwrap()
+    }
+
+    #[test]
+    fn compact_editor_matches_management_height_and_multiline_grows_and_shrinks() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".served.json5");
+        std::fs::write(&path, "{name:'api',command:'echo ok',env:{TOKEN:'short'}}").unwrap();
+        for (width, height) in [(40, 10), (60, 16), (80, 24), (120, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for basis in [0, 20, 50] {
+                let mut form = Form::open(&path).unwrap();
+                form.height_basis = basis;
+                let expected = geometry(terminal.backend().buffer().area, &form).0;
+                for tab in 0..4 {
+                    form.tab = tab;
+                    terminal.draw(|frame| draw(frame, &mut form)).unwrap();
+                    assert_eq!(separator_row(&terminal), expected);
+                }
+                form.tab = 0;
+                form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 1);
+                terminal.draw(|frame| draw(frame, &mut form)).unwrap();
+                assert_eq!(separator_row(&terminal), expected);
+                export(
+                    terminal.backend().buffer(),
+                    &format!("compact-name-{width}-{basis}"),
+                );
+            }
+        }
+        for env in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let mut form = Form::open(&path).unwrap();
+            terminal.draw(|frame| draw(frame, &mut form)).unwrap();
+            export(terminal.backend().buffer(), "compact-overview");
+            let baseline = separator_row(&terminal);
+            form.tab = if env { 3 } else { 0 };
+            form.selected = usize::from(!env);
+            form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 1);
+            let mut heights = Vec::new();
+            for (name, value) in [
+                ("short", "short".into()),
+                ("medium", "line\n".repeat(9)),
+                ("long", "value\t".repeat(1000)),
+                ("shrunk", "short".into()),
+            ] {
+                match form.editing.as_mut().unwrap() {
+                    Editing::Text { input, .. } => *input = Buffer::new(value),
+                    Editing::Env {
+                        value: input,
+                        value_focus,
+                        ..
+                    } => {
+                        *input = Buffer::new(value);
+                        *value_focus = true;
+                    }
+                    _ => unreachable!(),
+                }
+                terminal.draw(|frame| draw(frame, &mut form)).unwrap();
+                heights.push(separator_row(&terminal));
+                export(
+                    terminal.backend().buffer(),
+                    &format!(
+                        "adaptive-{}-{name}",
+                        if env { "variable" } else { "command" }
+                    ),
+                );
+                let cursor = terminal.get_cursor_position().unwrap();
+                assert!(cursor.y < separator_row(&terminal));
+            }
+            assert_eq!(heights[0], baseline);
+            assert!(heights[1] > heights[0]);
+            assert!(heights[2] > heights[1], "env={env}: {heights:?}");
+            assert_eq!(heights[3], baseline);
+            form.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), 1);
+            terminal.draw(|frame| draw(frame, &mut form)).unwrap();
+            assert_eq!(separator_row(&terminal), baseline);
+        }
+    }
+
     #[test]
     fn pages_resize_and_export_actual_cells() {
         let dir = tempfile::tempdir().unwrap();
@@ -833,20 +959,21 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| draw(frame, &mut form)).unwrap();
             let buf = terminal.backend().buffer();
-            let title_y = u16::from(height >= 18);
+            let (separator, footer, _) = geometry(buf.area, &form);
+            let title_y = u16::from(separator >= 8);
             let title: String = (0..width).map(|x| buf[(x, title_y)].symbol()).collect();
             assert!(title.trim_end().ends_with(" · modified"));
             let x = if width >= 80 { 2 } else { 1 };
             assert_eq!(
-                buf[(x, height - 1)].fg,
+                buf[(x, footer)].fg,
                 if colors_enabled() {
                     Color::Cyan
                 } else {
                     Color::Reset
                 }
             );
-            assert!(!buf[(x, height - 1)].modifier.contains(Modifier::DIM));
-            assert!(buf[(x + 4, height - 1)].modifier.contains(Modifier::DIM));
+            assert!(!buf[(x, footer)].modifier.contains(Modifier::DIM));
+            assert!(buf[(x + 4, footer)].modifier.contains(Modifier::DIM));
             export(buf, &format!("modified-title-{width}"));
         }
     }
@@ -891,10 +1018,12 @@ mod tests {
 
         let mut form = Form::open(&path).unwrap();
         form.inline_error = Some("Use letters, digits, '.', '_' or '-' for the name.".into());
+        terminal.backend_mut().resize(40, 16);
         terminal.draw(|frame| draw(frame, &mut form)).unwrap();
         assert!(form.error.is_none());
         let buf = terminal.backend().buffer();
-        let message: String = (6..8)
+        let (separator, _, gap) = geometry(buf.area, &form);
+        let message: String = (separator - gap - 2..separator - gap)
             .flat_map(|y| (1..39).map(move |x| buf[(x, y)].symbol()))
             .collect();
         assert!(message.trim_end().ends_with("for the name."));
@@ -1391,9 +1520,10 @@ mod tests {
             if width == 100 {
                 export(buffer, "whitespace-selected");
             }
-            assert!(lines[lines.len() - 2].trim().chars().all(|c| c == '─'));
+            let (separator, footer, _) = geometry(buffer.area, &form);
+            assert!(lines[separator as usize].trim().chars().all(|c| c == '─'));
             assert_eq!(
-                lines.last().unwrap().trim(),
+                lines[footer as usize].trim(),
                 "ctrl+s save  esc quit  a add  ? help"
             );
             form.selected = 1;

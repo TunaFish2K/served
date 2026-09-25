@@ -57,6 +57,7 @@ pub(super) struct Form {
     pub inline_error: Option<String>,
     pub inline_error_acknowledged: bool,
     pub saved_change: bool,
+    pub height_basis: usize,
     undo: Vec<ServiceConfig>,
     redo: Vec<ServiceConfig>,
 }
@@ -142,6 +143,7 @@ impl Form {
             inline_error: None,
             inline_error_acknowledged: false,
             saved_change: false,
+            height_basis: 0,
             undo: Vec::new(),
             redo: Vec::new(),
         })

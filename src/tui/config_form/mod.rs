@@ -59,8 +59,10 @@ pub(super) async fn edit_in_terminal(
     paths: &crate::paths::ServedPaths,
     path: &Path,
     name: &str,
+    height_basis: usize,
 ) -> Result<()> {
     let mut form = Form::open(path)?;
+    form.height_basis = height_basis;
     run_form(terminal, paths, &mut form, Some(name)).await
 }
 

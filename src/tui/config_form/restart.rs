@@ -202,7 +202,7 @@ mod tests {
         assert!(matching_service(services, &a, Some("b")).unwrap().is_none());
         assert!(matching_service(vec![service(&a, "a"), service(&a, "b")], &a, None).is_err());
         let mut temporary = service(&a, "temp");
-        temporary.kind = ServiceKind::Temporary;
+        temporary.kind = ServiceKind::Run;
         assert!(
             matching_service(vec![temporary], &a, None)
                 .unwrap()

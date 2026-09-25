@@ -30,7 +30,7 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
   校验后安装。重复运行同一命令执行升级。
 - 持久启用服务必须先有有效的 JSON5 配置和工作目录，再运行 `served enable`。配置可以
   使用默认文件名，也可以通过 `-f/--file` 显式指定。
-- 用户可以用 `served run -- <program> [args...]` 创建临时服务。临时服务不要求项目配置文件。
+- 用户可以用 `served run -- <program> [args...]` 创建 run 服务。run 服务不要求项目配置文件。
 - `served enable` 启用项目服务并立即启动它。它不上传代码，也不执行构建。
 - 项目文件或配置更新后，使用 `served restart` 应用变化。
 - 服务异常时，使用 `served attach`、`served history` 或持久化日志排查。
@@ -38,18 +38,17 @@ served 不是容器运行时，也不提供任意 root 服务管理、容器隔�
 ## 核心模型
 
 - 一个配置文件定义一个服务。服务名全局唯一，多个服务可以共用工作目录。
-- 受管服务分为 `enabled` 和 `temporary`。已启用服务由服务配置文件和启用记录定义。
-  临时服务由 `served run` 的命令行参数定义。
+- 受管服务分为 `enabled` 和 `run`。已启用服务由服务配置文件和启用记录定义。
+  run 服务由 `served run` 的命令行参数定义。
 - 已启用服务的配置来源是目录内自动查找，或显式指定的 JSON5 文件；配置位置与进程
-  工作目录独立。临时服务忽略配置文件。
+  工作目录独立。run 服务忽略配置文件。
 - 服务定义可以用 `env` 对象设置服务专用的字面量环境变量。
 - 配置文件旁的 `.env.served` 只作为旧版 dotenv 回退输入；新模板不会创建它。
 - 项目 `.env` 与 served 无关，served 永远不会读取它。
 - 工作目录优先级为启用时的 `--workdir` 覆盖值、配置 `cwd`、配置文件所在目录。
   CLI 相对路径相对于调用目录，配置相对 `cwd` 相对于配置文件所在目录。
-- 管理器通过用户拥有的启用记录发现已启用服务。管理器通过私有 runtime 描述接管仍有
-  活动 runner 的临时服务。
-- 服务名在所有受管服务中必须全局唯一。已启用服务的名称来自 JSON。临时服务的名称来自
+- 管理器通过用户拥有的启用记录发现已启用服务。管理器通过持久 run 记录恢复服务或接管活动 runner。
+- 服务名在所有受管服务中必须全局唯一。已启用服务的名称来自 JSON。run 服务的名称来自
   `--name` 或清洗后的最终工作目录名。
 - 已启用服务需要改名时，先 `disable`，再修改名称，最后重新 `enable`。
 
@@ -123,7 +122,7 @@ manager 在恢复、enable 和 restart 时把自动发现的 warning 写入 trac
 
 ### `served`
 
-打开全局服务管理 TUI。它列出管理器已知的所有受管服务及其 `enabled` 或 `temporary` 类型。
+打开全局服务管理 TUI。它列出管理器已知的所有受管服务及其 `enabled` 或 `run` 类型。
 与当前工作目录无关。
 
 空列表提示使用 `served enable` 或 `served run` 注册服务。
@@ -157,7 +156,7 @@ manager 在恢复、enable 和 restart 时把自动发现的 warning 写入 trac
 
 ### `served run [options] -- <program> [args...]`
 
-在当前目录或 `--workdir DIR` 指定的目录创建临时服务。manager 必须已经运行。该命令不得读取或创建 `.served.json5`、
+在当前目录或 `--workdir DIR` 指定的目录创建 run 服务。manager 必须已经运行。该命令不得读取或创建 `.served.json5`、
 `.served.json` 和 `.env.served`，也不得创建启用链接。创建成功后，该命令必须只输出服务名
 并返回。
 
@@ -170,23 +169,23 @@ manager 在恢复、enable 和 restart 时把自动发现的 warning 写入 trac
 - `--` 后必须至少有一个 UTF-8 参数。参数必须保持原始边界。served 不得解释 shell
   元字符。需要 shell 语法时，用户必须显式传入 `sh -c`。
 
-临时服务必须支持 list、TUI、start、stop、attach、history、restart 和 disable。进程退出后，服务必须
+run 服务必须支持 list、TUI、start、stop、attach、history、restart 和 disable。进程退出后，服务必须
 保持 `stopped` 状态。manager handoff、relinquish 或异常崩溃后，新 manager 必须接管仍在
-运行的 runner。显式 shutdown、正常停止 manager 或主机重启后不得恢复临时服务。
+运行的 runner。显式 shutdown 和正常停止 manager 保留定义；下次启动或主机重启后恢复 run 服务。
 
 ### `served disable [name]`
 
 停止并移除服务。不带名称时使用当前工作目录。提供名称后，可以从任意目录控制受管服务。
 start、stop、restart、disable、attach、history 均不接受 `-f`。目录匹配多个服务时拒绝操作，按名称排序
 列出候选并要求指定名称；不能任意选择一个服务。
-已启用服务同时删除启用记录。临时服务删除私有 runtime 描述。两种服务都保留持久化日志。
+已启用服务同时删除启用记录。run 服务删除持久托管记录。两种服务都保留持久化日志。
 
 ### `served start [name]` 与 `served stop [name]`
 
 两个命令只操作已受管服务，沿用按名称或当前目录定位的规则。start 不自动注册服务。
 start 对运行、启动和自动重启退避中的服务成功返回，不更换进程、不读取配置。
 对停止或失败的已启用服务，start 重新加载注册配置并校验；失败保持停止。
-临时服务使用创建时的命令、选项和环境。stop 对停止服务成功返回。
+run 服务使用创建时的命令、选项和环境。stop 对停止服务成功返回。
 
 stop 终止进程组并取消自动重启，保留注册、runner、身份元数据和全部现存日志历史。
 停止成功后 PID 为空、状态为 stopped；attach 断开，history 仍可用。
@@ -197,9 +196,9 @@ stop 终止进程组并取消自动重启，保留注册、runner、身份元数
 即使磁盘配置已编辑为无效内容也不得启动进程；显式 start/restart 才读取新配置。
 manager 存活期间重建故障 runner 保留已知停止意图。manager 和 runner 同时丢失时不承诺
 恢复该意图。不引入永久停止文件。正常 shutdown 后完整启动 manager 或主机重启时，
-已启用服务自动启动，临时服务不恢复。
+已启用服务和 run 服务都会自动启动。
 
-公共 manager 协议使用 v9。runner 协议保持 additive v1，通过可缺省能力字段区分支持情况。
+公共 manager 协议使用 v10。runner 协议保持 additive v1，通过可缺省能力字段区分支持情况。
 旧 runner 不支持新操作时返回迁移提示，不能自动替换或退回完整关闭请求。
 需 disable 后按原来源与工作目录覆盖重新 enable，或按原命令、选项和环境重新 run；
 提示该操作丢失内存历史、保留磁盘日志。
@@ -211,7 +210,7 @@ manager 存活期间重建故障 runner 保留已知停止意图。manager 和 r
 重启已启用服务时，manager 必须按选择规则重新读取当前配置和旧版环境回退文件。manager
 必须先完成校验，再停止并启动服务。没有独立的 `reload` 操作。
 
-重启临时服务时，manager 必须使用创建时保存的命令、选项和环境。需要修改这些值时，用户
+重启 run 服务时，manager 必须使用创建时保存的命令、选项和环境。需要修改这些值时，用户
 必须先 disable，再重新执行 `served run`。
 
 校验必须在停止旧进程前完成。JSON5、`env` 或旧版 `.env.served` 无效时，保持当前运行的
@@ -245,7 +244,7 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 
 ### `served list`
 
-列出当前由管理器管理的服务。每个服务必须显示 `kind=enabled` 或 `kind=temporary`。
+列出当前由管理器管理的服务。每个服务必须显示 `kind=enabled` 或 `kind=run`。
 
 ## 进程生命周期
 
@@ -491,12 +490,12 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
 36. 安装器把当前用户的旧固定 system service 自动迁移到模板实例；可用时保留 runner，
     失败时明确报告受控停止。
 37. 卸载一个用户实例时，如果其他实例仍 enabled 或 active，共享二进制和模板保持不变。
-38. `served run -- <program> [args...]` 在没有有效配置文件时创建临时服务。该命令完整保留
+38. `served run -- <program> [args...]` 在没有有效配置文件时创建 run 服务。该命令完整保留
     argv 边界，继承 manager 环境，并应用 CLI `--env` 覆盖。
-39. 临时服务出现在 list 和 TUI 中。它支持 attach、history、restart 和按名称或目录
+39. run 服务出现在 list 和 TUI 中。它支持 attach、history、restart 和按名称或目录
     disable。名称冲突不得改变已有服务；同一工作目录允许多个服务。
-40. manager 异常退出后，新 manager 接管临时服务的 runner，且服务 PID 不变。正常
-    shutdown 停止服务并删除私有 runtime 描述。主机重启后不得自动启动该服务。
+40. manager 异常退出后，新 manager 接管 run 服务的 runner，且服务 PID 不变。正常
+    shutdown 停止服务并保留持久定义。主机重启后必须自动启动该服务。
 41. macOS plist 通过 `plutil` 校验，以普通安装用户和规范 HOME 运行，并设置 KeepAlive、
     退出超时、私有 umask 与 `AbandonProcessGroup`。
 42. macOS 覆盖升级 handoff 所有活动 LaunchDaemon；服务 PID 不变，未加载实例保持未加载，
@@ -510,15 +509,15 @@ attach-unavailable 响应。交互式 CLI attach 会警告，并在当前记录�
     目录运行，`.env.served` 从配置旁读取。显式文件缺失或无效时不得回退。
 47. 普通目录链接和新启用记录均能恢复；自定义来源与覆盖值在 restart、崩溃接管、handoff
     和正常启动后保留。配置未变化时接管保持 PID。无效重启不得停止旧进程。
-48. enabled 与 temporary 服务可共用工作目录。按目录操作遇到多个候选时拒绝执行并列出
+48. enabled 与 run 服务可共用工作目录。按目录操作遇到多个候选时拒绝执行并列出
     名称；按名称操作只影响指定服务。
 49. `enable --workdir` 未传 `-f` 时从指定目录发现配置；`run --workdir` 的默认名称取最终
-    工作目录名，仍忽略项目配置。manager 协议为 v9，runner wire 保持 v1。
+    工作目录名，仍忽略项目配置。manager 协议为 v10，runner wire 保持 v1。
 
 50. PTY 和 pipe 服务支持 start/stop；重复操作成功，运行中 start 不读取配置，停止后 start
     校验新配置，失败保持停止。保留注册、runner、历史，stop 断开 attach，restart 可解除停止。
-51. 手动停止跨 handoff、崩溃接管和 relinquish 保留，包括配置已无效和临时服务；完整
-    shutdown 后启动只恢复 enabled 服务。活跃 manager 重建停止 runner 时不得启动进程。
+51. 手动停止跨 handoff、崩溃接管和 relinquish 保留，包括配置已无效和 run 服务；完整
+    shutdown 后启动恢复 enabled 和 run 服务。活跃 manager 重建停止 runner 时不得启动进程。
 52. stop 取消自动重启退避；快速退出、连续 stop/start 和输出背压不得导致通道错误或旧
     事件污染。停止失败保留控制能力并返回错误。
 53. 新命令遇到旧 runner 返回迁移提示，保留 PID、注册和历史，不发送旧 Stop 等变更请求。

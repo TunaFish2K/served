@@ -835,7 +835,7 @@ fn state_name(state: &ServiceState) -> &'static str {
 fn kind_name(kind: &ServiceKind) -> &'static str {
     match kind {
         ServiceKind::Enabled => "enabled",
-        ServiceKind::Temporary => "temporary",
+        ServiceKind::Run => "run",
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: served
-description: Configure, run, inspect, restart, and troubleshoot personal services with the served CLI on Linux or macOS. Use when the user wants to manage a service with served, including external configuration files, shared working directories, temporary runs, and service logs.
+description: Configure, run, inspect, restart, and troubleshoot personal services with the served CLI on Linux or macOS. Use when the user wants to manage a service with served, including external configuration files, shared working directories, configuration-free runs, and service logs.
 ---
 
 # Manage services with served
@@ -12,7 +12,7 @@ Read [the command reference](references/cli.md) for options, lifecycle behavior,
 ## Choose the service definition
 
 - For a service that should start when the manager starts, prepare a JSON5 configuration and use `served enable`. Its `command` is a shell string executed with `/bin/sh -c`.
-- For a temporary managed process, use `served run [options] -- program args...`. It ignores project configuration and dotenv files, preserves argument boundaries, and does not survive normal shutdown or a host reboot. Use explicit `sh -c` only when shell syntax is intended.
+- For a persistent managed process, use `served run [options] -- program args...`. It ignores project configuration and dotenv files, preserves argument boundaries, and survives normal shutdown and a host reboot. Definitions persist until `disable`; `stop` only stops the current run. The restart policy controls program exits, not startup recovery. Use explicit `sh -c` only when shell syntax is intended.
 - Choose a unique name from the current service list. Multiple services can share a workdir; use names for subsequent operations rather than relying on the current directory.
 
 ## Configure and apply

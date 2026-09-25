@@ -8,13 +8,13 @@ pub use crate::ipc::{
     Frame, HandoffStream, MAX_FRAME_LENGTH, framed, into_handoff, receive_json, send_json,
 };
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceKind {
     Enabled,
-    Temporary,
+    Run,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +166,10 @@ pub enum Response {
 }
 
 pub async fn connect(socket_path: &std::path::Path) -> Result<Frame> {
+    connect_version(socket_path, PROTOCOL_VERSION).await
+}
+
+async fn connect_version(socket_path: &std::path::Path, requested_version: u32) -> Result<Frame> {
     let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connect to manager socket {}", socket_path.display()))?;
@@ -173,12 +177,12 @@ pub async fn connect(socket_path: &std::path::Path) -> Result<Frame> {
     send_json(
         &mut frame,
         &Request::Hello {
-            version: PROTOCOL_VERSION,
+            version: requested_version,
         },
     )
     .await?;
     match receive_json::<Response>(&mut frame).await? {
-        Response::Hello { version } if version == PROTOCOL_VERSION => Ok(frame),
+        Response::Hello { version } if version == requested_version => Ok(frame),
         Response::Hello { version } => bail!("manager protocol version {version} is unsupported"),
         Response::Error { message } => bail!("manager handshake failed: {message}"),
         _ => bail!("invalid manager handshake response"),
@@ -195,6 +199,32 @@ pub async fn request(socket_path: &std::path::Path, request: Request) -> Result<
     Ok(response)
 }
 
+/// Only manager transfer requests retain their v9 meaning. Never downgrade Run or List.
+pub(crate) async fn transfer_request(
+    socket_path: &std::path::Path,
+    request: Request,
+) -> Result<Response> {
+    if !matches!(
+        request,
+        Request::ManagerHandoff { .. } | Request::ManagerRelinquish
+    ) {
+        bail!("only manager transfer requests support legacy negotiation");
+    }
+    let mut frame = match connect(socket_path).await {
+        Ok(frame) => frame,
+        Err(current_error) => connect_version(socket_path, 9)
+            .await
+            .with_context(|| format!("manager transfer negotiation failed: {current_error}"))?,
+    };
+    // Retry only the handshake; a transfer request is sent at most once.
+    send_json(&mut frame, &request).await?;
+    let response = receive_json::<Response>(&mut frame).await?;
+    if let Response::Error { message } = &response {
+        bail!("{message}");
+    }
+    Ok(response)
+}
+
 pub fn io_error(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -203,6 +233,58 @@ pub fn io_error(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn manager_transfer_negotiates_v9_without_downgrading_service_operations() {
+        for transfer in [
+            Request::ManagerHandoff {
+                executable: "/new/served".to_owned(),
+            },
+            Request::ManagerRelinquish,
+        ] {
+            let root = tempfile::Builder::new()
+                .prefix("served-v9-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let path = root.path().join("manager.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let expected = serde_json::to_value(&transfer).unwrap();
+            let server = tokio::spawn(async move {
+                for requested in [PROTOCOL_VERSION, 9, PROTOCOL_VERSION] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut frame = framed(stream);
+                    assert!(
+                        matches!(receive_json::<Request>(&mut frame).await.unwrap(), Request::Hello { version } if version == requested)
+                    );
+                    if requested != 9 {
+                        send_json(
+                            &mut frame,
+                            &Response::Error {
+                                message: format!("unsupported protocol version {requested}"),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                        assert!(receive_json::<Request>(&mut frame).await.is_err());
+                        continue;
+                    }
+                    send_json(&mut frame, &Response::Hello { version: 9 })
+                        .await
+                        .unwrap();
+                    let actual = receive_json::<Request>(&mut frame).await.unwrap();
+                    assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+                    send_json(&mut frame, &Response::Ok).await.unwrap();
+                }
+            });
+            assert!(matches!(
+                transfer_request(&path, transfer).await.unwrap(),
+                Response::Ok
+            ));
+            assert!(request(&path, Request::List).await.is_err());
+            assert!(transfer_request(&path, Request::List).await.is_err());
+            server.await.unwrap();
+        }
+    }
 
     #[test]
     fn enable_v8_preserves_independent_file_and_workdir() {
@@ -395,7 +477,7 @@ mod tests {
             name: "scratch".to_owned(),
             directory: "/srv/scratch".to_owned(),
             state: ServiceState::Running,
-            kind: ServiceKind::Temporary,
+            kind: ServiceKind::Run,
             tty: true,
             restart: "never".to_owned(),
             persist_logs: false,
@@ -408,7 +490,7 @@ mod tests {
             services: vec![service],
         })
         .expect("serialize services");
-        assert_eq!(value["Services"]["services"][0]["kind"], "temporary");
+        assert_eq!(value["Services"]["services"][0]["kind"], "run");
     }
 
     #[tokio::test]

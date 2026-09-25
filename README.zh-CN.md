@@ -82,7 +82,7 @@ manager 启动后：
 2. 运行 `served edit` 创建并编辑 `.served.json5`。
 3. 运行 `served enable` 启用并启动项目服务。
 
-如需运行不使用项目配置的临时服务，请使用 `served run`：
+如需运行不使用项目配置的 run 服务，请使用 `served run`：
 
 ```bash
 served run -- python app.py
@@ -164,7 +164,7 @@ served edit -e <cmd>   指定编辑器命令，优先于 $EDITOR
 served edit --path     创建缺失模板后只打印选中的配置路径
 served enable          启用当前目录并立即运行
 served run [选项] -- <程序> [参数...]
-                       不使用项目配置创建临时服务
+                       不使用项目配置创建 run 服务
 served disable [name]  禁用当前服务，或按名称禁用
 served start [name]    启动已受管的停止服务
 served stop [name]     停止服务，保留注册、runner 和历史
@@ -184,7 +184,7 @@ served history [name] --json
 served list            列出 manager 管理的服务
 ```
 
-`served run` 在当前目录或 `--workdir DIR` 指定的目录创建临时服务。manager 必须已经运行。该命令不读取或创建
+`served run` 在当前目录或 `--workdir DIR` 指定的目录创建 run 服务。manager 必须已经运行。该命令不读取或创建
 `.served.json5`、已弃用的 `.served.json` 和 `.env.served`，也不创建启用链接。创建成功后，
 该命令输出服务名并退出。
 
@@ -209,13 +209,19 @@ served run --name api --no-tty --restart on-failure \
 `--` 后的参数保持原始边界。served 不解释这些参数中的 shell 语法。命令需要管道、重定向
 或变量展开时，请显式使用 `sh -c`。
 
-TUI 和 `served list` 都会显示临时服务。临时服务也支持 start、stop、attach、history、restart 和
+TUI 和 `served list` 都会显示 run 服务。run 服务也支持 start、stop、attach、history、restart 和
 disable。程序退出后，服务保持 `stopped` 状态。此时仍可查看历史或重启服务。
-`served disable` 删除私有 runtime 描述。它不会删除持久化日志。
+`served disable` 删除持久托管记录。它不会删除持久化日志。
 
-manager handoff、relinquish 和异常崩溃都会保留 runner。新的 manager 可以接管仍在运行的
-临时服务。manager 使用私有 runtime 描述验证 runner。shutdown 和正常停止 manager 会删除
-该描述。主机重启后，manager 不会恢复该服务。
+run 服务的命令、规范工作目录、选项和完整环境快照保存在
+`$HOME/.config/served/run/<name>.json`，目录权限为 `0700`，文件权限为 `0600`。
+shutdown 保留记录；下次 manager 启动或主机重启后恢复服务。`--restart never` 只控制业务
+进程退出后的行为，不阻止冷启动恢复。`stop` 停止本次运行，`disable` 才取消后续恢复。
+目录缺失或启动失败时保留记录并报告错误，可在修复后重新启动 manager 恢复。
+
+manager handoff、relinquish 和异常崩溃都会保留 runner。新 manager 接管存活 runner，
+不重启业务进程。升级时，仍有存活且匹配 runner 的旧临时记录自动迁移为持久托管；没有
+存活 runner 的旧记录不会恢复。迁移写入失败时保留旧记录和原进程，报告错误并在下次启动重试。
 
 安装的 systemd 服务使用 `systemctl reload "served@$USER.service"` 做 manager handoff。
 `systemctl restart` 和 `systemctl stop` 是该账户的明确生命周期操作，会停止其 runner。
@@ -279,16 +285,16 @@ runner 和日志历史。attach 会断开，history 仍可读取。重复 stop �
 `served start [name]` 启动已受管的停止服务，不会注册未知服务。正在运行、启动或自动重启
 退避中的服务保持原样，此时 start 不读取修改后的配置。
 
-已启用服务停止后 start 会重新加载并校验原配置来源；校验失败则保持停止。临时服务使用
+已启用服务停止后 start 会重新加载并校验原配置来源；校验失败则保持停止。run 服务使用
 创建时保存的命令、选项和环境。restart 也能启动停止服务。下一次启动创建新的运行历史。
 
 手动停止跨 manager handoff、relinquish 和崩溃接管保留，前提是 runner 仍存活。
-正常 shutdown 后重新启动 manager 或主机重启时，已启用服务自动启动，临时服务不恢复。
+正常 shutdown 后重新启动 manager 或主机重启时，已启用服务和 run 服务都会自动启动。
 manager 存活时重建故障 runner 也会保留已知的手动停止意图；如果两者都丢失，则没有永久
 停止标记可恢复。
 
 升级时保留的旧 runner 可能不支持 start/stop。这两个命令会报错并保持服务不变。
-需先 disable，再使用原配置来源和工作目录覆盖重新 enable；临时服务则使用原命令、选项
+需先 disable，再使用原配置来源和工作目录覆盖重新 enable；run 服务则使用原命令、选项
 和环境重新 run。重建会丢失内存历史，持久化日志保留。
 
 不提供独立的 `reload` 命令。修改配置后使用 `restart`；
@@ -314,7 +320,7 @@ served restart api
 工作目录优先级为：启用时保存的 `--workdir` 覆盖值、配置中的可选 `cwd`、配置文件所在目录。
 CLI 相对路径以调用目录为基准，配置中的相对 `cwd` 以配置文件所在目录为基准。
 `enable --workdir DIR` 未传 `-f` 时在 `DIR` 搜索默认配置；两个选项都省略时在调用目录搜索。
-旧版 `.env.served` 始终从配置文件旁读取，临时服务仍不读取它。
+旧版 `.env.served` 始终从配置文件旁读取，run 服务仍不读取它。
 
 工作目录必须已存在。restart 按原配置来源重新加载并验证，验证失败时保留旧进程。
 命令行目录覆盖值在 restart 和 manager 恢复后保留；更换或清除它需要 disable 后重新 enable，
@@ -323,7 +329,7 @@ CLI 相对路径以调用目录为基准，配置中的相对 `cwd` 以配置文
 
 普通目录启用继续使用上面的目录软链接；显式使用 `-f` 或 `--workdir` 时，同一注册表路径
 保存权限为 `0600` 的版本化 JSON 记录，包含配置来源和目录覆盖值。旧链接无需迁移。
-客户端与 manager 需同步支持协议 v9；runner v1 协议保持兼容，可接管已有 runner。
+客户端与 manager 需同步支持协议 v10；runner v1 协议保持兼容，可接管已有 runner。
 
 ## 默认服务配置
 
@@ -399,7 +405,7 @@ manager 断连时保留旧列表并标记 stale，重连前禁止服务操作。
 Ctrl+J 作为兼容后备。长文本按窗口宽度自动折行，不改变实际内容；上下键按显示行移动，
 PgUp／PgDn 按视口高度移动。内容超出窗口时，右侧显示滚动条。
 
-Actions 的 Edit 打开所选服务实际注册的配置文件，退出后返回原菜单；临时服务保留灰色不可用入口。
+Actions 的 Edit 打开所选服务实际注册的配置文件，退出后返回原菜单；run 服务保留灰色不可用入口。
 新建配置模板默认 `restart: "on-failure"`、`persist_logs: true`；已有配置、省略字段的解析默认值及 `served run` 默认值不变。
 
 环境变量名称和值同屏显示：名称中按下进入值，值的首个显示行按上返回名称，名称中 Enter 也可进入值。
@@ -463,8 +469,8 @@ musl 或 Windows 目标。
 - manager 以普通用户身份运行，socket 设置为用户可读写。
 - 进程守护程序以安装用户身份启动前台 manager；systemd unit 和 macOS LaunchDaemon 是
   受支持的平台集成。每个服务由独立 runner 持有，manager 通过私有 runner socket 接管它。
-- manager 异常重启后会扫描启用注册表和临时服务的 runtime 描述。manager 只接管仍在运行的
-  runner，并保留服务 PID。
+- manager 异常重启后会扫描启用注册表和 run 服务的持久记录。manager 接管存活
+  runner 并保留服务 PID；没有 runner 时按持久定义重新启动。
 - runner 位于 `$HOME/.local/state/served/runtime/runners/<name>/`，持有服务进程、PTY、
   日志缓存、自动重启状态和 crash-loop 窗口。manager 异常退出不会停止它们。
 - `served shutdown` 通过 graceful shutdown 停止所有 runner；`served disable` 停止对应

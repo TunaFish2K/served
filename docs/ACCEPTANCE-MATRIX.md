@@ -46,7 +46,7 @@
 | 36 | Linux release smoke | `scripts/install.sh` 的旧 fixed unit 迁移路径 |
 | 37 | Linux release smoke | `scripts/uninstall.sh` 的共享文件保留路径 |
 | 38 | `cargo test` | CLI run parser、argv quoting 和 `manager_smoke::run_creates_a_full_temporary_service_without_reading_config_files` |
-| 39 | `cargo test` | 临时服务的 list/attach/history/restart/disable 与冲突集成路径 |
+| 39 | `cargo test` | run 服务的 list/attach/history/restart/disable 与冲突集成路径 |
 | 40 | `cargo test` | `manager_smoke::manager_crash_preserves_a_temporary_service_for_adoption` |
 | 41 | `make launchd-check`、macOS release smoke | `plutil`、身份、HOME 和生命周期字段检查 |
 | 42 | macOS release smoke | 活动 LaunchDaemon handoff、PID 保留、未加载状态和失败回滚 |
@@ -58,7 +58,7 @@
 | 48 | `cargo test` | `manager_smoke::custom_sources_and_shared_workdirs_survive_recovery` |
 | 49 | `cargo test` | `manager_smoke::workdir_discovery_and_legacy_sources_remain_distinct`、runner v1 wire tests |
 | 50 | `cargo test` | `manager_smoke::start_stop_preserve_registration_history_and_reload_only_when_stopped` |
-| 51 | `cargo test` | `manager_smoke::stopped_services_survive_adoption_but_only_enabled_services_return_after_shutdown`、`stopped_runner_replacement_does_not_launch_a_process`、`handoff_reaps_stopped_runners_and_preserves_manual_stop` |
+| 51 | `cargo test` | `manager_smoke::stopped_services_survive_adoption_and_all_services_return_after_shutdown`、`stopped_runner_replacement_does_not_launch_a_process`、`handoff_reaps_stopped_runners_and_preserves_manual_stop` |
 | 52 | `cargo test` | `manager_smoke::stop_cancels_backoff_and_start_stop_handle_quick_exits`、runner 停止失败与有界事件队列测试 |
 | 53 | `cargo test` | `manager::tests::old_runner_rejects_start_stop_without_receiving_a_mutating_request`、runner v1 能力缺省测试 |
 | 54 | `cargo test` | CLI start/stop parser、共享目录歧义测试、`tui::tests::pending_operations_allow_navigation_help_and_quit_but_no_new_action` |
@@ -88,7 +88,7 @@
 - Linux stat 解析测试区分僵尸、死亡与暂停、不可中断睡眠；缺失 PID 和启动时间不匹配仍拒绝。
 - `manager::reaper` 测试验证只回收启动时捕获的子进程，不抢走 Tokio 新子进程的退出状态，
   并排除非子进程及不匹配的身份。
-- `manager_smoke::handoff_reaps_stopped_runners_and_preserves_manual_stop` 覆盖 enabled/temporary：
+- `manager_smoke::handoff_reaps_stopped_runners_and_preserves_manual_stop` 覆盖 enabled/run：
   stop → handoff → 杀死 runner → 重建且保持停止 → start，以及第二次 handoff 后的 disable。
   测试要求旧 PID 被回收，不仅是业务进程已停止。
 
@@ -108,3 +108,15 @@ start/stop、默认取消、attach 返回、历史阅读、禁用确认与退出
 - `tests/install_online.sh` 覆盖四个平台、两类资产、升级类型保留、显式切换、校验失败及缺失资产不回退。
 - `tests/linux_variant_install.py` 在临时目录运行真实安装／回滚函数，仅替换 systemd 调用，验证两种构建接管时服务 PID 不变及失败回滚。
 - `tests/macos_install_smoke.sh` 在 macOS CI 中验证两种包及双向切换；本机 Linux 不代替 macOS 验收。
+
+## run 默认持久托管
+
+- `run_cold_start_preserves_definition_and_disable_prevents_recovery` 覆盖 PTY/pipe、manager 和
+  runner 同时丢失、restart=never、参数与环境保留、持久日志及 disable 后不恢复。
+- `stopped_services_survive_adoption_and_all_services_return_after_shutdown` 覆盖手动停止的
+  handoff/崩溃接管，以及正常 shutdown 后 enabled/run 均恢复。
+- `legacy_run_migration_preserves_pid_and_retries_failed_publication` 覆盖迁移失败保留进程、
+  重试、发布后中断的重复迁移，以及失效旧记录不复活。
+- `run_missing_directory_retains_registration_and_reserves_name` 覆盖目录缺失时保留定义、
+  阻止同名 run/enable，以及目录恢复后的再次启动。
+- manager 单元测试覆盖持久记录权限、幂等发布和冲突拒绝；JSON/CLI 测试使用 schema v2。

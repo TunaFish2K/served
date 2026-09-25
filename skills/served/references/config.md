@@ -110,7 +110,7 @@ Environment values are layered in this order, with later values winning:
 
 The project's .env is never read by served.
 A separate workdir does not move the .env.served lookup location.
-Temporary services ignore both configuration and dotenv files and apply only CLI --env overrides.
+Run services ignore both configuration and dotenv files and apply only CLI --env overrides.
 
 # REGISTRATION AND RELOAD
 
@@ -140,6 +140,13 @@ The manager validates the new definition before stopping the old process.
 > Read an ordinary symlink to locate its configuration directory; a regular JSON record stores its source.
 > Use lifecycle commands to manage registrations.
 
+*~/.config/served/run/*
+
+> Persistent command-defined registrations, indexed by service name with a .json suffix.
+> Records contain version 1 and a launch spec with the original environment snapshot.
+> Directory permissions are 0700 and file permissions are 0600.
+> Shutdown preserves these records; disable removes them.
+
 *~/.local/state/served/logs/*
 
 > Persistent logs by service name, including latest.log and rotated archives.
@@ -147,7 +154,7 @@ The manager validates the new definition before stopping the old process.
 
 *~/.local/state/served/runtime/*
 
-> Private manager and runner sockets, metadata, and temporary service definitions.
+> Private manager and runner sockets, metadata, and legacy temporary definitions awaiting migration.
 > These are runtime implementation files, not project configuration.
 
 # EXAMPLES
@@ -168,7 +175,7 @@ The manager validates the new definition before stopping the old process.
 # COMPATIBILITY
 
 Independent configuration paths and working directories require served 0.9.0 or later.
-Client and manager must agree on the manager protocol version (v9 for start/stop).
+Client and manager must agree on the manager protocol version (v10 for persistent run services).
 Runner protocol v1 remains compatible with existing runners.
 Use the official installation upgrade path when updating an installed manager.
 

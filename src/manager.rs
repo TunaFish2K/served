@@ -29,11 +29,11 @@ use crate::{
 
 const RUNNER_START_ATTEMPTS: usize = 100;
 const RUNNER_START_DELAY: Duration = Duration::from_millis(20);
-const TRANSIENT_DEFINITION_VERSION: u32 = 1;
+const RUN_DEFINITION_VERSION: u32 = 1;
 pub const SUPERVISOR_RELINQUISH_EXIT_CODE: i32 = 75;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TransientDefinition {
+struct RunDefinition {
     version: u32,
     spec: LaunchSpec,
 }
@@ -174,6 +174,7 @@ impl ManagerState {
 
     async fn restore_services(&mut self) {
         self.restore_enabled().await;
+        self.restore_runs().await;
         self.restore_transients().await;
         self.cleanup_orphan_runners().await;
     }
@@ -241,6 +242,72 @@ impl ManagerState {
         definition.load(&self.base_environment)
     }
 
+    async fn restore_runs(&mut self) {
+        let entries = match fs::read_dir(self.paths.run_registry_dir()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                warn!(%error, "cannot scan run service definitions");
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            if validate_target_name(name).is_err() {
+                continue;
+            }
+            if fs::symlink_metadata(self.paths.registry_dir().join(name)).is_ok() {
+                warn!(service = %name, "enabled registration conflicts with run definition; retaining both records");
+                continue;
+            }
+            let loaded = read_run_definition(&path).and_then(|definition| {
+                let service = definition
+                    .spec
+                    .into_loaded()
+                    .map_err(|error| error.to_string())?;
+                service
+                    .config
+                    .validate()
+                    .map_err(|error| error.to_string())?;
+                if service.config.name != name || !service.directory.is_absolute() {
+                    return Err("inconsistent run definition".to_owned());
+                }
+                Ok(service)
+            });
+            match loaded {
+                Ok(service) => {
+                    let socket = self.paths.runner_socket(name);
+                    if let Ok(status) = self.fetch_runner_status(&socket, name).await {
+                        if status.spec.as_deref() == Some(&LaunchSpec::from_loaded(&service)) {
+                            let _ = self.track_service(service, ServiceKind::Run, socket, status);
+                            continue;
+                        }
+                        if status.spec.is_some() {
+                            warn!(service = %name, "live runner does not match run definition; retaining it unchanged");
+                            continue;
+                        }
+                    }
+                    if !service.directory.is_dir() {
+                        warn!(service = %name, directory = %service.directory.display(), "run working directory is unavailable; retaining definition");
+                        continue;
+                    }
+                    if let Err(error) = self.ensure_service(service, ServiceKind::Run).await {
+                        warn!(service = %name, %error, "cannot restore run service; retaining definition");
+                    }
+                }
+                Err(error) => {
+                    warn!(service = %name, %error, "cannot load run service; retaining definition")
+                }
+            }
+        }
+    }
+
     async fn restore_transients(&mut self) {
         let entries = match fs::read_dir(self.paths.runners_dir()) {
             Ok(entries) => entries,
@@ -258,19 +325,28 @@ impl ManagerState {
             if !path.is_file() {
                 continue;
             }
-            if self.services.contains_key(&name) {
-                warn!(service = %name, "enabled service overrides conflicting transient definition");
-                remove_transient_files(&self.paths, &name);
-                continue;
-            }
-            let definition = match read_transient_definition(&path) {
+            let definition = match read_run_definition(&path) {
                 Ok(definition) => definition,
                 Err(error) => {
-                    warn!(service = %name, %error, "discarding invalid transient definition");
-                    self.cleanup_transient_runner(&name).await;
+                    warn!(service = %name, %error, "invalid legacy transient definition; retaining it for inspection");
                     continue;
                 }
             };
+            if fs::symlink_metadata(self.paths.run_definition(&name)).is_ok() {
+                match read_run_definition(&self.paths.run_definition(&name)) {
+                    Ok(existing) if existing.spec == definition.spec => {
+                        remove_transient_files(&self.paths, &name)
+                    }
+                    _ => {
+                        warn!(service = %name, "legacy definition conflicts with persistent run record; retaining both")
+                    }
+                }
+                continue;
+            }
+            if fs::symlink_metadata(self.paths.registry_dir().join(&name)).is_ok() {
+                warn!(service = %name, "legacy definition conflicts with enabled registration; retaining it");
+                continue;
+            }
             let service = match definition.spec.clone().into_loaded() {
                 Ok(service) => service,
                 Err(error) => {
@@ -281,7 +357,7 @@ impl ManagerState {
             };
             if service.config.name != name
                 || service.config.validate().is_err()
-                || fs::canonicalize(&service.directory).ok().as_ref() != Some(&service.directory)
+                || !service.directory.is_absolute()
             {
                 warn!(service = %name, "discarding inconsistent transient definition");
                 self.cleanup_transient_runner(&name).await;
@@ -297,8 +373,21 @@ impl ManagerState {
                 .await
             {
                 Ok(status) if status.spec.as_deref() == Some(&definition.spec) => {
-                    if let Err(error) = self.ensure_service(service, ServiceKind::Temporary).await {
-                        warn!(service = %name, %error, "cannot restore transient service");
+                    let migrated = write_run_definition(&self.paths, &name, &definition.spec);
+                    match &migrated {
+                        Ok(()) => remove_transient_files(&self.paths, &name),
+                        Err(error) => {
+                            warn!(service = %name, %error, "cannot persist legacy run service; retaining legacy definition")
+                        }
+                    }
+                    // Adoption must not restart a live service, including when migration failed.
+                    if let Err(error) = self.track_service(
+                        service,
+                        ServiceKind::Run,
+                        self.paths.runner_socket(&name),
+                        status,
+                    ) {
+                        warn!(service = %name, %error, "cannot adopt legacy run service");
                     }
                 }
                 Ok(_) => {
@@ -469,7 +558,7 @@ impl ManagerState {
                 )
                 .await
             }
-            Request::Run { spec } => self.run_temporary(spec).await,
+            Request::Run { spec } => self.run_service(spec).await,
             Request::Disable { target } => self.disable(target).await,
             Request::Restart { target } => self.restart(target, false).await,
             Request::Start { target } => self.restart(target, true).await,
@@ -616,10 +705,12 @@ impl ManagerState {
                 service.config.name
             ));
         }
-        if self
-            .paths
-            .transient_definition(&service.config.name)
-            .exists()
+        if self.services.contains_key(&service.config.name)
+            || self
+                .paths
+                .transient_definition(&service.config.name)
+                .exists()
+            || fs::symlink_metadata(self.paths.run_definition(&service.config.name)).is_ok()
         {
             return Err(format!(
                 "service name {:?} is already managed",
@@ -645,11 +736,11 @@ impl ManagerState {
         Ok(Response::Ok)
     }
 
-    async fn run_temporary(&mut self, spec: RunSpec) -> std::result::Result<Response, String> {
+    async fn run_service(&mut self, spec: RunSpec) -> std::result::Result<Response, String> {
         let restart = RestartPolicy::parse(&spec.restart)
             .ok_or_else(|| format!("invalid restart policy {:?}", spec.restart))?;
         if spec.argv.first().is_none_or(String::is_empty) {
-            return Err("temporary service program must not be empty".to_owned());
+            return Err("run service program must not be empty".to_owned());
         }
         let directory = PathBuf::from(&spec.directory);
         if !directory.exists() {
@@ -681,6 +772,7 @@ impl ManagerState {
         if self.services.contains_key(&config.name)
             || fs::symlink_metadata(self.paths.registry_dir().join(&config.name)).is_ok()
             || self.paths.transient_definition(&config.name).exists()
+            || fs::symlink_metadata(self.paths.run_definition(&config.name)).is_ok()
         {
             return Err(format!("service name {:?} is already managed", config.name));
         }
@@ -696,12 +788,14 @@ impl ManagerState {
         };
         let name = service.config.name.clone();
         let launch = LaunchSpec::from_loaded(&service);
-        write_transient_definition(&self.paths, &name, &launch)?;
-        if let Err(error) = self.ensure_service(service, ServiceKind::Temporary).await {
+        write_run_definition(&self.paths, &name, &launch)?;
+        if let Err(error) = self.ensure_service(service, ServiceKind::Run).await {
             self.cleanup_transient_runner(&name).await;
+            fs::remove_file(self.paths.run_definition(&name))
+                .map_err(|rollback| format!("{error}; cannot remove run definition: {rollback}"))?;
             return Err(error);
         }
-        info!(service = %name, "temporary service started");
+        info!(service = %name, "run service started");
         Ok(Response::Ok)
     }
 
@@ -718,7 +812,15 @@ impl ManagerState {
                 let link = self.paths.registry_dir().join(&name);
                 fs::remove_file(&link).map_err(|error| format!("remove enable link: {error}"))?;
             }
-            ServiceKind::Temporary => remove_transient_files(&self.paths, &name),
+            ServiceKind::Run => {
+                let path = self.paths.run_definition(&name);
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(format!("remove run definition: {error}")),
+                }
+                remove_transient_files(&self.paths, &name);
+            }
         }
         if let Some(service) = self.services.remove(&name) {
             service.watcher.abort();
@@ -785,7 +887,7 @@ impl ManagerState {
                 }
                 service
             }
-            ServiceKind::Temporary => self
+            ServiceKind::Run => self
                 .services
                 .get(&name)
                 .map(|service| service.definition.clone())
@@ -938,18 +1040,15 @@ impl ManagerState {
         let services: Vec<_> = self
             .services
             .iter()
-            .map(|(name, service)| (name.clone(), service.runner_socket.clone(), service.kind))
+            .map(|(name, service)| (name.clone(), service.runner_socket.clone()))
             .collect();
         let mut first_error = None;
-        for (name, socket, kind) in services {
+        for (name, socket) in services {
             if let Err(error) = stop_runner(&socket, &name).await {
                 warn!(service = %name, %error, "cannot stop runner during manager shutdown");
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
-            }
-            if kind == ServiceKind::Temporary {
-                remove_transient_files(&self.paths, &name);
             }
         }
         for service in self.services.drain().map(|(_, service)| service) {
@@ -1012,6 +1111,7 @@ impl ManagerState {
             if self.services.contains_key(&name)
                 || fs::symlink_metadata(self.paths.registry_dir().join(&name)).is_ok()
                 || self.paths.transient_definition(&name).is_file()
+                || self.paths.run_definition(&name).is_file()
             {
                 continue;
             }
@@ -1073,7 +1173,7 @@ fn require_start_stop(name: &str, kind: ServiceKind, status: &RunnerStatus) -> R
         ServiceKind::Enabled => {
             "enable it again with its original configuration source and working-directory override"
         }
-        ServiceKind::Temporary => "run it again with its original command, options and environment",
+        ServiceKind::Run => "run it again with its original command, options and environment",
     };
     Err(format!(
         "service {name:?} uses an older runner without start/stop support; disable it, then {recreate}. This stops the service and discards its in-memory history; persistent logs are retained"
@@ -1087,58 +1187,53 @@ fn shell_command(argv: &[String]) -> String {
         .join(" ")
 }
 
-fn write_transient_definition(
-    paths: &ServedPaths,
-    name: &str,
-    spec: &LaunchSpec,
-) -> Result<(), String> {
-    let directory = paths.runner_dir(name);
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("create transient runtime directory: {error}"))?;
+fn write_run_definition(paths: &ServedPaths, name: &str, spec: &LaunchSpec) -> Result<(), String> {
+    validate_target_name(name)?;
+    let directory = paths.run_registry_dir();
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .map_err(|error| format!("restrict transient runtime directory: {error}"))?;
-    let path = paths.transient_definition(name);
-    let temporary = path.with_extension("json.tmp");
-    let definition = TransientDefinition {
-        version: TRANSIENT_DEFINITION_VERSION,
-        spec: spec.clone(),
-    };
-    let bytes = serde_json::to_vec_pretty(&definition)
-        .map_err(|error| format!("encode transient definition: {error}"))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|error| {
-            format!(
-                "write transient definition {}: {error}",
-                temporary.display()
-            )
-        })?;
-    file.write_all(&bytes).map_err(|error| {
-        format!(
-            "write transient definition {}: {error}",
-            temporary.display()
-        )
-    })?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("restrict transient definition: {error}"))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("publish transient definition {}: {error}", path.display()))?;
-    Ok(())
+        .map_err(|error| error.to_string())?;
+    let path = paths.run_definition(name);
+    // A previous interrupted migration may already have published this exact definition.
+    if fs::symlink_metadata(&path).is_ok() {
+        let existing = read_run_definition(&path)?;
+        return if existing.spec == *spec {
+            Ok(())
+        } else {
+            Err("conflicting run definition".to_owned())
+        };
+    }
+    let temporary = directory.join(format!(".{name}.{}.tmp", rand::random::<u64>()));
+    let result = (|| -> Result<(), String> {
+        let definition = RunDefinition {
+            version: RUN_DEFINITION_VERSION,
+            spec: spec.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&definition).map_err(|error| error.to_string())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        fs::hard_link(&temporary, &path).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
 }
 
-fn read_transient_definition(path: &Path) -> Result<TransientDefinition, String> {
-    let definition: TransientDefinition = serde_json::from_slice(
+fn read_run_definition(path: &Path) -> Result<RunDefinition, String> {
+    let definition: RunDefinition = serde_json::from_slice(
         &fs::read(path)
-            .map_err(|error| format!("read transient definition {}: {error}", path.display()))?,
+            .map_err(|error| format!("read run definition {}: {error}", path.display()))?,
     )
-    .map_err(|error| format!("decode transient definition {}: {error}", path.display()))?;
-    if definition.version != TRANSIENT_DEFINITION_VERSION {
+    .map_err(|error| format!("decode run definition {}: {error}", path.display()))?;
+    if definition.version != RUN_DEFINITION_VERSION {
         return Err(format!(
-            "unsupported transient definition version {}",
+            "unsupported run definition version {}",
             definition.version
         ));
     }
@@ -1282,8 +1377,11 @@ pub async fn request_handoff(paths: ServedPaths) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("handoff executable path is not valid UTF-8"))?
         .to_owned();
     let previous_generation = fs::read_to_string(paths.manager_generation()).ok();
-    match crate::protocol::request(&paths.socket_path(), Request::ManagerHandoff { executable })
-        .await?
+    match crate::protocol::transfer_request(
+        &paths.socket_path(),
+        Request::ManagerHandoff { executable },
+    )
+    .await?
     {
         Response::Ok => {}
         response => bail!("unexpected manager handoff response: {response:?}"),
@@ -1310,7 +1408,9 @@ pub async fn request_handoff(paths: ServedPaths) -> Result<()> {
 }
 
 pub async fn request_relinquish(paths: ServedPaths) -> Result<()> {
-    match crate::protocol::request(&paths.socket_path(), Request::ManagerRelinquish).await? {
+    match crate::protocol::transfer_request(&paths.socket_path(), Request::ManagerRelinquish)
+        .await?
+    {
         Response::Ok => {}
         response => bail!("unexpected manager relinquish response: {response:?}"),
     }
@@ -1477,7 +1577,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_definition_round_trips_with_private_permissions() {
+    fn run_definition_is_private_idempotent_and_rejects_conflicting_records() {
         let root = tempdir().expect("tempdir");
         let paths = ServedPaths::from_home(root.path());
         let service = LoadedService {
@@ -1499,11 +1599,26 @@ mod tests {
         };
         let spec = LaunchSpec::from_loaded(&service);
 
-        write_transient_definition(&paths, "temporary", &spec).expect("write definition");
-        let path = paths.transient_definition("temporary");
-        let restored = read_transient_definition(&path).expect("read definition");
+        write_run_definition(&paths, "temporary", &spec).expect("write definition");
+        let path = paths.run_definition("temporary");
+        let restored = read_run_definition(&path).expect("read definition");
 
         assert_eq!(restored.spec, spec);
+        let original = fs::read(&path).unwrap();
+        write_run_definition(&paths, "temporary", &spec).unwrap();
+        let mut conflicting = spec.clone();
+        conflicting.config.command = "false".to_owned();
+        assert!(write_run_definition(&paths, "temporary", &conflicting).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(paths.run_registry_dir()).unwrap().count(), 1);
+        assert_eq!(
+            fs::metadata(paths.run_registry_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert_eq!(
             fs::metadata(path)
                 .expect("definition metadata")

@@ -52,7 +52,7 @@ A manager must already be running for service management commands;
 **edit**
 works without a manager.
 
-Service names are unique across enabled and temporary services.
+Service names are unique across enabled and run services.
 Multiple services may share a working directory.
 Lifecycle and history commands with no name match the current working directory.
 If several services match, the command fails and lists names to choose from.
@@ -121,20 +121,26 @@ Named commands work from any directory.
 
 **run**
 
-> Create and start a temporary service from the arguments after
+> Create and start a persistent run service from the arguments after
 > **-**&zwnj;**-**.
 > Arguments retain their original boundaries; use an explicit
 > **sh** **-c**
 > for shell syntax.
 > This command ignores all project configuration and dotenv files.
 > It prints the service name after successful creation.
-> Temporary services support the same management commands as enabled services.
+> Run services support the same management commands as enabled services.
 > They survive manager handoff and crash recovery while their runner remains alive.
-> Normal manager shutdown removes them; they do not restart after a host reboot.
+> Definitions are stored privately in ~/.config/served/run/&lt;name&gt;.json with the original
+> command, working directory, options, and complete environment snapshot.
+> Normal shutdown preserves them; the next manager start or host reboot restores them.
+> The restart policy controls program exits, not recovery at manager startup.
+> Missing directories or startup failures retain the definition for a later manager start.
+> Upgrade migrates matching legacy temporary definitions only when their runner is alive.
+> Migration preserves service PIDs; failed writes retain the old definition and process for retry.
 
 **disable**
 
-> Stop the named service and remove its enable record or temporary runtime definition.
+> Stop the named service and remove its enable record or persistent run definition.
 > Persistent logs remain available on disk.
 
 **start**
@@ -144,7 +150,7 @@ Named commands work from any directory.
 > A running, starting, or automatically restarting service is unchanged, without reloading configuration.
 > For a stopped enabled service, reload and validate its registered source before starting.
 > Invalid configuration leaves it stopped.
-> Temporary services reuse their original definition and environment.
+> Run services reuse their original definition and environment.
 
 **stop**
 
@@ -155,14 +161,14 @@ Named commands work from any directory.
 > Manual stop survives handoff, relinquish, and manager crash recovery while the runner is alive.
 > A live manager also preserves a known manual stop when replacing a failed runner.
 > If both are lost, there is no durable stop flag.
-> Normal shutdown followed by a fresh manager start, or a host reboot, starts enabled services again;
-> temporary services are not restored.
+> Normal shutdown followed by a fresh manager start, or a host reboot, starts both enabled and run services again.
+> Use disable to cancel future recovery.
 
 **restart**
 
 > Validate and reload an enabled service from its registered source before stopping its old process.
 > An invalid configuration or directory leaves the old process running.
-> Temporary services reuse their original launch definition.
+> Run services reuse their original launch definition.
 > Renaming an enabled service requires disable, configuration edit, and enable.
 > Restart also starts a stopped service.
 > There is no separate service-level reload command.
@@ -170,7 +176,7 @@ Named commands work from any directory.
 > Start and stop require a runner with support for these operations.
 > An older runner retained during an upgrade returns an error and is left unchanged.
 > Disable it, then enable again with its original configuration source and working directory override,
-> or run the temporary service again with its original arguments and environment.
+> or recreate the run service with its original arguments and environment.
 > This recreation discards in-memory history; persistent logs remain.
 
 **attach**
@@ -228,7 +234,7 @@ Named commands work from any directory.
 **shutdown**
 
 > Stop the manager and all managed runners.
-> Enabled registrations remain for the next manager start; temporary definitions are removed.
+> Enabled and run registrations remain for the next manager start.
 
 # OPTIONS
 
@@ -245,10 +251,11 @@ The global **-&#45;output** *text|json*
 option works before or after a subcommand; text is the default.
 JSON emits one newline-terminated document to stdout on success or failure.
 Diagnostics and tracing go to stderr.
-Success has schema\_version=1, ok=true, and data.
-Failure has schema\_version=1, ok=false, and error with code and message.
+Success has schema\_version=2, ok=true, and data.
+Failure has schema\_version=2, ok=false, and error with code and message.
 Codes are invalid\_arguments and operation\_failed; do not parse message text.
-List data contains services; run data contains name; path queries contain path.
+List data contains services with kind enabled or run; run data contains name; path queries contain path.
+Schema version 2 replaces the previous temporary kind with persistent run services.
 Other management actions return an empty data object.
 History data has service, id, current, persisted, raw\_bytes, total\_lines, and content.
 History --list data has service and records with id, bytes, current, and persisted.
@@ -317,7 +324,7 @@ While the manager is unavailable, the list is marked stale and service actions a
 Success messages clear after three seconds; errors remain until dismissed.
 In history, Enter opens a run; PageUp/PageDown and Home/End navigate its content.
 Actions Edit and standalone served edit share the configuration form in full builds.
-Edit remains visible but unavailable for temporary services.
+Edit remains visible but unavailable for run services.
 Closing the form from Actions returns to the service menu.
 
 # ENVIRONMENT

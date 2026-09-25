@@ -22,7 +22,7 @@ pub(super) struct Failure {
 impl Document {
     pub fn success(data: Value) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             ok: true,
             data: Some(data),
             error: None,
@@ -30,7 +30,7 @@ impl Document {
     }
     pub fn failure(code: &'static str, message: String) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             ok: false,
             data: None,
             error: Some(Failure { code, message }),

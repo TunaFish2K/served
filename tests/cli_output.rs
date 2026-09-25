@@ -11,7 +11,7 @@ fn cli(args: &[&str]) -> Output {
 fn document(output: &Output, status: i32) -> Value {
     assert_eq!(output.status.code(), Some(status), "{output:?}");
     let value: Value = serde_json::from_slice(&output.stdout).expect("one JSON document");
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["ok"], status == 0);
     assert_eq!(output.stdout.last(), Some(&b'\n'));
     assert!(output.stderr.is_empty(), "{output:?}");

@@ -1,6 +1,6 @@
 # ADR 0015：保留注册和历史的 start / stop
 
-- 状态：已接受
+- 状态：已接受；run 服务的冷启动恢复行为由 [ADR 0016](0016-persistent-run-services.md) 更新。
 - 日期：2026-09-23
 - 部分取代：V1 无独立 start/stop 命令的边界；ADR 0008、0011、0014 的恢复规则
 

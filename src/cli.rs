@@ -43,7 +43,7 @@ struct Cli {
     /// Print build version and capabilities (same as the version command).
     #[arg(short = 'V', long)]
     version: bool,
-    /// Output format for one-shot commands (JSON schema version 1).
+    /// Output format for one-shot commands (JSON schema version 2).
     #[arg(long, global = true, value_enum)]
     output: Option<OutputFormat>,
     #[command(subcommand)]
@@ -92,7 +92,7 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         workdir: Option<PathBuf>,
     },
-    /// Create a temporary service from command-line options and start it.
+    /// Create a persistent service from command-line options and start it.
     Run {
         /// Process working directory. Defaults to the invocation directory.
         #[arg(long, value_name = "DIR")]
@@ -821,7 +821,7 @@ fn format_state(state: &crate::protocol::ServiceState) -> &'static str {
 fn format_kind(kind: &ServiceKind) -> &'static str {
     match kind {
         ServiceKind::Enabled => "enabled",
-        ServiceKind::Temporary => "temporary",
+        ServiceKind::Run => "run",
     }
 }
 

@@ -44,18 +44,25 @@
   回退输入；项目 `.env` 不属于 served 配置。
 - **已启用服务**：`kind=enabled` 的服务。服务配置文件和启用记录定义该服务。manager
   启动时恢复该服务。
-- **临时服务**：`kind=temporary` 的服务。`served run` 的 argv 和选项定义该服务。该服务
-  不写项目配置或启用链接。manager 只用私有 runtime 描述接管活动 runner。
+- **run 服务**：`kind=run` 的持久服务。`served run` 的 argv 和选项定义该服务。
+  不写项目配置或启用链接，定义保存在 `$HOME/.config/served/run/<name>.json`。
 
 ## 已确认的决策
 
+- ADR 0016 替代 ADR 0011 的临时生命周期：run 默认持久托管，shutdown 保留定义，
+  下次 manager 启动恢复；stop 不取消冷启动恢复，disable 才删除注册。
+- run 定义保存在 `$HOME/.config/served/run/<name>.json`，包含原命令、目录、选项及完整环境快照。
+  目录和文件权限为 `0700`/`0600`。缺失目录或启动失败保留记录，可在修复后重新启动 manager。
+- 旧临时记录仅在 runner 存活且定义匹配时迁移；迁移不重启进程，写入失败保留旧记录并重试。
+- manager 协议 v10，JSON schema v2，服务类型为 enabled/run；runner 协议仍为 v1。
+
 - ADR 0015 定义 start/stop：stop 保留注册、runner 和历史，取消自动重启；start 只启动
   已受管的停止服务，运行、启动或退避中为无操作，不读取配置。已启用服务真正 start 前
-  重新加载并校验来源；临时服务复用创建定义。restart 也解除手动停止。
+  重新加载并校验来源；run 服务复用创建定义。restart 也解除手动停止。
 - 手动停止跨存活 runner 的 manager handoff、relinquish 和崩溃接管保留；接管不应用
   编辑后的配置。manager 存活时重建 runner 保留已知意图；两者都丢失时不承诺恢复。
-  正常 shutdown 后重启 manager 或主机重启，enabled 服务恢复，temporary 服务不恢复。
-- 公共协议 v9 增加 Start/Stop。runner additive v1 增加 StartService、StopService、
+  正常 shutdown 后重启 manager 或主机重启，enabled 和 run 服务都会恢复。
+- 公共协议 v9 引入 Start/Stop，当前协议为 v10。runner additive v1 增加 StartService、StopService、
   ConfigureStopped 及默认缺省的能力和停止标记。旧 Stop 继续完整关闭 runner。
   旧 runner 的新操作报错，不自动迁移；disable 后重新 enable/run 会丢失内存历史。
 - TUI 采用 [无框单列设计规范](docs/TUI-DESIGN.md)：Enter 打开动作菜单，? 显示上下文帮助。
@@ -78,18 +85,18 @@
 - 普通目录启用保留目录软链接；显式指定文件或工作目录时，用同位置的私有版本化 JSON
   记录保存配置来源和覆盖值。旧链接不迁移。restart 按原来源重新加载，CLI 覆盖持续
   生效；更换或清除覆盖需 disable 后重新 enable。
-- 服务名全局唯一，多个 enabled 或 temporary 服务可共用工作目录。管理命令只支持名称
+- 服务名全局唯一，多个 enabled 或 run 服务可共用工作目录。管理命令只支持名称
   或当前目录，不增加 `-f`。目录匹配多个服务时列出排序后的名称并拒绝操作。
-- `ServiceInfo.directory` 表示最终工作目录，`config_file` 表示已加载的配置路径，临时
+- `ServiceInfo.directory` 表示最终工作目录，`config_file` 表示已加载的配置路径，run
   服务为空。runner 只接收解析后的目录，不接收来源元数据或原始 `cwd`。
 
 - macOS 和 Linux/glibc 都支持 amd64、arm64。每种宿主架构都能构建同一系统的另一架构。
   外部守护程序以前台 `served daemon` 托管 manager；systemd 和 LaunchDaemon 是可选集成。
-- `served run [options] -- <program> [args...]` 创建临时服务。该命令忽略 `.served.json5`、
+- `served run [options] -- <program> [args...]` 创建 run 服务。该命令忽略 `.served.json5`、
   `.served.json` 和 `.env.served`。它使用 manager 环境快照，并应用 CLI `--env` 覆盖。它按
   原始 argv 边界执行命令。
-- 临时服务在显式 disable 前保持可管理。manager handoff、relinquish 和异常崩溃会保留
-  runner。正常 shutdown 和无活动 runner 的恢复路径会删除私有 runtime 描述。
+- run 服务在显式 disable 前保持可管理。manager handoff、relinquish 和异常崩溃会保留
+  runner。正常 shutdown 保留持久定义，无存活 runner 时按定义重新启动服务。
 - 直接 attach 进入备用屏幕，清屏并启用 raw mode。detach、EOF 或错误发生后，恢复 shell
   屏幕和终端模式。
 - TUI attach 继续使用 TUI 已持有的备用屏幕。它为服务会话清屏，detach 后完整重绘
@@ -173,3 +180,5 @@ relay。协议版本 3 增加精确的清理后历史行数。版本 5 增加结
 - attach 与管理界面独立，stdin EOF 后继续接收输出，取消仅解除连接。
 - `--output json` 使用版本化成功／错误封套；旧 `history --json` 保持兼容。字段、退出码和非交互行为见 [CLI 接口](docs/CLI-INTERFACE.md)。
 - 四个平台同时提供 full/headless 二进制和安装包；在线安装 `--variant` 可显式切换，省略时保留已安装类型。包内程序名称和服务单元不随类型变化。
+
+仅 handoff/relinquish 在握手阶段兼容旧 manager v9，确保升级时保留 runner；普通服务操作不降级。

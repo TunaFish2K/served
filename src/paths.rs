@@ -38,6 +38,14 @@ impl ServedPaths {
         self.config_home.join("served").join("enabled")
     }
 
+    pub fn run_registry_dir(&self) -> PathBuf {
+        self.config_home.join("served").join("run")
+    }
+
+    pub fn run_definition(&self, name: &str) -> PathBuf {
+        self.run_registry_dir().join(format!("{name}.json"))
+    }
+
     pub fn socket_path(&self) -> PathBuf {
         self.runtime_dir.join("served.sock")
     }

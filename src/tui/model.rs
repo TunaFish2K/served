@@ -376,7 +376,7 @@ impl MainUi {
                 if let Some(service) = self.services.get(self.selected) {
                     let kind = match service.kind {
                         crate::protocol::ServiceKind::Enabled => "enabled",
-                        crate::protocol::ServiceKind::Temporary => "temporary",
+                        crate::protocol::ServiceKind::Run => "run",
                     };
                     if service.name.width() > 24 || service.directory.width() > 40 {
                         text.push_str(&format!(
@@ -488,7 +488,7 @@ impl MainUi {
                 if action == ServiceAction::Edit && service.config_file.is_none() {
                     self.message = Some(Reader::new(
                         "Edit unavailable",
-                        "Temporary services have no editable configuration.",
+                        "Run services have no editable configuration.",
                     ));
                 } else if action == ServiceAction::Disable {
                     self.page = Page::ConfirmDisable {

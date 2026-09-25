@@ -13,15 +13,18 @@ served attach api --no-stdin | consumer
 producer | served attach api --stream
 ```
 
-## JSON 文档版本 1
+## JSON 文档版本 2
+
+版本 2 将服务类型 `temporary` 替换为 `run`，表示默认跨主机重启恢复的命令定义服务。
+manager 协议为 v10，客户端与 manager 需同步升级；runner 协议仍为 v1。
 
 全局参数 `--output text|json` 可放在子命令前后，默认 text。
 程序参数分隔符 `--` 之后的参数属于子进程，不再由 served 解析。
 每次调用向 stdout 写一个 JSON 文档，以换行结束。stderr 留给诊断和 tracing。
 
 ```json
-{"schema_version":1,"ok":true,"data":{"services":[]}}
-{"schema_version":1,"ok":false,"error":{"code":"operation_failed","message":"..."}}
+{"schema_version":2,"ok":true,"data":{"services":[]}}
+{"schema_version":2,"ok":false,"error":{"code":"operation_failed","message":"..."}}
 ```
 
 成功文档不含 error，失败文档不含 data。调用方先检查退出码和 ok，再读取数据。
@@ -40,7 +43,7 @@ producer | served attach api --stream
 | history --list | service、records 数组 |
 
 services 每项包含 name、directory、config_file（可为空）、kind、state、pid（可为空）、tty、restart、persist_logs、attach_active、output_tail。
-kind 为 enabled/temporary；state 为 starting/running/restarting/stopped/failed。
+kind 为 enabled/run；state 为 starting/running/restarting/stopped/failed。
 records 每项包含 id、bytes、current、persisted。
 历史内容经过终端控制序列清理；raw_bytes 是原始字节数，不是清理后内容的长度。
 
@@ -80,3 +83,5 @@ EOF、断管及退出行为属于 CLI 合约，不改变 manager/runner 的内�
 完整版在交互终端中运行 `served edit` 默认打开配置表单；`$EDITOR` 不覆盖默认表单。
 显式 `--editor`、无头版外部编辑器、`--path` 和非交互/JSON 约束保持不变。
 表单保存不启用服务；实际写入修改后，对正在运行的对应服务询问是否重启，默认 Not now。外部编辑器、无头版和非交互调用不增加询问。新建模板默认 on-failure 并开启日志持久化；已有文件省略字段的默认值及 served run 默认值不变。
+
+仅 handoff/relinquish 在握手阶段兼容旧 manager v9，确保升级时保留 runner；普通服务操作不降级。

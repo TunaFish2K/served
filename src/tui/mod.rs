@@ -641,7 +641,7 @@ mod tests {
             ui.key(KeyCode::Char('e'), false, 10),
             Intent::Act(ServiceAction::Edit, "api".into())
         );
-        ui.services[0].kind = ServiceKind::Temporary;
+        ui.services[0].kind = ServiceKind::Run;
         ui.services[0].config_file = None;
         ui.page = model::Page::Actions {
             selected: 4,
@@ -1908,7 +1908,7 @@ mod tests {
     fn footer_preserves_path_suffix_and_service_kind() {
         for kind in [
             crate::protocol::ServiceKind::Enabled,
-            crate::protocol::ServiceKind::Temporary,
+            crate::protocol::ServiceKind::Run,
         ] {
             for width in [40, 54, 80, 120] {
                 let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
@@ -1924,7 +1924,7 @@ mod tests {
                 let label = if kind == crate::protocol::ServiceKind::Enabled {
                     "enabled"
                 } else {
-                    "temporary"
+                    "run"
                 };
                 assert!(text.contains(&format!("终e\u{301} · {label}")), "{text}");
                 assert!(text.contains("enter actions   ? help   esc/q quit"));

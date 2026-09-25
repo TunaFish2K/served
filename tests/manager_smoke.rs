@@ -187,7 +187,7 @@ async fn custom_sources_and_shared_workdirs_survive_recovery() {
     else {
         panic!("list");
     };
-    assert_eq!(services.len(), 2);
+    assert_eq!(services.len(), 3);
     assert_eq!(
         services
             .iter()
@@ -384,13 +384,13 @@ async fn run_creates_a_full_temporary_service_without_reading_config_files() {
         .iter()
         .find(|service| service.name == "temporary")
         .expect("temporary service");
-    assert_eq!(temporary.kind, ServiceKind::Temporary);
+    assert_eq!(temporary.kind, ServiceKind::Run);
     assert!(!temporary.tty);
     assert!(temporary.persist_logs);
     assert_eq!(temporary.restart, "never");
     assert!(!paths.registry_dir().join("temporary").exists());
     assert_eq!(
-        fs::metadata(paths.transient_definition("temporary"))
+        fs::metadata(paths.run_definition("temporary"))
             .expect("transient definition")
             .permissions()
             .mode()
@@ -464,7 +464,7 @@ async fn run_creates_a_full_temporary_service_without_reading_config_files() {
         .expect("disable temporary service by directory");
     assert!(disable.status.success(), "disable failed: {disable:?}");
     wait_for_process_exit(restarted_pid).await;
-    assert!(!paths.transient_definition("temporary").exists());
+    assert!(!paths.run_definition("temporary").exists());
     assert!(paths.logs_dir().join("temporary").exists());
 }
 
@@ -516,7 +516,7 @@ async fn manager_crash_preserves_a_temporary_service_for_adoption() {
     first.kill().expect("kill first manager");
     first.wait().expect("reap first manager");
     assert!(process_exists(pid));
-    assert!(paths.transient_definition("temporary-adoption").exists());
+    assert!(paths.run_definition("temporary-adoption").exists());
 
     let replacement = Command::new(env!("CARGO_BIN_EXE_served"))
         .arg("daemon")
@@ -535,7 +535,7 @@ async fn manager_crash_preserves_a_temporary_service_for_adoption() {
         .expect("shutdown replacement manager");
     assert!(shutdown.status.success(), "shutdown failed: {shutdown:?}");
     wait_for_process_exit(pid).await;
-    assert!(!paths.transient_definition("temporary-adoption").exists());
+    assert!(paths.run_definition("temporary-adoption").exists());
 }
 
 #[tokio::test]
@@ -2242,7 +2242,7 @@ async fn start_stop_preserve_registration_history_and_reload_only_when_stopped()
         let temporary = h.status("temporary").await;
         h.ok(&["stop", "temporary"]);
         h.assert_stopped("temporary").await;
-        assert!(h.paths.transient_definition("temporary").exists());
+        assert!(h.paths.run_definition("temporary").exists());
         assert!(
             read_history(&h.paths, "temporary", "latest", 1024)
                 .await
@@ -2258,7 +2258,7 @@ async fn start_stop_preserve_registration_history_and_reload_only_when_stopped()
 }
 
 #[tokio::test]
-async fn stopped_services_survive_adoption_but_only_enabled_services_return_after_shutdown() {
+async fn stopped_services_survive_adoption_and_all_services_return_after_shutdown() {
     let mut h = LifecycleHarness::new().await;
     h.config(false, "printf 'kept-history\\n'; exec sleep 60", "always");
     h.ok(&["enable"]);
@@ -2318,8 +2318,10 @@ async fn stopped_services_survive_adoption_but_only_enabled_services_return_afte
     else {
         panic!("list")
     };
-    assert_eq!(services.len(), 1);
+    assert_eq!(services.len(), 2);
     assert_eq!(services[0].name, "api");
+    assert_eq!(services[1].name, "temporary");
+    wait_for_output_tail(&h.paths, "temporary", "original").await;
     h.shutdown().await;
 }
 
@@ -2668,7 +2670,7 @@ async fn json_cli_manages_services_and_enumerates_history_without_prompts() {
     fn value(output: std::process::Output) -> serde_json::Value {
         assert!(output.status.success(), "{output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["ok"], true);
         value["data"].clone()
     }
@@ -2693,6 +2695,7 @@ async fn json_cli_manages_services_and_enumerates_history_without_prompts() {
     wait_for_output_tail(&h.paths, "wrapper-api", "hello").await;
     let list = value(h.cli(&["list", "--output=json"]));
     assert_eq!(list["services"][0]["name"], "wrapper-api");
+    assert_eq!(list["services"][0]["kind"], "run");
     assert_eq!(list["services"][0]["state"], "running");
     let records = value(h.cli(&["history", "wrapper-api", "--list", "--output=json"]));
     assert_eq!(records["service"], "wrapper-api");
@@ -2728,5 +2731,202 @@ async fn json_cli_manages_services_and_enumerates_history_without_prompts() {
     assert_eq!(error.status.code(), Some(1));
     let error: serde_json::Value = serde_json::from_slice(&error.stdout).unwrap();
     assert_eq!(error["error"]["code"], "operation_failed");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_cold_start_preserves_definition_and_disable_prevents_recovery() {
+    for tty in [false, true] {
+        let mut h = LifecycleHarness::new().await;
+        let mut args = vec![
+            "run",
+            "--name",
+            "temporary",
+            "--env",
+            "SAVED=original",
+            "--persist-logs",
+        ];
+        if !tty {
+            args.push("--no-tty");
+        }
+        args.extend([
+            "--",
+            "sh",
+            "-c",
+            "printf '<%s>|<%s>\\n' \"$SAVED\" \"$1\"; exec sleep 60",
+            "sh",
+            "a b'$HOME",
+        ]);
+        h.ok(&args);
+        wait_for_output_tail(&h.paths, "temporary", "<original>|<a b'$HOME>").await;
+        let previous = h.status("temporary").await;
+        assert_eq!(previous.restart, "never");
+        let definition = fs::read(h.paths.run_definition("temporary")).unwrap();
+        // Lose both manager and runner; no graceful shutdown can preserve in-memory state.
+        h.daemon.0.kill().unwrap();
+        h.daemon.0.wait().unwrap();
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(previous.runner_pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap();
+        nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(previous.pid.unwrap() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap();
+        wait_for_process_exit(previous.runner_pid).await;
+        wait_for_process_exit(previous.pid.unwrap()).await;
+        fs::write(h.directory.join(".served.json5"), "invalid").unwrap();
+        h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+        wait_for_output_tail(&h.paths, "temporary", "<original>|<a b'$HOME>").await;
+        let restored = h.status("temporary").await;
+        assert_ne!(restored.runner_pid, previous.runner_pid);
+        assert_eq!(restored.spec, previous.spec);
+        assert_eq!(
+            fs::read(h.paths.run_definition("temporary")).unwrap(),
+            definition
+        );
+        assert!(h.paths.logs_dir().join("temporary/latest.log").exists());
+        // Fallback shutdown (manager unavailable) also keeps persistent registrations.
+        h.daemon.0.kill().unwrap();
+        h.daemon.0.wait().unwrap();
+        h.ok(&["shutdown"]);
+        assert_eq!(
+            fs::read(h.paths.run_definition("temporary")).unwrap(),
+            definition
+        );
+        h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+        wait_for_state(&h.paths, "temporary", ServiceState::Running).await;
+        h.ok(&["disable", "temporary"]);
+        assert!(!h.paths.run_definition("temporary").exists());
+        h.shutdown().await;
+        h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+        wait_for_path(&h.paths.socket_path()).await;
+        let Response::Services { services } =
+            client::request(&h.paths, Request::List).await.unwrap()
+        else {
+            panic!("list")
+        };
+        assert!(services.is_empty());
+        h.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn legacy_run_migration_preserves_pid_and_retries_failed_publication() {
+    let mut h = LifecycleHarness::new().await;
+    h.ok(&[
+        "run",
+        "--name",
+        "temporary",
+        "--no-tty",
+        "--",
+        "sleep",
+        "60",
+    ]);
+    wait_for_state(&h.paths, "temporary", ServiceState::Running).await;
+    let pid = service_pid(&h.paths, "temporary").await;
+    let record = fs::read(h.paths.run_definition("temporary")).unwrap();
+    h.ok(&["daemon", "--relinquish"]);
+    h.daemon.0.wait().unwrap();
+    fs::write(h.paths.transient_definition("temporary"), &record).unwrap();
+    fs::remove_file(h.paths.run_definition("temporary")).unwrap();
+    fs::remove_dir(h.paths.run_registry_dir()).unwrap();
+    fs::write(h.paths.run_registry_dir(), "blocks publication").unwrap();
+    h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+    wait_for_state(&h.paths, "temporary", ServiceState::Running).await;
+    assert_eq!(service_pid(&h.paths, "temporary").await, pid);
+    assert!(h.paths.transient_definition("temporary").exists());
+    fs::remove_file(h.paths.run_registry_dir()).unwrap();
+    h.ok(&["daemon", "--handoff"]);
+    assert_eq!(service_pid(&h.paths, "temporary").await, pid);
+    assert_eq!(
+        fs::read(h.paths.run_definition("temporary")).unwrap(),
+        record
+    );
+    assert!(!h.paths.transient_definition("temporary").exists());
+    // Simulate interruption after publication but before removal of the legacy record.
+    fs::write(h.paths.transient_definition("temporary"), &record).unwrap();
+    h.ok(&["daemon", "--handoff"]);
+    assert_eq!(service_pid(&h.paths, "temporary").await, pid);
+    assert!(!h.paths.transient_definition("temporary").exists());
+    h.shutdown().await;
+    // A legacy record without its runner must never become a new persistent registration.
+    fs::remove_file(h.paths.run_definition("temporary")).unwrap();
+    fs::create_dir_all(h.paths.runner_dir("temporary")).unwrap();
+    fs::write(h.paths.transient_definition("temporary"), record).unwrap();
+    h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+    wait_for_path(&h.paths.socket_path()).await;
+    assert!(!h.paths.run_definition("temporary").exists());
+    let Response::Services { services } = client::request(&h.paths, Request::List).await.unwrap()
+    else {
+        panic!("list")
+    };
+    assert!(services.is_empty());
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_missing_directory_retains_registration_and_reserves_name() {
+    let mut h = LifecycleHarness::new().await;
+    h.ok(&[
+        "run",
+        "--name",
+        "temporary",
+        "--no-tty",
+        "--",
+        "sleep",
+        "60",
+    ]);
+    wait_for_state(&h.paths, "temporary", ServiceState::Running).await;
+    let record = fs::read(h.paths.run_definition("temporary")).unwrap();
+    h.shutdown().await;
+    fs::remove_dir(&h.directory).unwrap();
+    h.daemon = DaemonGuard(LifecycleHarness::spawn(&h.home));
+    wait_for_path(&h.paths.socket_path()).await;
+    assert_eq!(
+        fs::read(h.paths.run_definition("temporary")).unwrap(),
+        record
+    );
+    fs::create_dir(&h.directory).unwrap();
+    assert!(
+        !h.cli(&["run", "--name", "temporary", "--", "true"])
+            .status
+            .success()
+    );
+    fs::write(
+        h.directory.join(".served.json5"),
+        r#"{name:'temporary',command:'true'}"#,
+    )
+    .unwrap();
+    assert!(!h.cli(&["enable"]).status.success());
+    h.ok(&["daemon", "--handoff"]);
+    wait_for_state(&h.paths, "temporary", ServiceState::Running).await;
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_run_creation_rolls_back_registration_without_launching() {
+    let mut h = LifecycleHarness::new().await;
+    fs::write(h.paths.run_registry_dir(), "blocks registration").unwrap();
+    assert!(
+        !h.cli(&["run", "--name", "blocked", "--", "sleep", "60"])
+            .status
+            .success()
+    );
+    assert!(!h.paths.runner_dir("blocked").exists());
+    fs::remove_file(h.paths.run_registry_dir()).unwrap();
+    fs::write(h.paths.runner_dir("blocked"), "blocks runner creation").unwrap();
+    assert!(
+        !h.cli(&["run", "--name", "blocked", "--", "sleep", "60"])
+            .status
+            .success()
+    );
+    assert!(!h.paths.run_definition("blocked").exists());
+    fs::remove_file(h.paths.runner_dir("blocked")).unwrap();
+    h.ok(&["run", "--name", "blocked", "--", "sleep", "60"]);
+    wait_for_state(&h.paths, "blocked", ServiceState::Running).await;
+    h.ok(&["disable", "blocked"]);
     h.shutdown().await;
 }

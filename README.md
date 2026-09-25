@@ -98,7 +98,7 @@ After the manager is running:
 2. Run `served edit` to create and edit `.served.json5`.
 3. Run `served enable` to enable and start the project service.
 
-To run a temporary service without project configuration, use `served run`:
+To run a run service without project configuration, use `served run`:
 
 ```bash
 served run -- python app.py
@@ -135,7 +135,7 @@ served edit -e <cmd>   Use the specified editor command
 served edit --path     Create a missing template and print its path
 served enable          Enable and start the current service
 served run [options] -- <program> [args...]
-                       Create a temporary service without project configuration
+                       Create a run service without project configuration
 served disable [name]  Disable the current or named service
 served start [name]    Start a stopped managed service
 served stop [name]     Stop a service and retain its registration and history
@@ -166,24 +166,23 @@ It keeps the registration, runner, and log history. `served start [name]` starts
 service; it does not register an unknown service. Both commands are idempotent. Start leaves a
 running, starting, or automatically restarting service unchanged, without reading edited configuration.
 When stopped, an enabled service reloads and validates its registered configuration before starting;
-a temporary service reuses its original command, options, and environment. Invalid configuration
+a run service reuses its original command, options, and environment. Invalid configuration
 leaves the service stopped. Restart also starts a stopped service.
 
 Manual stop survives manager handoff, relinquish, and crash recovery while the runner is alive.
-After normal shutdown and a fresh manager start, or a host reboot, enabled services start again;
-temporary services are removed. A live manager preserves a known manual stop when replacing a failed
+After normal shutdown and a fresh manager start, or a host reboot, both enabled and run services start again. A live manager preserves a known manual stop when replacing a failed
 runner. There is no durable stop flag if both manager and runner are lost. Stop closes attach sessions;
 history remains readable, and the next start creates a new run record.
 
-Client and manager use protocol v9. Handoff can retain an older runner that does not support
+Client and manager use protocol v10. Handoff can retain an older runner that does not support
 start/stop. These commands report an error without changing it. To use them, disable the service,
-then enable it again with its original configuration source and working-directory override, or run
-the temporary service again with its original arguments and environment. This recreation loses
+then enable it again with its original configuration source and working-directory override, or recreate
+the run service with its original arguments and environment. This recreation loses
 in-memory history; persistent logs remain.
 
-### Temporary Services
+### Services Created with run
 
-`served run` creates a managed temporary service in the current directory, or in `--workdir DIR`.
+`served run` creates a managed run service in the current directory, or in `--workdir DIR`.
 The manager must already be running. The command does not read or create `.served.json5`, the deprecated `.served.json`, or
 `.env.served`. It does not create an enabled registry link. After creation, the command prints the
 service name and exits.
@@ -209,14 +208,22 @@ directory. `served run` rejects a name conflict without changing the existing se
 Arguments after `--` keep their exact boundaries. served does not interpret shell syntax in these
 arguments. Use an explicit `sh -c` when a command requires pipes, redirects, or expansion.
 
-The TUI and `served list` show temporary services. You can attach to these services, read their
+The TUI and `served list` show run services. You can attach to these services, read their
 history, restart them, or disable them. After the program exits, the service remains stopped. You
-can still read its history or restart it. `served disable` removes the private runtime definition.
+can still read its history or restart it. `served disable` removes the persistent run definition.
 It keeps persistent logs.
 
-A manager handoff, relinquish, or unexpected crash keeps a live temporary service available for
-adoption. The manager validates its runner with a private runtime definition. Shutdown and a normal
-manager stop remove this definition. After a host reboot, the manager does not restore the service.
+Run definitions are stored in `$HOME/.config/served/run/<name>.json` with private permissions,
+including the original command, working directory, options, and complete environment snapshot.
+Shutdown preserves these records. The next manager start, including after a host reboot, restores
+the services even with `--restart never`; that option only controls restarts after a program exits.
+Use `disable` to cancel future recovery. Missing working directories or startup failures retain the
+record for a later manager start.
+
+A manager handoff, relinquish, or unexpected crash adopts surviving runners without restarting them.
+During upgrade, matching legacy temporary records with live runners are migrated without changing
+service PIDs. Old records without live runners are discarded. Failed migrations retain the old record
+and process and report an error; the next manager start retries migration.
 
 ## Service Configuration
 
@@ -247,7 +254,7 @@ and `enable` accept `-f`; use names for subsequent management.
 Ordinary directory enables retain the existing `~/.config/served/enabled/<name>` directory symlink.
 Enables with `-f` or `--workdir` instead store a private, versioned JSON record at that path, containing
 the source location and directory override. Existing links need no migration. Client and manager
-must both support manager protocol v9; runner protocol v1 remains compatible with existing runners.
+must both support manager protocol v10; runner protocol v1 remains compatible with existing runners.
 
 
 Run `served edit` in the service directory. If neither supported configuration file exists, served
@@ -321,7 +328,7 @@ Cyan highlights titles and keys; green, yellow, and red mark success, pending/wa
 Set `NO_COLOR=1` to disable colors while keeping selection and text cues.
 Press Enter for actions or `?` for contextual help. Use arrows or `j/k` to move and Esc/q to go back.
 The direct shortcuts remain: `a` attach, `s` start, `x` stop, `r` restart, `e` edit, `h` history, and `d` disable.
-Actions → Edit opens the service's registered configuration file. Temporary services show a disabled Edit entry. After closing the form, the service action menu is restored.
+Actions → Edit opens the service's registered configuration file. Run services show a disabled Edit entry. After closing the form, the service action menu is restored.
 
 Disable requires confirmation and defaults to Cancel. Operations report progress; success messages clear
 after three seconds, while errors remain readable until dismissed. During a manager disconnection,
@@ -543,9 +550,8 @@ signatures and are not notarized. The workflow does not build musl or Windows ta
   macOS LaunchDaemon are supported platform integrations.
 - Each managed service has an independent runner. The manager adopts it through a private runner
   socket.
-- After an unexpected manager restart, the manager scans the enabled registry and temporary runtime
-  definitions for live runners. It adopts matching runners without restarting their service
-  processes.
+- After an unexpected manager restart, the manager scans enabled and persistent run registrations. It adopts live
+  runners without restarting their processes and recreates services whose runners are absent.
 - A runner at `$HOME/.local/state/served/runtime/runners/<name>/` owns the service process,
   PTY, log cache, restart state, and crash-loop window. A manager crash does not stop these items.
 - `served shutdown` performs a graceful shutdown for all runners. `served disable` stops the

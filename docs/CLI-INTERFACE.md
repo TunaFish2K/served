@@ -1,6 +1,6 @@
 # CLI 封装接口
 
-完整版和无头版使用同一套 CLI。无头构建仅裁掉管理菜单；保留服务管理、终端 attach、管道 attach、PTY 和日志能力。
+完整版和无头版使用同一套 CLI。无头构建仅裁掉管理菜单和配置表单；保留服务管理、终端 attach、管道 attach、PTY 和日志能力。
 
 ```sh
 cargo build --release --no-default-features
@@ -76,3 +76,7 @@ stdin EOF 只结束客户端的输入读取，客户端继续等待服务输出�
 
 显式编辑器的失败状态沿用旧行为。取消调用或输出中途发生 I/O 错误时，不保证有完整 JSON 文档。
 EOF、断管及退出行为属于 CLI 合约，不改变 manager/runner 的内部协议。
+
+完整版在交互终端中运行 `served edit` 默认打开配置表单；`$EDITOR` 不覆盖默认表单。
+显式 `--editor`、无头版外部编辑器、`--path` 和非交互/JSON 约束保持不变。
+表单保存不启用或重启服务。

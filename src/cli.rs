@@ -73,7 +73,7 @@ enum Command {
         #[arg(long)]
         socket: std::path::PathBuf,
     },
-    /// Open a service configuration in an external editor.
+    /// Edit service settings in a form (full builds) or an external editor.
     Edit {
         /// Configuration path; defaults to .served.json5 or legacy .served.json.
         #[arg(short = 'f', long, value_name = "PATH")]
@@ -787,6 +787,11 @@ async fn edit_config(
         return Ok(json!({"path": path}));
     }
 
+    #[cfg(feature = "tui")]
+    if editor.is_none() {
+        crate::tui::config_form::run(path)?;
+        return Ok(json!({}));
+    }
     let editor = editor::resolve(editor)?;
     open_editor_or_exit(&editor, path).await?;
     Ok(json!({}))

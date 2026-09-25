@@ -62,12 +62,37 @@ Named commands work from any directory.
 
 **edit**
 
-> Open the selected configuration in an external editor.
+> Edit the selected configuration in a form (full builds) or an external editor.
 > **-f**, **-&#45;file** *file*
 > selects any filename; otherwise discover the default configuration in the current directory.
 > Create a commented JSON5 template when no configuration exists.
 > Explicit file selection also creates missing parent directories.
-> Existing text, including invalid configuration, is preserved. **-&#45;path**
+> Opening an existing file does not modify it.
+> The form has Basic, Runtime, Logs and Environment pages.
+> Left/Right changes pages; Up/Down selects a field; Enter edits; Space toggles.
+> Enter finishes input; Esc returns and keeps drafts, including invalid input.
+> Tab does not move focus.
+> Shift+Enter (supported terminals) or Ctrl+J inserts a newline in commands and environment values.
+> Long text wraps without changing stored content; Up/Down moves by visual rows.
+> PageUp/PageDown moves by one viewport; overflowing text has a right-hand scrollbar.
+> Environment names and values share one form.
+> Down from Name enters Value; Up from its first visual row returns to Name.
+> Footers show only essential actions: save, quit, and help on the overview, add on Environment, and back in field editors.
+> The environment overview shows each name and value on separate rows.
+> Existing entries have a Delete button below Value.
+> Down from the last visual row selects Delete; Enter requests confirmation, defaulting to Cancel.
+> Deletion changes the draft until saved.
+> Commands and values display dim whitespace markers without changing stored content.
+> Spaces use middle dots, tabs use an arrow and three dots, and actual line breaks have return markers.
+> Confirmation uses arrows and Enter, defaulting to keep editing or cancel.
+> Validation errors wrap in place; longer errors open a scrollable page.
+> Esc returns to the draft.
+> Ctrl+S validates and saves from the configuration overview; it does not write files while editing a field.
+> Ctrl+Q exits with an unsaved-changes prompt.
+> Ctrl+Z/Ctrl+Y undo or redo; Ctrl+R reloads; F1 shows keys for the current page or input.
+> Saving preserves comments and untouched properties and refuses concurrent file changes.
+> Saving does not enable or restart services.
+> Invalid JSON5 or unsupported fields require an explicit external editor. **-&#45;path**
 > creates a missing template and prints its absolute path without opening an editor.
 > Warnings go to standard error.
 > Non-terminal invocations require an explicit editor or --path.
@@ -285,7 +310,7 @@ Full service details are in the actions page help; PageUp/PageDown scroll the he
 While the manager is unavailable, the list is marked stale and service actions are blocked.
 Success messages clear after three seconds; errors remain until dismissed.
 In history, Enter opens a run; PageUp/PageDown and Home/End navigate its content.
-The TUI does not edit service configuration.
+Use served edit for the standalone configuration form in full builds.
 
 # ENVIRONMENT
 
@@ -296,7 +321,8 @@ The TUI does not edit service configuration.
 
 `EDITOR`
 
-> Editor fallback after a command-line editor.
+> External editor fallback in headless builds.
+> Full builds use the form unless --editor is explicit.
 > Otherwise search PATH for editor, sensible-editor, nvim, vim, vi, nano, micro, then hx.
 > Editor commands may contain arguments; the file path is appended as the last argument.
 

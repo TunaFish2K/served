@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/inst
 curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh -s -- --variant headless
 ```
 
-无头版裁掉管理菜单，保留全部 CLI、PTY 和终端／管道 attach。首次安装默认 full；升级时未指定
+无头版裁掉管理菜单和配置表单，保留全部 CLI、PTY 和终端／管道 attach。首次安装默认 full；升级时未指定
 `--variant` 会保留已安装类型，旧版本按 full 处理。显式 `--variant full` 可切回完整版。
 缺少所选类型的发布包时安装失败，不回退到另一类型。用 `served version --output json` 查询构建类型。
 
@@ -159,7 +159,7 @@ served daemon --handoff
 served daemon --relinquish
                        退出 manager，但保留 runner 供另一个守护程序接管
 served shutdown        停止 manager 和所有受管 runner
-served edit            用外部编辑器打开当前目录的 .served.json5
+served edit            编辑当前目录的 .served.json5（完整版使用表单）
 served edit -e <cmd>   指定编辑器命令，优先于 $EDITOR
 served edit --path     创建缺失模板后只打印选中的配置路径
 served enable          启用当前目录并立即运行
@@ -328,8 +328,8 @@ CLI 相对路径以调用目录为基准，配置中的相对 `cwd` 以配置文
 ## 默认服务配置
 
 在服务目录中运行 `served edit`。如果两种受支持的配置文件都不存在，命令会先在
-`.served.json5` 创建带详细注释的 JSON5 模板，再用外部编辑器打开。已有文件不会被重写或
-格式化。最小配置如下：
+`.served.json5` 创建带详细注释的 JSON5 模板。完整版打开配置表单，无头版打开外部编辑器。
+打开已有文件不会修改内容。最小配置如下：
 
 旧文件名 `.served.json` 仍受支持，内容仍按 JSON5 解析。只有旧文件时，served 会原地使用，
 不会自动改名，并输出弃用 warning。两个文件同时存在时，`.served.json5` 优先，served 会提示
@@ -393,11 +393,31 @@ manager 断连时保留旧列表并标记 stale，重连前禁止服务操作。
 主屏截断长名称和路径，操作页的 `?` 帮助提供完整信息，可用 PgUp/PgDn 滚动。不再显示随机 tips。
 新页面必须遵循 [TUI 设计规范](docs/TUI-DESIGN.md)，复用固定模板和组件。
 
-主 TUI 不再编辑服务配置。`served edit` 会直接把选中的配置文件交给外部编辑器：
-`-e/--editor COMMAND` 优先使用指定命令，其次使用 `$EDITOR`，最后按 `editor`、
-`sensible-editor`、`nvim`、`vim`、`vi`、`nano`、`micro`、`hx` 的顺序查找可执行文件。
-命令可以带参数，配置路径会作为最后一个参数传入。`--path` 会先创建缺失模板，然后只打印
-配置的绝对路径，并且与 `--editor` 互斥。没有可用编辑器时，命令会给出明确错误。
+完整版的 `served edit` 使用配置表单，分为 Basic、Runtime、Logs、Environment 四页。
+左右键切页，上下键选择字段，Enter 编辑，空格切换开关。Tab 不切换焦点。
+编辑时 Enter 完成输入，Esc 返回并保留草稿。命令和环境变量值支持 Shift+Enter 换行，
+Ctrl+J 作为兼容后备。长文本按窗口宽度自动折行，不改变实际内容；上下键按显示行移动，
+PgUp／PgDn 按视口高度移动。内容超出窗口时，右侧显示滚动条。
+
+环境变量名称和值同屏显示：名称中按下进入值，值的首个显示行按上返回名称，名称中 Enter 也可进入值。
+列表用 `a` 新增，不允许重复名称。已有变量的编辑表单内提供 Delete 按钮：值的最后一个显示行按下选中按钮，
+Enter 打开确认，默认取消。确认删除只改草稿，保存后才写入文件。无效输入同样保留，保存时定位错误。
+总览始终采用名称一行、值一行。线下仅提示必要操作：总览保存、退出和帮助，Environment 另加新增，字段编辑页仅返回。命令和变量值用弱化标记显示空白：
+空格 `·`、制表符 `→···`、换行 `↵`、CRLF `␍↵`；自动折行不加标记，也不改变实际内容。关闭 PTY 或日志持久化会禁用相关设置，但保留其值。
+
+返回配置主页面后用 Ctrl+S 校验并保存；字段编辑中 Ctrl+S 不写入文件。
+Ctrl+Q 退出并确认未保存的改动，默认继续编辑。确认页用方向键选择、Enter 确认，删除和重载默认取消。
+Ctrl+Z/Ctrl+Y 撤销或重做，
+校验错误原位换行；放不下时打开可滚动错误页，Esc 返回草稿。
+Ctrl+R 重新载入，F1 查看当前页面或输入项的简短按键表。保存只修改变动的属性，保留注释及未修改的源码；
+文件在外部被修改时会拒绝覆盖。保存不会启用或重启服务。
+语法错误或不支持的字段需要通过 `--editor` 编辑源码。
+
+`served edit -e "$EDITOR"` 显式使用外部编辑器。无头版始终使用外部编辑器：
+`-e/--editor COMMAND` 优先，其次是 `$EDITOR`，最后按 `editor`、`sensible-editor`、
+`nvim`、`vim`、`vi`、`nano`、`micro`、`hx` 的顺序查找。完整版默认表单不受 `$EDITOR` 影响。
+编辑器命令可以带参数，配置路径会作为最后一个参数传入。`--path` 创建缺失模板后打印绝对路径，
+与 `--editor` 互斥。非终端调用仍需显式指定 `--editor` 或 `--path`。
 
 ## Tag 发布
 

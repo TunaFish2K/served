@@ -415,7 +415,7 @@ fn template_source(directory: &Path) -> String {
         r#"// served service configuration (JSON5)
 //
 // This file is read by the manager when the service is enabled or restarted.
-// Existing files are never rewritten by `served edit`; keep your own comments.
+// The edit form preserves comments and changes only modified properties.
 {{
   // Globally unique service name. Use only letters, digits, '.', '_' and '-'.
   // Renaming an enabled service requires disabling and enabling it again.

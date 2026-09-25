@@ -23,6 +23,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+pub(crate) mod config_form;
 mod model;
 mod view;
 
@@ -567,10 +568,17 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let margin = if buffer.area.width < 80 { 1 } else { 2 };
         let mut selected = Vec::new();
+        for cell in &buffer.content {
+            if cell.bg == Color::Red {
+                assert_eq!(cell.fg, Color::Black);
+                assert!(!cell.modifier.contains(Modifier::REVERSED));
+            }
+        }
         for y in 3..buffer.area.height {
             if buffer[(margin + 2, y)]
                 .modifier
                 .contains(Modifier::REVERSED)
+                || buffer[(margin + 2, y)].bg == Color::Red
             {
                 for x in margin..margin + 2 {
                     let cell = &buffer[(x, y)];
@@ -580,7 +588,10 @@ mod tests {
                 }
             }
             let text: String = (margin + 2..buffer.area.width)
-                .filter(|&x| buffer[(x, y)].modifier.contains(Modifier::REVERSED))
+                .filter(|&x| {
+                    buffer[(x, y)].modifier.contains(Modifier::REVERSED)
+                        || buffer[(x, y)].bg == Color::Red
+                })
                 .map(|x| buffer[(x, y)].symbol())
                 .collect();
             if !text.trim().is_empty() {
@@ -1160,6 +1171,12 @@ mod tests {
                     assert!(body.contains("Disable"));
                 }
                 export_page(&terminal, name);
+                ui.key(KeyCode::Char('?'), false, rows);
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                export_page(&terminal, &format!("help-{name}"));
+                ui.key(KeyCode::Esc, false, rows);
                 let footer_line = lines.iter().position(|line| line.contains(keys)).unwrap();
                 for state in ["progress", "success", "offline", "recovered"] {
                     ui.unavailable = (state == "offline").then(|| "offline".into());
@@ -1517,6 +1534,9 @@ mod tests {
                     Page::ConfirmDisable { .. } => "Disable",
                 };
                 assert_selected(&terminal, expected);
+                if matches!(ui.page, Page::ConfirmDisable { .. }) {
+                    export_page(&terminal, "disable-confirm-selected");
+                }
             }
             let records = (0..2)
                 .map(|i| crate::protocol::HistoryRecord {
@@ -1622,16 +1642,25 @@ mod tests {
                 let buffer = terminal.backend().buffer();
                 let rows = view::main_rows(buffer.area, &ui) as u16;
                 for y in 3..3 + rows {
-                    let highlighted = buffer[(margin + 2, y)]
-                        .modifier
-                        .contains(Modifier::REVERSED);
+                    let danger = buffer[(margin + 2, y)].bg == Color::Red;
+                    let highlighted = danger
+                        || buffer[(margin + 2, y)]
+                            .modifier
+                            .contains(Modifier::REVERSED);
                     for x in margin + 2..margin + 14 {
                         assert_eq!(
                             buffer[(x, y)].modifier.contains(Modifier::REVERSED),
-                            highlighted
+                            highlighted && !danger
                         );
                         if highlighted {
-                            assert_eq!(buffer[(x, y)].fg, Color::Reset);
+                            assert_eq!(
+                                buffer[(x, y)].fg,
+                                if danger { Color::Black } else { Color::Reset }
+                            );
+                            assert_eq!(
+                                buffer[(x, y)].bg,
+                                if danger { Color::Red } else { Color::Reset }
+                            );
                         }
                     }
                     if !highlighted {
@@ -1656,9 +1685,13 @@ mod tests {
                     }
                     for x in [margin, margin + 1, margin + 14] {
                         assert!(!buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+                        assert_eq!(buffer[(x, y)].bg, Color::Reset);
                     }
                 }
                 assert_selected(&terminal, ServiceAction::ALL[selected].label());
+                if selected == ServiceAction::ALL.len() - 1 {
+                    export_page(&terminal, "disable-selected");
+                }
             }
         }
     }

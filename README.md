@@ -71,7 +71,7 @@ The default is the full build. For servers and wrappers, select the headless bui
 curl -fsSL https://raw.githubusercontent.com/TunaFish2K/served/main/scripts/install-online.sh | sh -s -- --variant headless
 ```
 
-Headless removes the management menu, while keeping all CLI commands, PTY support, and terminal/pipe attach.
+Headless removes the management menu and configuration form, while keeping all CLI commands, PTY support, and terminal/pipe attach.
 First installation defaults to full. Upgrades preserve the installed variant unless `--variant` is specified;
 older builds are treated as full. Use `--variant full` to switch back. A missing selected asset is an error,
 with no fallback to another variant. Query the build with `served version --output json`.
@@ -130,7 +130,7 @@ served daemon --handoff
 served daemon --relinquish
                        Exit the manager while keeping runners alive for another supervisor
 served shutdown        Stop the manager and all managed runners
-served edit            Open .served.json5 in an external editor
+served edit            Edit .served.json5 (form in full builds)
 served edit -e <cmd>   Use the specified editor command
 served edit --path     Create a missing template and print its path
 served enable          Enable and start the current service
@@ -251,8 +251,8 @@ must both support manager protocol v9; runner protocol v1 remains compatible wit
 
 
 Run `served edit` in the service directory. If neither supported configuration file exists, served
-creates a commented JSON5 template at `.served.json5` and opens it in your editor. served does not
-rewrite or format an existing file.
+creates a commented JSON5 template at `.served.json5`. Full builds open a configuration form;
+headless builds open an external editor. Opening an existing file does not change it.
 
 The old `.served.json` filename remains supported and is parsed as JSON5. When it is the only
 configuration, served uses it without renaming it and prints a deprecation warning. If both files
@@ -350,12 +350,36 @@ session starts and when the terminal changes. Set `syncRowsCols: false` to keep 
 size. A control connection can fail without stopping raw attach. The client reconnects in the
 background and sends the current size again. Detach does not reset the PTY size.
 
-The main TUI does not edit service configuration. Use `served edit` to open the selected
-configuration file in an external editor. `-e/--editor COMMAND` takes priority over `$EDITOR`. If neither is set,
-served searches `PATH` for `editor`, `sensible-editor`, `nvim`, `vim`, `vi`, `nano`, `micro`, then
-`hx`. The editor command can contain arguments. served adds the configuration path as the last
-argument. `--path` creates a missing template and prints its absolute path. `--path` conflicts with
-`--editor`.
+Use `served edit` for the configuration form in full builds. Basic, Runtime, Logs and Environment
+pages provide text fields, restart choices, switches and an environment variable list. Left/Right
+changes pages; Up/Down selects a field; Enter edits; Space toggles a switch. Tab does not move focus.
+Enter finishes input; Esc returns and keeps drafts, including invalid input. Shift+Enter (supported
+terminals) or Ctrl+J inserts a newline in commands and environment values. Long text wraps to the
+available width without changing the stored text. Up/Down moves by visual rows; PageUp/PageDown
+moves by one viewport. A scrollbar on the right shows the visible portion of overflowing text.
+
+Environment names and values share one form. Down from Name enters Value; Up from Value's first
+visual row returns to Name. Enter on Name also enters Value. `a` adds a variable. Existing entries have a Delete button:
+Down from the last visual row of Value selects it, and Enter opens a confirmation with Cancel selected.
+Deletion changes the draft; saving writes it to the file. Names must be unique. The overview shows
+each name and value on separate rows. Footers show only essential actions: save, quit, and help on the overview, add on Environment, and back in field editors.
+Commands and environment values display dim whitespace markers: `·` for spaces, `→···` for tabs,
+`↵` for line breaks and `␍↵` for CRLF. Soft wrapping adds no marker or character to the text.
+
+Return to the configuration overview and press Ctrl+S to validate and save; Ctrl+S does not write
+files while editing a field. Ctrl+Q exits with an unsaved-changes prompt that defaults to Continue editing.
+
+Choose an option with arrows and confirm with Enter; deletion and reload default to Cancel. Ctrl+Z/Ctrl+Y undo or redo;
+Ctrl+R reloads; F1 opens a short key table for the current page or input. Saving patches changed properties, preserving comments and untouched
+source text. Concurrent file changes block saving. Saving does not enable or restart a service.
+Validation errors wrap in place; longer errors open a scrollable page. Esc returns to the draft.
+Invalid JSON5 or unsupported fields require source editing with `--editor`.
+
+Use `served edit -e "$EDITOR"` to edit source explicitly. Headless builds always use an external
+editor: `-e/--editor COMMAND` takes priority over `$EDITOR`, followed by `editor`, `sensible-editor`,
+`nvim`, `vim`, `vi`, `nano`, `micro`, then `hx` on PATH. Full builds use the form unless `--editor`
+is explicit. Editor commands may contain arguments; served appends the configuration path.
+`--path` creates a missing template and prints its absolute path; it conflicts with `--editor`.
 
 ## Logs and Troubleshooting
 

@@ -37,6 +37,19 @@ fn selected_style() -> Style {
         .add_modifier(Modifier::REVERSED)
 }
 
+pub(super) fn danger_style(selected: bool) -> Style {
+    if selected && colors_enabled() {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Red)
+            .remove_modifier(Modifier::REVERSED)
+    } else if selected {
+        selected_style()
+    } else {
+        tone_style(Tone::Error)
+    }
+}
+
 pub(super) fn usable(area: Rect) -> bool {
     area.width >= 40 && area.height >= 10
 }
@@ -172,15 +185,7 @@ fn page(
     }
     let width = footer_width(footer) as u16;
     let keys = Rect::new(body.right() - width, footer_area.bottom() - 1, width, 1);
-    let mut spans = Vec::new();
-    for (index, (key, description)) in footer.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("   "));
-        }
-        spans.push(Span::styled(*key, tone_style(Tone::Accent)));
-        spans.push(Span::styled(format!(" {description}"), muted()));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), keys);
+    frame.render_widget(Paragraph::new(footer_line(footer)), keys);
     Some(PageAreas {
         body,
         detail: Rect::new(
@@ -197,7 +202,7 @@ fn page(
 }
 
 /// Measure terminal cells and retain whole grapheme clusters, including combining marks.
-fn clip(text: &str, width: usize, tail: bool) -> String {
+pub(super) fn clip(text: &str, width: usize, tail: bool) -> String {
     let text: String = text.chars().filter(|c| !c.is_control()).collect();
     if text.width() <= width {
         return text;
@@ -228,7 +233,7 @@ fn clip(text: &str, width: usize, tail: bool) -> String {
     }
 }
 
-fn wrapped(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrapped(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
     for source in text.split('\n') {
@@ -253,6 +258,16 @@ fn wrapped(text: &str, width: usize) -> Vec<String> {
 }
 
 fn list(frame: &mut Frame<'_>, area: Rect, items: Vec<ListItem<'_>>, selected: usize) -> ListState {
+    list_with_highlight(frame, area, items, selected, selected_style())
+}
+
+fn list_with_highlight(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    items: Vec<ListItem<'_>>,
+    selected: usize,
+    highlight: Style,
+) -> ListState {
     let mut state = ListState::default();
     if !items.is_empty() {
         state.select(Some(selected.min(items.len() - 1)));
@@ -260,7 +275,7 @@ fn list(frame: &mut Frame<'_>, area: Rect, items: Vec<ListItem<'_>>, selected: u
     // Reserve the same two-cell inset for every row, outside the highlight.
     let inset = area.width.min(2);
     frame.render_stateful_widget(
-        List::new(items).highlight_style(selected_style()),
+        List::new(items).highlight_style(highlight),
         Rect {
             x: area.x + inset,
             width: area.width - inset,
@@ -345,16 +360,89 @@ fn help_lines(content: &str, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+fn footer_line(footer: Footer) -> Line<'static> {
+    key_hints(footer, "   ")
+}
+
+pub(super) fn key_hints(footer: Footer, gap: &'static str) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, (key, description)) in footer.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(gap));
+        }
+        spans.push(Span::styled(*key, tone_style(Tone::Accent)));
+        spans.push(Span::styled(format!(" {description}"), muted()));
+    }
+    Line::from(spans)
+}
+
+pub(super) fn draw_help(
+    frame: &mut Frame<'_>,
+    title: &str,
+    content: &str,
+    scroll: &mut usize,
+    footer: Footer,
+) {
+    let area = frame.area();
+    if !usable(area) {
+        frame.render_widget(Paragraph::new("Resize to 40x10\nesc back"), area);
+        return;
+    }
+    let margin = if area.width < 80 { 1 } else { 2 };
+    let width = inner_width(area);
+    let x = area.x + margin;
+    let lines = help_lines(content, usize::from(width));
+    let total = lines.len();
+    let capacity = usize::from(area.height - 6);
+    *scroll = (*scroll).min(total.saturating_sub(capacity));
+    let visible: Vec<_> = lines.into_iter().skip(*scroll).take(capacity).collect();
+    let height = visible.len() as u16;
+    frame.render_widget(
+        Paragraph::new(clip(title, usize::from(width), false))
+            .style(tone_style(Tone::Accent).add_modifier(Modifier::BOLD)),
+        Rect::new(x, area.y + 1, width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(visible),
+        Rect::new(x, area.y + 3, width, height),
+    );
+    // Help key rows start two cells inside the reading area.
+    let footer_y = area.y + 4 + height;
+    let key_width = footer_width(footer) as u16;
+    frame.render_widget(
+        Paragraph::new(footer_line(footer)),
+        Rect::new(x + 2, footer_y, key_width, 1),
+    );
+    if total > capacity {
+        let available = width.saturating_sub(2 + key_width + 2);
+        let position = clip(
+            &format!("{}/{}", *scroll + 1, total),
+            usize::from(available),
+            true,
+        );
+        let position_width = position.width() as u16;
+        frame.render_widget(
+            Paragraph::new(position).style(muted()),
+            Rect::new(x + width - position_width, footer_y, position_width, 1),
+        );
+    }
+}
+
 pub(super) fn draw_reader(frame: &mut Frame<'_>, reader: &mut Reader, footer: Footer) {
-    let width = content_width(frame);
-    let lines = if footer == HELP {
-        help_lines(&reader.content, width)
-    } else {
-        wrapped(&reader.content, width)
-            .into_iter()
-            .map(Line::from)
-            .collect()
-    };
+    if footer == HELP {
+        draw_help(
+            frame,
+            &reader.title,
+            &reader.content,
+            &mut reader.scroll,
+            footer,
+        );
+        return;
+    }
+    let lines = wrapped(&reader.content, content_width(frame))
+        .into_iter()
+        .map(Line::from)
+        .collect();
     text_page(
         frame,
         &reader.title,
@@ -433,7 +521,13 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 .take(rows)
                 .map(|(i, action)| {
                     Line::from(vec![
-                        Span::styled("  ", Style::default().remove_modifier(Modifier::REVERSED)),
+                        Span::styled(
+                            "  ",
+                            Style::default()
+                                .fg(Color::Reset)
+                                .bg(Color::Reset)
+                                .remove_modifier(Modifier::REVERSED),
+                        ),
                         Span::styled(
                             format!("{:<10} ", action.label()),
                             if i != *selected && *action == ServiceAction::Disable {
@@ -452,7 +546,11 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                         ),
                     ])
                     .style(if i == *selected {
-                        selected_style()
+                        if *action == ServiceAction::Disable {
+                            danger_style(true)
+                        } else {
+                            selected_style()
+                        }
                     } else {
                         Style::default()
                     })
@@ -489,8 +587,11 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                     ..areas.body
                 },
             );
-            let items = vec![ListItem::new("Cancel"), ListItem::new("Disable")];
-            list(
+            let items = vec![
+                ListItem::new("Cancel"),
+                ListItem::new("Disable").style(danger_style(false)),
+            ];
+            list_with_highlight(
                 frame,
                 Rect {
                     y: areas.body.y + 1,
@@ -500,6 +601,11 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 },
                 items,
                 usize::from(*confirm),
+                if *confirm {
+                    danger_style(true)
+                } else {
+                    selected_style()
+                },
             );
             draw_service_detail(
                 frame,
@@ -863,6 +969,55 @@ mod tests {
                 assert!(!buffer[(start, 8)].modifier.contains(Modifier::DIM));
                 let description = start + footer[0].0.width() as u16 + 1;
                 assert!(buffer[(description, 8)].modifier.contains(Modifier::DIM));
+            }
+        }
+    }
+
+    #[test]
+    fn help_footer_follows_content_and_aligns_with_keys() {
+        for (width, height) in [(40, 10), (80, 24), (120, 40)] {
+            for count in [3, 100] {
+                for footer in [HELP, &[("esc", "back")][..]] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    let content = (0..count)
+                        .map(|i| format!("key  Row {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let mut scroll = usize::MAX;
+                    terminal
+                        .draw(|frame| draw_help(frame, "Help", &content, &mut scroll, footer))
+                        .unwrap();
+                    let visible = count.min(usize::from(height - 6));
+                    let y = 4 + visible as u16;
+                    let x = if width < 80 { 3 } else { 4 };
+                    let expected = footer
+                        .iter()
+                        .map(|(k, d)| format!("{k} {d}"))
+                        .collect::<Vec<_>>()
+                        .join("   ");
+                    let buf = terminal.backend().buffer();
+                    let actual: String = (x..x + expected.width() as u16)
+                        .map(|col| buf[(col, y)].symbol())
+                        .collect();
+                    assert_eq!(actual, expected);
+                    assert_eq!(buf[(x, 3)].symbol(), "k");
+                    assert!((0..width).all(|col| buf[(col, y - 1)].symbol() == " "));
+                    assert!(
+                        (y + 1..height)
+                            .all(|row| (0..width).all(|col| buf[(col, row)].symbol() == " "))
+                    );
+                    assert_eq!(scroll, count - visible);
+                    if count > visible {
+                        let position = format!("{}/{count}", scroll + 1);
+                        let margin = if width < 80 { 1 } else { 2 };
+                        let start = width - margin - position.width() as u16;
+                        assert!(start >= x + expected.width() as u16 + 2);
+                        let actual: String = (start..width - margin)
+                            .map(|col| buf[(col, y)].symbol())
+                            .collect();
+                        assert_eq!(actual, position);
+                    }
+                }
             }
         }
     }

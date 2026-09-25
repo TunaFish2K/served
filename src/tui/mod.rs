@@ -1619,7 +1619,18 @@ mod tests {
             terminal
                 .draw(|frame| draw_main(frame, &mut ui, progress))
                 .unwrap();
-            assert_eq!(terminal.backend().buffer()[(2, 10)].fg, color(expected));
+            let text = buffer_text(&terminal);
+            let row = text
+                .lines()
+                .position(|line| {
+                    line.contains(if progress.is_empty() {
+                        "started api"
+                    } else {
+                        progress
+                    })
+                })
+                .unwrap() as u16;
+            assert_eq!(terminal.backend().buffer()[(2, row)].fg, color(expected));
             export_page(&terminal, name);
         }
         ui.notice = None;
@@ -1627,8 +1638,13 @@ mod tests {
         terminal
             .draw(|frame| draw_main(frame, &mut ui, ""))
             .unwrap();
+        let text = buffer_text(&terminal);
+        let row = text
+            .lines()
+            .position(|line| line.contains("Manager unavailable"))
+            .unwrap() as u16;
         assert_eq!(
-            terminal.backend().buffer()[(2, 10)].fg,
+            terminal.backend().buffer()[(2, row)].fg,
             color(Color::Yellow)
         );
         ui.unavailable = None;

@@ -9,6 +9,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+// macOS TMPDIR can make the per-service Unix socket exceed sockaddr_un's limit.
+fn test_directory() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("served-form-")
+        .tempdir_in("/tmp")
+        .unwrap()
+}
+
 struct Session {
     child: Box<dyn Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
@@ -164,7 +172,7 @@ impl Session {
 
 #[test]
 fn form_saves_fields_and_guards_external_changes() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let path = directory.path().join("custom.json5");
     fs::write(&path, "// keep comment\n{name:'api', command:'true'}\n").unwrap();
     let mut session = Session::start(directory.path(), &["edit", "-f", "custom.json5"]);
@@ -205,7 +213,7 @@ fn form_saves_fields_and_guards_external_changes() {
 
 #[test]
 fn discard_and_explicit_external_editor() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let mut session = Session::start(directory.path(), &["edit"]);
     session.wait("Working directory");
     let path = directory.path().join(".served.json5");
@@ -219,10 +227,14 @@ fn discard_and_explicit_external_editor() {
     assert_eq!(fs::read_to_string(&path).unwrap(), original);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_served"))
         .current_dir(directory.path())
-        .args(["edit", "--editor", "printf external-editor"])
+        .args(["edit", "--editor", "printf '%s\\n' external-editor"])
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "external editor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("external-editor"));
     assert!(!output.stdout.contains(&0x1b));
 }
@@ -230,7 +242,7 @@ fn discard_and_explicit_external_editor() {
 #[test]
 fn first_time_enter_then_escape_preserves_multiline_draft_in_both_protocols() {
     for enhanced in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_directory();
         let path = directory.path().join(".served.json5");
         fs::write(&path, "{name:'api',command:'true'}").unwrap();
         let mut session = Session::start_mode(directory.path(), &["edit"], enhanced);
@@ -256,7 +268,7 @@ fn first_time_enter_then_escape_preserves_multiline_draft_in_both_protocols() {
 
 #[test]
 fn environment_name_and_value_share_a_form_and_save_only_from_overview() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let path = directory.path().join(".served.json5");
     let original = "{name:'api',command:'true'}";
     fs::write(&path, original).unwrap();
@@ -290,7 +302,7 @@ fn environment_name_and_value_share_a_form_and_save_only_from_overview() {
 
 #[test]
 fn delete_button_confirms_and_keeps_file_unchanged_until_save() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let path = directory.path().join(".served.json5");
     let original = "{name:'api',command:'true',env:{TOKEN:'secret'}}";
     fs::write(&path, original).unwrap();
@@ -399,7 +411,7 @@ fn edit_command_and_save(session: &mut Session) {
 
 #[test]
 fn saved_running_config_can_decline_restart_restart_or_handle_a_stopped_target() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_directory();
     let file = dir.path().join("custom.json5");
     fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
     std::os::unix::fs::symlink(&file, dir.path().join("alias.json5")).unwrap();
@@ -437,7 +449,7 @@ fn saved_running_config_can_decline_restart_restart_or_handle_a_stopped_target()
 
 #[test]
 fn actions_edit_uses_registered_file_and_save_exit_returns_to_actions() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_directory();
     fs::create_dir(dir.path().join("configs")).unwrap();
     let file = dir.path().join("configs/service.json5");
     fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
@@ -471,7 +483,7 @@ fn actions_edit_uses_registered_file_and_save_exit_returns_to_actions() {
 
 #[test]
 fn renamed_running_service_is_saved_without_automatic_reregistration() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_directory();
     let file = dir.path().join(".served.json5");
     fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
     let manager = Manager::start(dir.path());
@@ -495,7 +507,7 @@ fn renamed_running_service_is_saved_without_automatic_reregistration() {
 
 #[test]
 fn restart_failure_keeps_saved_file_and_running_process() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_directory();
     let file = dir.path().join(".served.json5");
     fs::write(&file, "{name:'api',command:'exec sleep 300'}").unwrap();
     let manager = Manager::start(dir.path());

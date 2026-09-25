@@ -78,7 +78,16 @@ fn footer_width(footer: Footer) -> usize {
         + footer.len().saturating_sub(1) * 3
 }
 
-fn footer_rows(width: u16, footer: Footer) -> u16 {
+fn shared_list(footer: Footer) -> bool {
+    footer == SERVICES || footer == ACTIONS || footer == EMPTY
+}
+
+fn footer_rows(width: u16, footer: Footer, items: Option<usize>) -> u16 {
+    let footer = if items.is_some() && shared_list(footer) {
+        SERVICES
+    } else {
+        footer
+    };
     if usize::from(width) >= footer_width(footer) + 2 + 20 {
         1
     } else {
@@ -97,10 +106,20 @@ fn work_width(area: Rect, items: Option<usize>) -> u16 {
 pub(super) fn body_rows(area: Rect, footer: Footer, items: Option<usize>) -> usize {
     let available = usize::from(
         area.height
-            .saturating_sub(5 + footer_rows(work_width(area, items), footer)),
+            .saturating_sub(5 + footer_rows(work_width(area, items), footer, items)),
     )
     .max(1);
-    items.map_or(available, |count| count.max(6).min(available))
+    items.map_or(available, |count| {
+        if shared_list(footer) {
+            (count.max(ServiceAction::ALL.len()) + 1).min(available)
+        } else {
+            count.max(6).min(available)
+        }
+    })
+}
+
+fn list_gap(rows: usize, footer: Footer, items: Option<usize>) -> usize {
+    usize::from(items.is_some() && shared_list(footer) && rows > ServiceAction::ALL.len())
 }
 
 pub(super) fn main_rows(area: Rect, ui: &MainUi) -> usize {
@@ -109,11 +128,13 @@ pub(super) fn main_rows(area: Rect, ui: &MainUi) -> usize {
     } else {
         Some(match ui.page {
             Page::Services => ui.services.len(),
-            Page::Actions { .. } => ServiceAction::ALL.len(),
+            Page::Actions { .. } => ui.services.len().max(ServiceAction::ALL.len()),
             Page::ConfirmDisable { .. } => 6,
         })
     };
-    body_rows(area, main_footer(ui), items)
+    let footer = main_footer(ui);
+    let rows = body_rows(area, footer, items);
+    rows - list_gap(rows, footer, items)
 }
 
 pub(super) fn main_footer(ui: &MainUi) -> Footer {
@@ -158,7 +179,12 @@ fn page(
         width,
         body_rows(area, footer, items) as u16,
     );
-    let footer_area = Rect::new(body.x, body.bottom() + 1, width, footer_rows(width, footer));
+    let footer_area = Rect::new(
+        body.x,
+        body.bottom() + 1,
+        width,
+        footer_rows(width, footer, items),
+    );
     let count = if count.is_empty() {
         String::new()
     } else {
@@ -188,7 +214,10 @@ fn page(
     let keys = Rect::new(body.right() - width, footer_area.bottom() - 1, width, 1);
     frame.render_widget(Paragraph::new(footer_line(footer)), keys);
     Some(PageAreas {
-        body,
+        body: Rect {
+            height: body.height - list_gap(usize::from(body.height), footer, items) as u16,
+            ..body
+        },
         detail: Rect::new(
             body.x,
             footer_area.y,
@@ -465,11 +494,10 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
         return;
     }
     let viewport = (frame.area().width, frame.area().height);
+    let visible_rows = main_rows(frame.area(), ui);
     if ui.viewport != viewport {
         if let Page::Actions { selected, scroll } = &mut ui.page {
-            *scroll = selected.saturating_sub(
-                body_rows(frame.area(), ACTIONS, Some(ServiceAction::ALL.len())).saturating_sub(1),
-            );
+            *scroll = selected.saturating_sub(visible_rows.saturating_sub(1));
         }
         ui.viewport = viewport;
     }
@@ -497,7 +525,7 @@ pub(super) fn draw_main(frame: &mut Frame<'_>, ui: &mut MainUi, progress: &str) 
                 &format!("{} / actions", service.name),
                 "",
                 ACTIONS,
-                Some(ServiceAction::ALL.len()),
+                Some(ui.services.len().max(ServiceAction::ALL.len())),
                 Tone::Accent,
             ) else {
                 return;

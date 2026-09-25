@@ -778,7 +778,8 @@ mod tests {
             );
             let buffer = terminal.backend().buffer();
             let margin = if width < 80 { 1 } else { 2 };
-            let line_y = 3 + view::main_rows(buffer.area, &ui) as u16;
+            let line_y =
+                3 + view::body_rows(buffer.area, view::SERVICES, Some(ui.services.len())) as u16;
             for x in margin..margin + (width - margin * 2).min(76) {
                 assert_eq!(buffer[(x, line_y)].symbol(), "─");
                 assert!(
@@ -1414,9 +1415,88 @@ mod tests {
     }
 
     #[test]
+    fn services_and_actions_share_height_and_keep_a_gap_when_space_allows() {
+        use model::Page;
+        for (width, height) in [(40, 10), (58, 16), (59, 16), (60, 16), (80, 24), (120, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut ui = MainUi::default();
+            // Reuse the UI while the collection grows and shrinks.
+            for count in [0usize, 1, 6, 7, 8, 50, 4, 1] {
+                ui.page = Page::Services;
+                ui.refresh(
+                    (0..count)
+                        .map(|i| {
+                            let mut service = service_info(false);
+                            service.name = format!("service-{i:02}");
+                            service
+                        })
+                        .collect(),
+                );
+                ui.selected = count.saturating_sub(1);
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let text = buffer_text(&terminal);
+                let lines: Vec<_> = text.lines().collect();
+                let separator = lines.iter().position(|line| line.contains("──")).unwrap();
+                let footer = lines
+                    .iter()
+                    .position(|line| line.contains("esc/q quit"))
+                    .unwrap();
+                let rows = view::main_rows(terminal.backend().buffer().area, &ui);
+                if height >= 16 {
+                    assert!(lines[separator - 1].trim().is_empty(), "{text}");
+                    assert_eq!(separator, 3 + rows + 1);
+                } else {
+                    assert_eq!(separator, 3 + rows);
+                }
+                if count == 4 {
+                    export_page(&terminal, "aligned-services");
+                }
+                if count == 0 {
+                    continue;
+                }
+                assert_selected(&terminal, &format!("service-{:02}", count - 1));
+                ui.page = Page::Actions {
+                    selected: 6,
+                    scroll: 0,
+                };
+                terminal
+                    .draw(|frame| draw_main(frame, &mut ui, ""))
+                    .unwrap();
+                let text = buffer_text(&terminal);
+                let lines: Vec<_> = text.lines().collect();
+                assert_eq!(
+                    lines.iter().position(|line| line.contains("──")),
+                    Some(separator)
+                );
+                assert_eq!(
+                    lines.iter().position(|line| line.contains("esc/q back")),
+                    Some(footer)
+                );
+                assert_eq!(view::main_rows(terminal.backend().buffer().area, &ui), rows);
+                assert_selected(&terminal, "Disable");
+                if height >= 16 {
+                    assert!(lines[separator - 1].trim().is_empty());
+                }
+                if count == 4 {
+                    ui.page = Page::Actions {
+                        selected: 4,
+                        scroll: 0,
+                    };
+                    terminal
+                        .draw(|frame| draw_main(frame, &mut ui, ""))
+                        .unwrap();
+                    export_page(&terminal, "aligned-actions");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn compact_lists_grow_then_scroll_without_stretching_to_window_width() {
         for (width, height) in [(40, 10), (60, 16), (80, 24), (120, 40)] {
-            for count in [0usize, 1, 6, 7, 50] {
+            for count in [0usize, 1, 6, 7, 8, 50] {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 let mut ui = MainUi::default();
                 ui.refresh(
@@ -1439,7 +1519,7 @@ mod tests {
                     .position(|line| line.contains("esc/q quit"))
                     .unwrap();
                 if height >= 24 {
-                    assert_eq!(footer_y, 4 + count.clamp(6, (height - 6) as usize));
+                    assert_eq!(footer_y, 4 + (count.max(7) + 1).min((height - 6) as usize));
                 }
                 if count > 0 {
                     assert_selected(&terminal, &format!("service-{:02}", count - 1));
